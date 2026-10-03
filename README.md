@@ -73,7 +73,20 @@ Lilu and AMFIPass may still be present if your EFI needs them for other patches,
 
 ### macOS Sonoma / Sequoia / Tahoe
 
-These releases require the restored legacy Apple Wi-Fi stack. The intended OpenCore load order is:
+These releases require the restored legacy Apple Wi-Fi stack.
+
+The required legacy Wi-Fi kexts can be found in the OpenCore Legacy Patcher repository:
+
+[OpenCore-Legacy-Patcher / payloads / Kexts / Wifi](https://github.com/dortania/OpenCore-Legacy-Patcher/tree/main/payloads/Kexts/Wifi)
+
+For AirPort-RTW, the relevant kexts from that folder are:
+
+- `IOSkywalkFamily.kext`
+- `IO80211FamilyLegacy.kext`
+
+You do **not** need `IO80211ElCap` or `corecaptureElCap` for the AirPort-RTW setup described here. Use versions that are compatible with your macOS release.
+
+The intended OpenCore load order is:
 
 1. Lilu
 2. AMFIPass
