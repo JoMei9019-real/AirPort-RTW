@@ -54,9 +54,26 @@ build/out/AirPortRTW.kext
 
 The project currently targets x86_64 Hackintosh systems and the Ventura IO80211FamilyLegacy ABI.
 
-## OpenCore setup for Sonoma / Sequoia / Tahoe
+## OpenCore setup by macOS version
 
-AirPort-RTW uses the restored legacy Apple Wi-Fi stack. The intended stack is:
+AirPort-RTW currently targets the Ventura-era IO80211 ABI. The OpenCore setup differs depending on the macOS version.
+
+### macOS Ventura (13)
+
+Ventura already ships the Apple Wi-Fi frameworks that AirPort-RTW targets. Do **not** inject the restored Sonoma+ legacy Wi-Fi stack on Ventura.
+
+1. Copy `AirPortRTW.kext` to `EFI/OC/Kexts/`.
+2. Add and enable `AirPortRTW.kext` under OpenCore `Kernel -> Add`.
+3. Leave the stock `com.apple.iokit.IOSkywalkFamily` enabled. Do **not** add an OpenCore `Kernel -> Block` entry for it.
+4. Do **not** add `IOSkywalkFamily.kext` or `IO80211FamilyLegacy.kext` from the Sonoma/Sequoia/Tahoe compatibility setup.
+5. Do not load the old Feixiao `rtw88.kext` at the same time as AirPortRTW; both would match the same PCI device.
+6. Reboot and verify that AirPortRTW attaches to the Realtek PCI device and that Wi-Fi appears in macOS.
+
+Lilu and AMFIPass may still be present if your EFI needs them for other patches, but they are not part of the Ventura-specific AirPort-RTW dependency chain described above.
+
+### macOS Sonoma / Sequoia / Tahoe
+
+These releases require the restored legacy Apple Wi-Fi stack. The intended OpenCore load order is:
 
 1. Lilu
 2. AMFIPass
@@ -64,9 +81,14 @@ AirPort-RTW uses the restored legacy Apple Wi-Fi stack. The intended stack is:
 4. IO80211FamilyLegacy
 5. AirPortRTW
 
-Block the stock `com.apple.iokit.IOSkywalkFamily` using OpenCore Kernel -> Block with Strategy `Exclude` for the applicable Darwin versions. SecureBootModel must be configured compatibly with the restored legacy stack.
+Block the stock `com.apple.iokit.IOSkywalkFamily` using OpenCore `Kernel -> Block` with Strategy `Exclude` for the applicable Darwin versions. `SecureBootModel` must be configured compatibly with the restored legacy stack.
 
 Do not load the old Feixiao `rtw88.kext` at the same time as AirPortRTW; both would match the same PCI device.
+
+### macOS Monterey and earlier
+
+Monterey and earlier releases are **not currently validated targets** for AirPort-RTW. The project is built around the Ventura IO80211 ABI, so the Ventura instructions should not be assumed to work unchanged on older releases. If support for an older release is added later, its required framework and OpenCore configuration will be documented here.
+
 
 ## Test plan
 
