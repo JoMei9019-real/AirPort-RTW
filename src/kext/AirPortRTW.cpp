@@ -766,27 +766,21 @@ IOReturn AirPortRTW::restoreAfterSystemWake()
         _intrSrc->enable();
 
     _scanCacheBootstrapAttempted = false;
-    _txStalled = false;
-    /* Preserve the user-visible radio state across sleep.  If Wi-Fi was off
-     * before suspend, do not restart AWDL discovery merely because the PCI
-     * function returned to D0.  A later IO80211 enable() owns that restart. */
-    if (_awdlManager && _pmRadioWasPowered) {
-        if (_pmAWDLSyncWasEnabled)
-            _awdlManager->resumeAfterPowerTransition();
-        _awdlManager->scheduleDiscovery();
-    }
 
-    /* The infrastructure association is intentionally not resurrected from
-     * hibernated RAM.  Firmware keys, RX PN state and AP sequence state are no
-     * longer trustworthy after a cold PCI resume.  Report a valid-but-down
-     * link so CoreWiFi performs a clean reassociation. */
+    /*
+     * Wake policy: macOS/CoreWiFi owns infrastructure reconnection.
+     *
+     * Do not resume AWDL discovery here.  AWDL uses the same single PHY and
+     * can schedule channel/timer work immediately after firmware restart.
+     * Keeping it out of the critical wake path removes a source of races while
+     * CoreWiFi performs its normal scan/auto-join sequence.
+     */
+    setProperty("PM_WAKE_AWDL_DEFERRED", kOSBooleanTrue);
+
+    /* The old association cannot be trusted after firmware/PCI restart.
+     * Publish a valid-but-down link before telling CoreWiFi that Wi-Fi power
+     * is available again. */
     (void)setLinkStatus(kIONetworkLinkValid | kIONetworkLinkNoNetworkChange);
-    if (_netif) {
-        _netif->postMessage(APPLE80211_M_POWER_CHANGED);
-        IOOutputQueue *q = getOutputQueue();
-        if (q) q->service(IOBasicOutputQueue::kServiceAsync);
-        kickGatedOutput();
-    }
 
 out:
     if (ret != kIOReturnSuccess) {
@@ -795,10 +789,37 @@ out:
         if (_intrSrc) _intrSrc->disable();
         if (_pciDev) _pciDev->setBusMasterEnable(false);
     }
+
     _pmLastWakeResult = ret;
     setProperty("PM_LAST_WAKE_RESULT", (uint64_t)(uint32_t)ret, 32);
+
+    /*
+     * Critical ordering:
+     * CoreWiFi may react synchronously to APPLE80211_M_POWER_CHANGED.
+     * Mark the controller ON and finish the PM transition BEFORE posting that
+     * notification; otherwise enable()/scan/associate can observe OFF or
+     * _pmTransition=true and return kIOReturnNotReady.
+     */
+    if (ret == kIOReturnSuccess)
+        _pmPowerState = kRTW88PowerStateOn;
     setProperty("PM_STATE", ret == kIOReturnSuccess ? "on" : "wake-failed");
     __atomic_store_n(&_pmTransition, false, __ATOMIC_RELEASE);
+
+    if (ret == kIOReturnSuccess) {
+        _txStalled = false;
+        if (_netif)
+            _netif->postMessage(APPLE80211_M_POWER_CHANGED);
+
+        /* Release normal traffic only after CoreWiFi can issue requests
+         * against a fully-online controller. */
+        IOOutputQueue *q = getOutputQueue();
+        if (q) q->service(IOBasicOutputQueue::kServiceAsync);
+        kickGatedOutput();
+
+        setProperty("PM_WAKE_COREWIFI_READY", kOSBooleanTrue);
+        IOLog("AirPortRTW: wake complete; CoreWiFi owns reconnect\n");
+    }
+
     return ret;
 }
 
