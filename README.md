@@ -38,7 +38,7 @@ This checks out:
 - AcidAnthera MacKernelSDK
 - thegwchr rtw88-stable
 
-Firmware blobs for the three initial chips are tracked in `firmware/`.
+The bootstrap script fetches the three required firmware blobs into `firmware/` reproducibly before building.
 
 ## Build
 
