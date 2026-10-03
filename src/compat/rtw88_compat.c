@@ -609,8 +609,28 @@ void rtw88_napi_enable(struct napi_struct *napi)
 
 void rtw88_napi_synchronize(struct napi_struct *napi)
 {
-    if (napi)
-        flush_work(&napi->work);
+    if (!napi)
+        return;
+
+    /*
+     * XNU workqueue adaptation:
+     *
+     * Linux napi_synchronize() can wait for an in-flight poll while the NAPI
+     * state machine prevents that poll from remaining perpetually scheduled
+     * during teardown.  Our compat worker requeues itself whenever a poll
+     * consumes its full budget and napi->enabled is still true.  rtw88 calls
+     * napi_synchronize() immediately before napi_disable() in
+     * rtw_pci_napi_stop(); leaving enabled set here can therefore make
+     * flush_work() wait forever during macOS sleep while RX keeps returning a
+     * full budget.
+     *
+     * Stop new/requeued polls first.  Any already executing poll is then
+     * allowed to finish, and a pending invocation observes enabled=false and
+     * exits without touching the hardware.  The following napi_disable() is
+     * consequently idempotent.
+     */
+    napi->enabled = false;
+    flush_work(&napi->work);
 }
 
 void rtw88_napi_disable(struct napi_struct *napi)
