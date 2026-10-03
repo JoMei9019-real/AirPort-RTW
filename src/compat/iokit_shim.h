@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
  * Kernel-safe forward declarations for IOKit / XNU C APIs.
  * Included by compat headers compiled as C with -mkernel.
- * When KERNEL is defined (C++ kext build), MacKernelSDK provides the real
+ * When KERNEL is defined (C++ kext build), the kernel SDK provides the real
  * definitions; we only emit stubs for the Linux driver C files.
  */
 #ifndef _RTW88_IOKIT_SHIM_H
@@ -18,7 +18,7 @@ extern void     IODelay(unsigned microseconds);
 extern void     IOSleep(unsigned milliseconds);
 
 #ifndef KERNEL
-/* These are provided by MacKernelSDK/IOLocks.h when KERNEL is defined.
+/* These are provided by the kernel SDK's IOLocks.h when KERNEL is defined.
  * For C driver files compiled without -DKERNEL we provide our own stubs. */
 
 /* ---- IOSimpleLock (interrupt-safe spinlock) ---- */
@@ -35,8 +35,8 @@ extern void             IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *lock,
 /* ---- IOLock (sleepable mutex) ---- */
 typedef struct IOLock IOLock;
 #ifndef THREAD_INTERRUPTIBLE
-#define THREAD_INTERRUPTIBLE 0
-#define THREAD_UNINT         1
+#define THREAD_INTERRUPTIBLE 1
+#define THREAD_UNINT         0
 #endif
 extern IOLock  *IOLockAlloc(void);
 extern void     IOLockFree(IOLock *lock);
@@ -72,15 +72,15 @@ extern void          thread_terminate(thread_t thread);
 /* ---- thread_call (deferred one-shot work, used for timers) ---- */
 #include <kern/thread_call.h>
 
-#else /* KERNEL defined — use real XNU types from MacKernelSDK */
+#else /* KERNEL defined — use real XNU types from the kernel SDK */
 
 #include <IOKit/IOLocks.h>
 #include <kern/thread_call.h>
 #include <mach/thread_act.h>
 
 #ifndef THREAD_INTERRUPTIBLE
-#define THREAD_INTERRUPTIBLE 0
-#define THREAD_UNINT         1
+#define THREAD_INTERRUPTIBLE 1
+#define THREAD_UNINT         0
 #endif
 
 #endif /* !KERNEL */
@@ -92,5 +92,7 @@ extern void clock_interval_to_deadline(uint32_t interval, uint32_t scale_factor,
                                         uint64_t *result);
 #define kMillisecondScale 1000000u
 #define kMicrosecondScale 1000u
+
+#include "rtw88_thread_call.h"
 
 #endif /* _RTW88_IOKIT_SHIM_H */

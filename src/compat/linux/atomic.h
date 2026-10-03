@@ -94,4 +94,6 @@ static inline unsigned long xchg(volatile unsigned long *ptr, unsigned long val)
 #define cmpxchg(ptr, old, new_val) \
     __sync_val_compare_and_swap(ptr, old, new_val)
 
+int atomic_dec_if_positive(atomic_t *);
+
 #endif /* _RTW88_COMPAT_ATOMIC_H */

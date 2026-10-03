@@ -3,6 +3,7 @@
 #define _RTW88_COMPAT_INTERRUPT_H
 
 #include "types.h"
+#include "workqueue.h"
 
 #define IRQF_SHARED     0x00000080
 #define IRQF_DISABLED   0x00000020
@@ -40,7 +41,14 @@ void rtw88_devm_free_irq(struct device *dev, unsigned int irq, void *dev_id);
 static inline void enable_irq(unsigned int irq) {}
 static inline void disable_irq(unsigned int irq) {}
 static inline void disable_irq_nosync(unsigned int irq) {}
-static inline void synchronize_irq(unsigned int irq) {}
+/* rtw_pci_stop() must wait for an already queued threaded bottom half before
+ * NAPI and DMA rings are destroyed (sleep/disable included). */
+void rtw88_synchronize_irq(void);
+static inline void synchronize_irq(unsigned int irq)
+{
+    (void)irq;
+    rtw88_synchronize_irq();
+}
 
 /* tasklet — simplified to direct call in our context */
 struct tasklet_struct {
@@ -69,27 +77,38 @@ struct napi_struct {
     struct net_device *dev;
     int (*poll)(struct napi_struct *, int);
     int weight;
-    int running;
-    void *thread_call;
+    bool enabled;
+    struct work_struct work;
 };
 
 void rtw88_netif_napi_add(struct net_device *dev, struct napi_struct *napi, int (*poll_fn)(struct napi_struct *, int));
 #define netif_napi_add rtw88_netif_napi_add
 
-static inline void napi_enable(struct napi_struct *napi) {}
-static inline void napi_disable(struct napi_struct *napi) {}
+void rtw88_napi_enable(struct napi_struct *napi);
+void rtw88_napi_disable(struct napi_struct *napi);
+void rtw88_napi_synchronize(struct napi_struct *napi);
+#define napi_enable rtw88_napi_enable
+#define napi_disable rtw88_napi_disable
+#define napi_synchronize rtw88_napi_synchronize
 
 void rtw88_napi_schedule(struct napi_struct *napi);
 #define napi_schedule rtw88_napi_schedule
 
-static inline void napi_complete(struct napi_struct *napi) {}
-static inline int napi_reschedule(struct napi_struct *napi) { return 0; }
-static inline void napi_synchronize(struct napi_struct *napi) {}
+static inline void napi_complete(struct napi_struct *napi) { (void)napi; }
+static inline int napi_reschedule(struct napi_struct *napi)
+{
+    rtw88_napi_schedule(napi);
+    return 1;
+}
 
 void rtw88_netif_napi_del(struct napi_struct *napi);
 #define netif_napi_del rtw88_netif_napi_del
 
-static inline int napi_complete_done(struct napi_struct *napi, int work) { return 1; }
+static inline int napi_complete_done(struct napi_struct *napi, int work)
+{
+    (void)napi; (void)work;
+    return 1;
+}
 
 extern irq_handler_t g_irq_handler;
 extern irq_handler_t g_irq_thread_fn;

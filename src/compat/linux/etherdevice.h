@@ -69,4 +69,6 @@ static inline int ether_addr_equal_masked(const u8 *a, const u8 *b,
     return 1;
 }
 
+void get_random_mask_addr(u8 *, const u8 *, const u8 *);
+
 #endif /* _RTW88_COMPAT_ETHERDEVICE_H */

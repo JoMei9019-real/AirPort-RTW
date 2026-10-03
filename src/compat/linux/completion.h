@@ -63,7 +63,7 @@ static inline unsigned long wait_for_completion_timeout(struct completion *c,
     IOLockLock(c->lock);
     while (!c->done) {
         IOLockUnlock(c->lock);
-        if (time_after_eq(jiffies, deadline)) { IOLockLock(c->lock); return 0; }
+        if (time_after_eq(jiffies, deadline)) return 0;
         IOSleep(1);
         IOLockLock(c->lock);
     }
