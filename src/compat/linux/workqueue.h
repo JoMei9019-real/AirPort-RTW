@@ -15,7 +15,10 @@ typedef void (*work_func_t)(struct work_struct *work);
 struct work_struct {
     work_func_t      func;
     struct list_head entry;
-    unsigned long    pending;
+    unsigned long    pending; /* 1: queued, 2: delayed timer */
+    struct workqueue_struct *wq;
+    bool executing;
+    bool canceling;
 };
 
 struct delayed_work {
@@ -28,17 +31,22 @@ struct workqueue_struct {
     IOLock          *lock;
     struct list_head queue;
     int              running;
-    volatile int     done;
+    int              done;
+    unsigned int     active;
     char             name[64];
 };
 
 #define INIT_WORK(_work, _func) \
     do { (_work)->func = (_func); \
          INIT_LIST_HEAD(&(_work)->entry); \
-         (_work)->pending = 0; } while (0)
+         (_work)->pending = 0; (_work)->wq = NULL; \
+         (_work)->executing = false; (_work)->canceling = false; } while (0)
 
 #define INIT_DELAYED_WORK(_dwork, _func) \
-    INIT_WORK(&(_dwork)->work, _func)
+    do { INIT_WORK(&(_dwork)->work, _func); \
+         timer_setup(&(_dwork)->timer, rtw88_delayed_work_timer_fn, 0); } while (0)
+
+void rtw88_delayed_work_timer_fn(struct timer_list *t);
 
 extern struct workqueue_struct *system_wq;
 extern struct workqueue_struct *system_long_wq;
@@ -84,5 +92,7 @@ static inline bool mod_delayed_work(struct workqueue_struct *wq,
 
 int  rtw88_workqueue_init(void);
 void rtw88_workqueue_exit(void);
+
+struct workqueue_struct *create_singlethread_workqueue(const char *);
 
 #endif /* _RTW88_COMPAT_WORKQUEUE_H */

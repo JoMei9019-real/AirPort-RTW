@@ -43,10 +43,6 @@ struct pci_device_id {
 #define PCI_DEVICE_ID_RTL8822C  0xC822
 /* rtw8821CE */
 #define PCI_DEVICE_ID_RTL8821C  0xC821
-/* rtw8812AE */
-#define PCI_DEVICE_ID_RTL8812A  0x8812
-/* rtw8814AE */
-#define PCI_DEVICE_ID_RTL8814A  0x8813
 
 struct pci_dev {
     u16 vendor;

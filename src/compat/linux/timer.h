@@ -42,4 +42,6 @@ static inline int timer_pending(const struct timer_list *timer)
     return timer->active;
 }
 
+int timer_delete_sync(struct timer_list *);
+
 #endif /* _RTW88_COMPAT_TIMER_H */

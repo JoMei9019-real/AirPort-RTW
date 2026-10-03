@@ -18,6 +18,16 @@
 #include "../linux/etherdevice.h"
 #include "../linux/slab.h"
 
+struct regulatory_request;
+struct ieee80211_link_sta;
+struct ieee80211_ampdu_params;
+struct ieee80211_channel_switch;
+struct ieee80211_low_level_stats;
+struct cfg80211_wowlan;
+struct cfg80211_sar_specs;
+struct ieee80211_tx_queue_params;
+struct cfg80211_bitrate_mask;
+
 /* ------------------------------------------------------------------ */
 /*  802.11 frame control / header                                       */
 /* ------------------------------------------------------------------ */
@@ -591,6 +601,14 @@ struct ieee80211_tx_info {
     };
 };
 
+#ifdef __cplusplus
+static_assert(sizeof(struct ieee80211_tx_info) <= sizeof(((struct sk_buff *)0)->cb),
+              "TX metadata exceeds skb control block");
+#else
+_Static_assert(sizeof(struct ieee80211_tx_info) <= sizeof(((struct sk_buff *)0)->cb),
+               "TX metadata exceeds skb control block");
+#endif
+
 static inline struct ieee80211_tx_info *IEEE80211_SKB_CB(struct sk_buff *skb)
 {
     return (struct ieee80211_tx_info *)skb->cb;
@@ -847,7 +865,7 @@ struct ieee80211_ops {
                               u64 changed);
     int  (*conf_tx)(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
                     u32 link_id, u16 ac,
-                    const void *params);
+                    const struct ieee80211_tx_queue_params *params);
     void (*wake_tx_queue)(struct ieee80211_hw *hw, struct ieee80211_txq *txq);
     int  (*set_key)(struct ieee80211_hw *hw, enum set_key_cmd cmd,
                     struct ieee80211_vif *vif, struct ieee80211_sta *sta,
@@ -858,7 +876,7 @@ struct ieee80211_ops {
     void (*sw_scan_start)(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
                           const u8 *mac_addr);
     void (*sw_scan_complete)(struct ieee80211_hw *hw, struct ieee80211_vif *vif);
-    int  (*set_rts_threshold)(struct ieee80211_hw *hw, u32 value);
+    int  (*set_rts_threshold)(struct ieee80211_hw *hw, int radio_idx, u32 value);
     void (*link_sta_rc_update)(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
                                struct ieee80211_link_sta *link_sta, u32 changed);
     bool (*can_aggregate_in_amsdu)(struct ieee80211_hw *hw,
@@ -876,10 +894,10 @@ struct ieee80211_ops {
                                int type); /* enum ieee80211_roc_type */
     int  (*cancel_remain_on_channel)(struct ieee80211_hw *hw,
                                      struct ieee80211_vif *vif);
-    void (*set_bitrate_mask)(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-                              const void *mask);
-    int  (*set_antenna)(struct ieee80211_hw *hw, u32 tx_ant, u32 rx_ant);
-    int  (*get_antenna)(struct ieee80211_hw *hw, u32 *tx_ant, u32 *rx_ant);
+    int  (*set_bitrate_mask)(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+                              const struct cfg80211_bitrate_mask *mask);
+    int  (*set_antenna)(struct ieee80211_hw *hw, int radio_idx, u32 tx_ant, u32 rx_ant);
+    int  (*get_antenna)(struct ieee80211_hw *hw, int radio_idx, u32 *tx_ant, u32 *rx_ant);
     int  (*get_survey)(struct ieee80211_hw *hw, int idx, void *survey);
     void (*flush)(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
                   u32 queues, bool drop);
@@ -971,6 +989,7 @@ struct ieee80211_ampdu_params {
 
 /* Implemented in rtw88_compat.c */
 void rtw88_register_hw(struct ieee80211_hw *hw);
+void rtw88_unregister_hw(struct ieee80211_hw *hw);
 /* rtw88_get_hw: external-linkage accessor for the static g_rtw88_hw pointer.
  * Use this instead of 'extern struct ieee80211_hw *g_rtw88_hw' — the variable
  * has internal linkage so a direct extern declaration is UB and resolves to an
@@ -1003,9 +1022,8 @@ static inline struct ieee80211_hw *ieee80211_alloc_hw(size_t priv_data_len,
     hw->priv = (u8 *)hw + sizeof(*hw);
     hw->wiphy = (struct wiphy *)kzalloc(sizeof(struct wiphy), GFP_KERNEL);
     if (!hw->wiphy) { kfree(hw); return NULL; }
-    /* Store rtwdev (= hw->priv) at wiphy offset 0 so that
-     * wiphy_to_ieee80211_hw can return (ieee80211_hw*)wiphy
-     * and callers reading hw->priv (offset 0) get rtwdev. */
+    /* Device context for compatibility helpers. The hw accessor returns
+     * the registered ieee80211_hw allocation, not a cast of this wiphy. */
     hw->wiphy->_dev = hw->priv;
     hw->ops = ops;
     hw->conf.chandef.chan   = &s_default_chan;
@@ -1016,6 +1034,7 @@ static inline struct ieee80211_hw *ieee80211_alloc_hw(size_t priv_data_len,
 
 static inline void ieee80211_free_hw(struct ieee80211_hw *hw)
 {
+    rtw88_unregister_hw(hw);
     if (hw) kfree(hw->wiphy);
     kfree(hw);
 }
@@ -1427,5 +1446,21 @@ static inline void init_waitqueue_head(wait_queue_head_t *wq)
 #define wait_event_interruptible(wq, cond)  ({ (void)(cond); 0; })
 #define wait_event_timeout(wq, cond, to)    ({ (void)(cond); 1; })
 
+
+/* Out-of-line compatibility helpers: declarations must be visible to C callers. */
+void ieee80211_queue_work(struct ieee80211_hw *, struct work_struct *);
+void ieee80211_queue_delayed_work(struct ieee80211_hw *, struct delayed_work *, unsigned long);
+struct ieee80211_sta *ieee80211_find_sta(struct ieee80211_vif *, const u8 *);
+struct ieee80211_sta *ieee80211_find_sta_by_ifaddr(struct ieee80211_hw *, const u8 *, const u8 *);
+void ieee80211_purge_tx_queue(struct ieee80211_hw *, struct sk_buff_head *);
+void ieee80211_restart_hw(struct ieee80211_hw *);
+int ieee80211_start_tx_ba_session(struct ieee80211_sta *, u16, u16);
+void ieee80211_stop_tx_ba_cb_irqsafe(struct ieee80211_vif *, const u8 *, u16);
+void ieee80211_tx_info_clear_status(struct ieee80211_tx_info *);
+void ieee80211_txq_get_depth(struct ieee80211_txq *, unsigned long *, unsigned long *);
+u8 ieee80211_vif_type_p2p(struct ieee80211_vif *);
+int cfg80211_get_ies_channel_number(const u8 *, size_t, enum nl80211_band);
+bool cfg80211_ssid_eq(struct cfg80211_ssid *, struct cfg80211_ssid *);
+int regulatory_hint(struct wiphy *, const char *);
 
 #endif /* _RTW88_COMPAT_MAC80211_H */
