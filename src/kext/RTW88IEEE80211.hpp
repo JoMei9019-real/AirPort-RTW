@@ -1,3 +1,4 @@
+/* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
  * RTW88IEEE80211.hpp — 802.11 state machine for rtw88 macOS port.
  *
@@ -25,13 +26,94 @@ struct ieee80211_hw;
 struct ieee80211_vif;
 struct ieee80211_sta;
 struct ieee80211_channel;
+struct ieee80211_scan_request;
 struct sk_buff;
 
+/* Eventos async para integracion nativa (AirPortRTW) */
+enum RTW88Event {
+    kRTW88EventScanDone,
+    kRTW88EventAssocDone,
+    kRTW88EventDeauth,
+    kRTW88EventDisconnected,
+    kRTW88EventRSSIChanged,
+};
+
+class RTW88EventDelegate {
+public:
+    virtual void rtw88Event(RTW88Event ev, void *data) = 0;
+    virtual ~RTW88EventDelegate() {}
+};
+
 class RTW88PCIDevice;
+
+/* Interfaz de acceso a hardware compartida -- antes _pci_io_ops llamaba
+ * directo a metodos de RTW88PCIDevice via g_pci_dev_instance (tipado a
+ * esa clase). Ahora cualquiera de los dos kexts (RTW88PCIDevice o
+ * AirPortRTW) puede implementarla, y g_pci_dev_instance pasa a ser
+ * de este tipo generico. */
+/* Struct compartida para tracking de buffers DMA -- antes vivia solo
+ * adentro de RTW88PCIDevice; ahora la comparten ambas clases. */
+struct RTW88DMAEntry {
+    IOBufferMemoryDescriptor *desc;
+    void    *virt;
+    IOPhysicalAddress phys;
+    size_t   size;
+    void    *orig_va;
+    RTW88DMAEntry *next;
+};
+
+class RTW88HwOps;
+extern RTW88HwOps *g_pci_dev_instance;
+struct pci_ops_rtw88;
+struct rtw88_dma_alloc_ops;
+extern struct pci_ops_rtw88 _pci_io_ops;
+extern struct rtw88_dma_alloc_ops _dma_ops;
+
+class RTW88HwOps {
+public:
+    virtual UInt8  pciReadByte(int offset) = 0;
+    virtual UInt16 pciReadWord(int offset) = 0;
+    virtual UInt32 pciReadDword(int offset) = 0;
+    virtual void   pciWriteByte(int offset, UInt8 val) = 0;
+    virtual void   pciWriteWord(int offset, UInt16 val) = 0;
+    virtual void   pciWriteDword(int offset, UInt32 val) = 0;
+    virtual int    pciFindCapability(int cap) = 0;
+    virtual volatile void *mmioBase() const = 0;
+    virtual void  *allocCoherent(size_t size, IOPhysicalAddress *phys) = 0;
+    virtual void   freeCoherent(size_t size, void *virt, IOPhysicalAddress phys) = 0;
+    virtual void   freeCoherentByPhys(IOPhysicalAddress phys) = 0;
+    virtual void   setBounceOrigVA(IOPhysicalAddress phys, void *orig_va) = 0;
+    virtual void   syncBounceForCpu(IOPhysicalAddress dma, size_t size) = 0;
+    virtual void   resumeTxIfStalled() = 0;
+    virtual ~RTW88HwOps() {}
+};
+
+
+/* Interfaz minima que necesita RTW88IEEE80211 de su "padre" -- antes
+ * asumia directamente RTW88PCIDevice, lo cual rompia el link en
+ * AirPortRTW (que no compila esa clase). Ahora cualquiera de los dos
+ * kexts puede ser el padre con tal de implementar esto. */
+class RTW88RxDelegate {
+public:
+    virtual mbuf_t allocateInputPacket(uint32_t len) = 0;
+    virtual void injectRxFrame(mbuf_t m) = 0;
+    /* Optional native 802.11 action-frame sink for AWDL/P2P controllers. */
+    virtual void injectRxActionFrame(const uint8_t *frame, uint32_t len, int8_t rssi, uint16_t channel) {
+        (void)frame; (void)len; (void)rssi; (void)channel;
+    }
+    /* Optional AWDL Ethernet sink. Default consumes the packet so legacy
+     * IOEthernet parents that do not expose an AWDL VIF cannot leak it. */
+    virtual void injectRxAWDLFrame(mbuf_t m) { if (m) mbuf_freem(m); }
+    virtual IOWorkLoop *getRxWorkLoop() = 0;
+    virtual void setLinkStatus(UInt32 status) = 0;
+    virtual ~RTW88RxDelegate() {}
+};
 
 /* ------------------------------------------------------------------ */
 /*  BSS descriptor (scan result)                                        */
 /* ------------------------------------------------------------------ */
+struct RTW88Channel { uint16_t number; bool passive; bool radar; };
+
 struct RTW88BSS {
     char   ssid[33];
     uint8_t ssid_len;
@@ -40,18 +122,14 @@ struct RTW88BSS {
     uint16_t freq;
     uint8_t  channel;
     uint32_t capabilities;
+    uint16_t beacon_interval;
     uint32_t cipher;       /* selected pairwise WLAN_CIPHER_SUITE_* */
     uint32_t group_cipher; /* selected group WLAN_CIPHER_SUITE_* */
     uint32_t akm;
-    uint16_t rsn_capabilities; /* raw AP RSN capabilities */
-    bool     rsn_has_psk;
-    bool     rsn_has_sae;
-    bool     pmf_capable;      /* AP MFPC bit */
-    bool     pmf_required;     /* AP MFPR bit */
-    bool     wpa3_transition;  /* PSK + SAE advertised together */
-    uint8_t  selected_rsn_ie[32]; /* exact WPA2-PSK RSN IE used by assoc + M2 */
-    uint8_t  selected_rsn_ie_len;
     uint32_t last_seen_scan;
+    /* Final: a beacon from this BSSID carried a non-empty, non-zero SSID, so
+     * the AP is not hidden even if a later frame has a blank SSID element. */
+    uint8_t  beacon_named;
     /* Raw IE data for association */
     uint8_t  ies[512];
     uint16_t ies_len;
@@ -75,22 +153,39 @@ enum RTW88State {
 /*  RTW88IEEE80211                                                       */
 /* ------------------------------------------------------------------ */
 class RTW88IEEE80211 : public OSObject {
+public:
+    RTW88EventDelegate *_delegate = nullptr;
     OSDeclareDefaultStructors(RTW88IEEE80211)
 
 public:
     static RTW88IEEE80211 *create(RTW88PCIDevice *dev, struct pci_dev *pci);
+    static RTW88IEEE80211 *createAirport(RTW88RxDelegate *delegate, struct pci_dev *pci);
 
     bool      init(RTW88PCIDevice *dev, struct pci_dev *pci);
+    bool      init(RTW88RxDelegate *delegate, struct pci_dev *pci);
     void      free() override;
 
     /* Called by RTW88PCIDevice */
     IOReturn  start();       /* probe: chip info, efuse, register hw */
     void      stop();        /* full teardown */
+    IOReturn setReceiveMulticast(bool active);
+    IOReturn setAWDLReceiveMode(bool active);
+    IOReturn setAWDLChannel(uint16_t channel);
+    bool canTransmitAWDL() const;
+    bool staAssociatedForAWDL() const { return _associatedVisible && _state == RTW88_STATE_CONNECTED; }
+    uint16_t infrastructureChannel() const { return _targetBSS.channel; }
+    bool staTxBlockedByAWDL() const { return _awdlOffChannel; }
+    void restoreSTAChannelAfterAWDL();
+    void setAWDLAddress(const uint8_t *mac);
     IOReturn  powerOn();     /* enable: rtw_core_start */
     void      powerOff();    /* disable: rtw_core_stop */
     void      handleInterrupt();
     UInt32    outputPacket(mbuf_t m);
+    bool      txRawManagementFrame(const uint8_t *frame, uint32_t len);
+    /* Native AWDL Ethernet -> 802.11 direct data encapsulation. Consumes m. */
+    bool      txAWDLDataFrame(mbuf_t m);
     void      getMACAddress(uint8_t *mac);
+    IOReturn  setMACAddress(const uint8_t *mac);
 
     /* Called from compat layer (ieee80211_rx_irqsafe) */
     void      rxFrame(struct sk_buff *skb);
@@ -98,12 +193,43 @@ public:
     void      scanDone(bool aborted);
 
     /* Control interface — called from RTW88UserClient */
+    uint32_t deauthReason() const { return _deauthReason; }
+    RTW88State rawState() const { return _state; }
+    bool associatedVisible() const { return _associatedVisible; }
     IOReturn  cmdScan();
-    IOReturn  cmdConnect(const char *ssid, const char *password);
+    IOReturn  cmdConnect(const char *ssid, const char *password, const uint8_t *pmk = nullptr,
+                         const uint8_t *bssid = nullptr, bool externalSupplicant = false);
+    IOReturn  cmdInstallExternalKey(bool pairwise, uint8_t keyidx, uint32_t cipher,
+                                    const uint8_t *key, uint8_t key_len);
+    bool      externalKeysReady() const { return _externalPTKInstalled && _externalGTKInstalled; }
+    IOReturn  cmdSetAssocRsnIE(const uint8_t *ie, uint16_t len);
+    void      clearAssocRsnIE();
+    bool      matchesPendingJoin(const char *ssid, const uint8_t *bssid, const uint8_t *pmk) const;
+    void      failJoin(const char *stage);
+    IOReturn  copyTargetIEs(uint8_t *out, uint32_t capacity, uint32_t *len) const;
+    IOReturn  copyTargetRsnIE(uint8_t *out, uint16_t capacity, uint16_t *len) const;
+    IOReturn copyScanBSS(uint32_t index, RTW88BSS *out);
+    IOReturn copyCurrentBSS(RTW88BSS *out);
+    IOReturn copyChannels(RTW88Channel *out, uint32_t capacity, uint32_t *count);
     IOReturn  cmdDisconnect();
     IOReturn  cmdPowerOn();
     IOReturn  cmdPowerOff();
+    IOReturn  suspendForSystemSleep();
+    bool      isPowered() const { return _powered; }
     IOReturn  cmdGetState(struct RTW88StateResult *result);
+    uint8_t   txNSS() const;
+    uint8_t channelWidthMHz() const { return _connChanWidth; }
+    bool txAggregationActive() const { return _txBaActive; }
+    uint32_t receivedFrameCount() const { return _rxFrameCount; }
+    const char *scanEngine() const { return _scanEngine; }
+    uint32_t scanChannelCount() const { return _lastScanChannelCount; }
+    uint32_t scanVisited2GHz() const { return _scanVisited2GHz; }
+    uint32_t scanVisited5GHz() const { return _scanVisited5GHz; }
+    uint32_t scanCacheCount() const { return _lastScanCacheCount; }
+    uint32_t scanGeneration() const { return _scanGeneration; }
+
+    void setEventDelegate(RTW88EventDelegate *d) { _delegate = d; }
+    void setRxDelegate(RTW88RxDelegate *d) { _parent = d; }
     IOReturn  cmdGetBSSList(uint8_t *buf, uint32_t *len);
     IOReturn  cmdGetRSSI(int *rssi);
 
@@ -115,6 +241,9 @@ private:
     void      processAssocResponse(struct sk_buff *skb);
 
     void      doAuthenticate();
+    void      cancelAuthentication();
+    void      clearDeferredJoin();
+    bool authenticationCancelled() const { return __atomic_load_n(&_connectCancelled, __ATOMIC_ACQUIRE); }
     void      doAssociate();
     void      setConnectedChandef(struct ieee80211_channel *chan);
     void      doHandshake(const uint8_t *eapol, uint32_t len);
@@ -133,19 +262,16 @@ private:
     /* WPA2 4-way handshake */
     void      handleEAPOL(const uint8_t *data, uint32_t len);
     bool      deriveKeys(const uint8_t *anonce, const uint8_t *snonce);
-    void      sendEAPOLKey(int step, const uint8_t *replay_counter,
+    bool      sendEAPOLKey(int step, const uint8_t *replay_counter,
                             bool install, bool ack, bool mic);
-    bool      sendGroupEAPOLKeyM2(const uint8_t *replay_counter,
-                                   uint16_t rx_key_info,
-                                   uint8_t eapol_version,
-                                   uint8_t descriptor_type);
 
     /* A-MPDU BlockAck (aggregation) negotiation */
     bool      htAllowed() const;   /* HT/VHT/A-MPDU usable on this link? */
     void      startTxAggregation();
     void      sendAddbaRequest(uint8_t tid);
     void      sendAddbaResponse(uint8_t tid, uint8_t dialog,
-                                uint16_t req_param, uint16_t ba_timeout);
+                                uint16_t req_param, uint16_t ba_timeout,
+                                uint16_t status = 0);
     void      handleBackAction(const uint8_t *b, uint32_t len);
 
     /* RX A-MPDU reorder + delivery */
@@ -166,7 +292,11 @@ private:
     bool      txMgmtFrame(const uint8_t *frame, uint32_t len);
     bool      txNullFunc(bool powerSave);
     bool      txProbeRequest();
-    bool      txDataFrame(mbuf_t m, bool protectEapol = false);
+    bool      txDataFrame(mbuf_t m);
+    bool      tryDeliverAWDLDataFrame(struct sk_buff *skb);
+    void      deliverAWDLEthernet(const uint8_t *da, const uint8_t *sa,
+                                  uint16_t ethertype,
+                                  const uint8_t *payload, uint32_t paylen);
     struct sk_buff *mbufToSkb(mbuf_t m);
     mbuf_t    skbToMbuf(struct sk_buff *skb);
 
@@ -189,12 +319,13 @@ private:
     thread_call_t _manualScanTC = nullptr;
 
     /* ---------------------------------------------------------------- */
-    RTW88PCIDevice    *_parent        = nullptr;
+    RTW88RxDelegate   *_parent        = nullptr;
     struct rtw_dev    *_rtwdev        = nullptr;
     struct ieee80211_hw *_hw          = nullptr;
     struct ieee80211_vif *_vif        = nullptr;
     struct ieee80211_sta *_sta        = nullptr;
     size_t              _staAllocSize = 0;
+    size_t              _vifAllocSize = 0;
     struct pci_dev     *_pcidev       = nullptr;
 
     IOWorkLoop         *_wl           = nullptr;
@@ -203,8 +334,26 @@ private:
     IOLock             *_lock         = nullptr;
 
     RTW88State          _state        = RTW88_STATE_IDLE;
+    /* Persistent IO80211 RUN latch.  net80211 (the reference IO80211 driver) keeps its
+     * infrastructure state at IEEE80211_S_RUN from association completion
+     * until a real deauth/disconnect.  rtw88 has extra transient internal
+     * states, so keep that externally-visible RUN fact separately instead of
+     * making SSID/BSSID/CHANNEL queries depend on a momentary backend state. */
+    bool                _associatedVisible = false;
+    bool                _connectCancelled = true;
+    uint32_t            _deauthReason = 0;
     RTW88State          _scanReturnState = RTW88_STATE_IDLE;
     bool                _powered      = false;
+    bool                _pmkProvided = false;
+    bool                _externalSupplicant = false;
+    bool                _externalPTKInstalled = false;
+    bool                _externalGTKInstalled = false;
+    bool                _receiveMulticast = true;
+    bool                _awdlReceiveMode = false;
+    uint16_t            _awdlChannel = 0;
+    uint16_t            _awdlPreparedChannel = 0;
+    bool                _awdlOffChannel = false;
+    uint8_t             _awdlAddress[6] = {};
     uint8_t             _macAddr[6]   = {};
     uint32_t            _timeoutMs    = 0;
 
@@ -213,15 +362,35 @@ private:
     uint32_t            _bssCount     = 0;
     IOLock             *_bssLock      = nullptr;
     uint32_t            _scanGeneration = 0;
+    const char *        _scanEngine = "not-started";
+    uint32_t            _lastScanChannelCount = 0, _lastScanCacheCount = 0;
+    uint32_t            _scanVisited2GHz = 0, _scanVisited5GHz = 0;
+    struct ieee80211_scan_request *_scanRequest = nullptr;
+    struct ieee80211_channel *_scanRequestChannels[256] = {};
     struct ieee80211_channel *_manualScanChannels[256] = {};
     uint32_t            _manualScanChannelCount = 0;
     volatile bool       _manualScanAbort = false;
     volatile bool       _manualScanOnHomeChannel = false;
     bool                _manualScanFallbackLogged = false;
 
+    /* Association requested while the radio is still finishing a scan.
+     * The reference IO80211 driver/net80211 accepts ASSOCIATE in SCAN and lets the state
+     * machine continue into AUTH instead of returning EBUSY.  rtw88 has a
+     * separate scan implementation, so preserve the request and start it as
+     * soon as scanDone() returns the backend to IDLE. */
+    bool                _deferredConnectPending = false;
+    char                _deferredSSID[33] = {};
+    char                _deferredPassword[64] = {};
+    uint8_t             _deferredPMK[32] = {};
+    bool                _deferredPMKValid = false;
+    uint8_t             _deferredBSSID[6] = {};
+    bool                _deferredBSSIDValid = false;
+    bool                _deferredExternalSupplicant = false;
+
     /* Target BSS for connection */
     RTW88BSS            _targetBSS    = {};
     char                _password[64] = {};
+    uint8_t             _authAttempts = 0;
 
     /* WPA2 key material */
     uint8_t  _pmk[32]  = {};
@@ -232,14 +401,31 @@ private:
     uint8_t  _anonce[32] = {};
     uint8_t  _snonce[32] = {};
     uint8_t  _replayCtr[8] = {};
+    uint8_t  _installedM3ReplayCtr[8] = {};
+    bool     _snonceValid = false;
+    bool     _m3KeysInstalled = false;
+    bool     _handshakePending = false;
+    bool     _eapolTxProtect = false;  /* protect the next EAPOL TX (group M2) */
     uint8_t  _ccmpTxPn[6] = {};
     bool     _rxCcmpIvSkipLogged = false;
+    /* r10: the scan-cache entry of the associated BSS has a TIM element
+     * (beacon-derived). Until it does, beacons from that BSS refresh it while
+     * connected, so CoreWLAN's AP_IE_LIST hidden/broadcast check passes. */
+    volatile bool _curBssTim = false;
+    uint32_t _rxUndecryptedProtected = 0;  /* protected data without HW decrypt */
+    uint32_t _rxUnprotectedDropped = 0;    /* plaintext data after PTK install */
+    uint32_t _rxNonSnapDropped = 0;        /* single MSDU without LLC/SNAP */
+    uint32_t _rxAmsduSpoofDropped = 0;     /* A-MSDU whose first DA is LLC/SNAP */
+    uint32_t _rxTrailerChecks = 0;         /* one-shot IPv4 length checks */
     bool     _wpa2     = false;
+    uint8_t  _assocRsnIE[257] = {};
+    uint16_t _assocRsnIELen = 0;
 
     /* Sequence number for TX frames */
     uint16_t _txSeq    = 0;
     /* Separate SN space for QoS data (TID 0) so the BlockAck window is gap-free */
     uint16_t _dataSeq  = 0;
+    uint16_t _awdlDataSeq = 0;
     uint16_t _assocAID = 0;
 
     /* A-MPDU aggregation (BlockAck) state */
@@ -247,6 +433,7 @@ private:
     uint8_t  _baTid      = 0;      /* TID carrying aggregated data (BE)        */
     uint8_t  _connChanWidth = 20;  /* negotiated operating width: 20/40/80 MHz */
     uint8_t  _baDialog   = 0;      /* rolling ADDBA-request dialog token       */
+    bool     _txBaPending = false;
     uint16_t _baBufSize  = 64;     /* advertised BlockAck buffer/window size   */
 
     /* RX A-MPDU reorder buffer — one per TID with an active downlink BA.
@@ -267,6 +454,7 @@ private:
     RxReorder *_rxBa[kRxBaNumTid] = {};
     IOLock    *_rxBaLock      = nullptr;
     IOTimerEventSource *_reorderTimer = nullptr;
+    bool _reorderTimerArmed = false; // accessed only on the RX workloop
 
     /* RSSI tracking */
     int      _rssi     = -100;

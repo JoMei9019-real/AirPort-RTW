@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
  * RTW88PCIDevice.hpp — IOEthernetController subclass for PCIe rtw88 chips.
  *
- * Approach mirrors itlwm: present a transparent Ethernet interface to macOS
+ * Approach mirrors the reference driver: present a transparent Ethernet interface to macOS
  * while doing 802.11 management internally.  The 802.11 state machine lives
  * in RTW88IEEE80211; this class handles IOKit life-cycle and the Ethernet
  * framing visible to macOS network stack.
  */
 #pragma once
+
+#include "RTW88IEEE80211.hpp"  /* para RTW88RxDelegate */
 
 /* Pull in mbuf_t and related kernel types before any IOKit network headers */
 #include <sys/kernel_types.h>
@@ -28,7 +30,7 @@ class RTW88IEEE80211;
 class RTW88UserClient;
 
 /* RTW88PCIDevice --------------------------------------------------------- */
-class RTW88PCIDevice : public IOEthernetController {
+class RTW88PCIDevice : public IOEthernetController, public RTW88RxDelegate, public RTW88HwOps {
     OSDeclareDefaultStructors(RTW88PCIDevice)
 
     friend class RTW88UserClient;
@@ -77,41 +79,43 @@ public:
 
     /* Resume a flow-control-stalled output queue once the IRQ bottom-half has
      * freed BE ring slots.  Called via a C trampoline from the compat layer. */
-    void resumeTxIfStalled();
+    void resumeTxIfStalled() override;
 
     /* Called from RTW88IEEE80211 to deliver RX frames to macOS */
-    void injectRxFrame(mbuf_t m);
+    void injectRxFrame(mbuf_t m) override;
     /* The workloop the RX/interrupt path runs on. RTW88IEEE80211 attaches its
      * RX reorder flush timer here so all frame delivery is serialized on one
      * thread (injectRxFrame's queue+flush is not safe against concurrent
      * callers). */
-    IOWorkLoop *getRxWorkLoop() const { return _workLoop; }
+    IOWorkLoop *getRxWorkLoop() override { return _workLoop; }
+    using IOEthernetController::setLinkStatus;  /* evita ocultar las otras sobrecargas heredadas */
+    void setLinkStatus(UInt32 status) override { IOEthernetController::setLinkStatus(status); }
     /* Allocate an input mbuf via the IONetworkController allocator (sets
      * m_len and pkthdr.len consistently — required for inputPacket). */
-    mbuf_t allocateInputPacket(uint32_t len);
+    mbuf_t allocateInputPacket(uint32_t len) override;
 
     /* DMA helpers — used by Linux compat dma_alloc_coherent */
-    void *allocCoherent(size_t size, IOPhysicalAddress *phys);
-    void  freeCoherent(size_t size, void *virt, IOPhysicalAddress phys);
-    void  freeCoherentByPhys(IOPhysicalAddress phys);
+    void *allocCoherent(size_t size, IOPhysicalAddress *phys) override;
+    void  freeCoherent(size_t size, void *virt, IOPhysicalAddress phys) override;
+    void  freeCoherentByPhys(IOPhysicalAddress phys) override;
     /* Bounce buffer helpers for dma_map_single / dma_sync_single_for_cpu */
-    void  setBounceOrigVA(IOPhysicalAddress phys, void *orig_va);
-    void  syncBounceForCpu(IOPhysicalAddress dma, size_t size);
+    void  setBounceOrigVA(IOPhysicalAddress phys, void *orig_va) override;
+    void  syncBounceForCpu(IOPhysicalAddress dma, size_t size) override;
 
     /* PCI config space — used by Linux compat pci_read/write_config_* */
-    UInt8  pciReadByte(int offset);
-    UInt16 pciReadWord(int offset);
-    UInt32 pciReadDword(int offset);
-    void   pciWriteByte(int offset, UInt8 val);
-    void   pciWriteWord(int offset, UInt16 val);
-    void   pciWriteDword(int offset, UInt32 val);
-    int    pciFindCapability(int cap);
+    UInt8  pciReadByte(int offset) override;
+    UInt16 pciReadWord(int offset) override;
+    UInt32 pciReadDword(int offset) override;
+    void   pciWriteByte(int offset, UInt8 val) override;
+    void   pciWriteWord(int offset, UInt16 val) override;
+    void   pciWriteDword(int offset, UInt32 val) override;
+    int    pciFindCapability(int cap) override;
 
     /* 802.11 state machine accessors */
     RTW88IEEE80211 *get80211() { return _ieee80211; }
 
     /* MMIO base — used by compat ioremap shim */
-    volatile void *mmioBase() const { return _mmioBase; }
+    volatile void *mmioBase() const override { return _mmioBase; }
 
 private:
     bool     attachDevice();
@@ -150,21 +154,6 @@ private:
      * the BE ring is nearly full; cleared when the IRQ completion path frees
      * slots and resumes the queue.  See createOutputQueue()/outputPacket(). */
     volatile bool           _txStalled    = false;
-
-    /* Performance diagnostics only. These counters do not influence queue,
-     * DMA, interrupt, or rate-control behaviour; they are sampled by the
-     * existing 1 s debug timer and emitted every 5 s. */
-    volatile UInt32         _perfTxSubmitted   = 0;
-    volatile UInt32         _perfTxStallEvents = 0;
-    volatile UInt32         _perfTxResumeEvents= 0;
-    volatile UInt32         _perfRxPackets     = 0;
-    volatile UInt32         _perfRxBytes       = 0;
-    volatile UInt32         _perfInterrupts    = 0;
-    UInt32                  _perfLastTxSubmitted = 0;
-    UInt32                  _perfLastRxPackets   = 0;
-    UInt32                  _perfLastRxBytes     = 0;
-    UInt32                  _perfLastInterrupts  = 0;
-    UInt32                  _perfDebugTicks       = 0;
 
     /* Linked-list of allocated DMA buffers for cleanup */
     struct DMAEntry {

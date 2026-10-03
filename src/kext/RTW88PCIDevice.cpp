@@ -1,3 +1,4 @@
+/* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // RTW88PCIDevice.cpp — IOEthernetController for PCIe rtw88 adapters
 
@@ -28,7 +29,7 @@ static constexpr unsigned int kRTW88TxResumeAvail = 160;
 /*  PCI ops shim (C linkage, called from driver C code)                */
 /* ------------------------------------------------------------------ */
 
-static RTW88PCIDevice *g_pci_dev_instance = nullptr;
+RTW88HwOps *g_pci_dev_instance = nullptr;  /* ya no static: AirPortRTW tambien lo setea */
 
 static int compat_pci_read_config_byte(struct pci_dev *dev, int where, u8 *val)
 {
@@ -86,7 +87,7 @@ static int compat_pci_find_capability(struct pci_dev *dev, int cap)
     return g_pci_dev_instance->pciFindCapability(cap);
 }
 
-static struct pci_ops_rtw88 _pci_io_ops = {
+struct pci_ops_rtw88 _pci_io_ops = {
     .read_config_byte   = compat_pci_read_config_byte,
     .read_config_word   = compat_pci_read_config_word,
     .read_config_dword  = compat_pci_read_config_dword,
@@ -172,7 +173,7 @@ static void compat_dma_sync_dev(struct device *dev, dma_addr_t addr,
     /* Re-arm for next DMA: bounce is already in place, nothing to do */
 }
 
-static struct rtw88_dma_alloc_ops _dma_ops = {
+struct rtw88_dma_alloc_ops _dma_ops = {
     .alloc_coherent         = compat_dma_alloc,
     .free_coherent          = compat_dma_free,
     .map_single             = compat_dma_map,
@@ -195,12 +196,6 @@ const char *RTW88PCIDevice::chipDisplayName() const
     case 0xC821:
     case 0xB821:
         return "RTL8821CE";
-    case 0x8821:
-        return "RTL8821AE";
-    case 0x8812:
-        return "RTL8812AE";
-    case 0x8813:
-        return "RTL8814AE";
     default:
         return "Realtek Wireless";
     }
@@ -409,41 +404,6 @@ void RTW88PCIDevice::debugTimerFired(IOTimerEventSource *src)
         resumeTxIfStalled();
     if (_txStalled || avail < kRTW88TxStallAvail)
         rtw88_debug_dump_tx_state();
-
-    /* Inspired by the low-bandwidth investigation in upstream issue #2 and
-     * the chvsolucoes performance experiments: sample software delivery and
-     * queue-pressure counters without changing the actual data path. */
-    if (++_perfDebugTicks >= 5) {
-        _perfDebugTicks = 0;
-
-        UInt32 txNow  = _perfTxSubmitted;
-        UInt32 rxNow  = _perfRxPackets;
-        UInt32 rxbNow = _perfRxBytes;
-        UInt32 irqNow = _perfInterrupts;
-
-        UInt32 dTx  = txNow  - _perfLastTxSubmitted;
-        UInt32 dRx  = rxNow  - _perfLastRxPackets;
-        UInt32 dRxb = rxbNow - _perfLastRxBytes;
-        UInt32 dIrq = irqNow - _perfLastInterrupts;
-
-        _perfLastTxSubmitted = txNow;
-        _perfLastRxPackets   = rxNow;
-        _perfLastRxBytes     = rxbNow;
-        _perfLastInterrupts  = irqNow;
-
-        rtw88_diag_log(
-            "rtw88: PERF 5s tx_submit=%u rx_pkts=%u rx_bytes=%u irq=%u "
-            "stalls=%u resumes=%u be_avail=%u stalled=%d\n",
-            dTx, dRx, dRxb, dIrq,
-            _perfTxStallEvents, _perfTxResumeEvents,
-            avail, _txStalled ? 1 : 0);
-
-        /* Existing helper also reports HW/SW BE pointers and RX RP/HWWP,
-         * which is exactly the state upstream issue #2 used to diagnose
-         * queue/backpressure versus RX-DMA progress. */
-        rtw88_debug_dump_tx_state();
-    }
-
     src->setTimeoutMS(1000);   /* re-arm */
 }
 
@@ -521,7 +481,6 @@ bool RTW88PCIDevice::setupInterrupt()
 
 void RTW88PCIDevice::handleInterrupt(IOInterruptEventSource *src, int count)
 {
-    _perfInterrupts++;
     if (_ieee80211)
         rtw88_trigger_interrupt();
 }
@@ -648,15 +607,10 @@ UInt32 RTW88PCIDevice::outputPacket(mbuf_t m, void *param)
      * headroom so rtw_tx never actually hits -ENOSPC.
      */
     if (rtw88_be_tx_avail() < kRTW88TxStallAvail) {
-        if (!_txStalled)
-            _perfTxStallEvents++;
         _txStalled = true;
         return kIOReturnOutputStall;
     }
-    UInt32 ret = _ieee80211->outputPacket(m);
-    if (ret == kIOReturnOutputSuccess)
-        _perfTxSubmitted++;
-    return ret;
+    return _ieee80211->outputPacket(m);
 }
 
 void RTW88PCIDevice::resumeTxIfStalled()
@@ -665,7 +619,6 @@ void RTW88PCIDevice::resumeTxIfStalled()
      * service so we never block on the output-queue gate from here. */
     if (_txStalled && rtw88_be_tx_avail() >= kRTW88TxResumeAvail) {
         _txStalled = false;
-        _perfTxResumeEvents++;
         if (_txQueue)
             _txQueue->service(IOBasicOutputQueue::kServiceAsync);
     }
@@ -778,13 +731,10 @@ void RTW88PCIDevice::injectRxFrame(mbuf_t m)
         return;
     }
 
-    /* Queue + flush, matching the proven itlwm submission path.  Submitting
+    /* Queue + flush, matching the proven the reference driver submission path.  Submitting
      * via the input queue keeps frame delivery off whatever thread called us. */
     _iface->inputPacket(m, 0, IONetworkInterface::kInputOptionQueuePacket);
     _iface->flushInputQueue();
-
-    _perfRxPackets++;
-    _perfRxBytes += (UInt32)plen;
 
     IONetworkData *nd = _iface->getNetworkData(kIONetworkStatsKey);
     if (nd) {
@@ -972,14 +922,12 @@ void RTW88PCIDevice::pciWriteDword(int offset, UInt32 val)
 }
 int RTW88PCIDevice::pciFindCapability(int cap)
 {
-    /* Walk PCIe capability list */
-    UInt8 cap_ptr = _pciDev->configRead8(0x34) & ~3;
-    while (cap_ptr) {
-        UInt8 cap_id = _pciDev->configRead8(cap_ptr);
-        if (cap_id == cap) return cap_ptr;
-        cap_ptr = _pciDev->configRead8(cap_ptr + 1) & ~3;
-    }
-    return 0;
+    if (!_pciDev || cap < 0 || cap > 0xff)
+        return 0;
+
+    UInt8 offset = 0;
+    UInt32 value = _pciDev->findPCICapability((UInt8)cap, &offset);
+    return value ? (int)offset : 0;
 }
 
 /* ------------------------------------------------------------------ */
