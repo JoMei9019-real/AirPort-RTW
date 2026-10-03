@@ -1,4 +1,5 @@
-# Makefile for rtw88-macos
+# Makefile for AirPortRTW (derived from the upstream rtw88-macos build)
+.DEFAULT_GOAL := airport
 #
 # Prerequisites:
 #   Xcode Command Line Tools
@@ -14,14 +15,15 @@
 #   make unload       — kextunload
 #   make clean        — remove build/
 
-MAKEFLAGS += -j$(shell sysctl -n hw.logicalcpu)
+HOST_CPUS := $(shell sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
+MAKEFLAGS += -j$(HOST_CPUS)
 
 # ------------------------------------------------------------------ #
 # Paths                                                               #
 # ------------------------------------------------------------------ #
 
 PROJ_ROOT    := $(shell pwd)
-LINUX_SRC    := $(PROJ_ROOT)/../rtw88-stable/drivers/net/wireless/realtek/rtw88
+LINUX_SRC    := $(PROJ_ROOT)/rtw88-stable/drivers/net/wireless/realtek/rtw88
 COMPAT_DIR   := $(PROJ_ROOT)/src/compat
 KEXT_SRC     := $(PROJ_ROOT)/src/kext
 FIRMWARE_DIR := $(PROJ_ROOT)/firmware
@@ -45,7 +47,7 @@ OUT_CTL      := $(OUT_DIR)/rtw88ctl
 SDK          := $(shell xcrun --show-sdk-path)
 MKSDK        := $(PROJ_ROOT)/MacKernelSDK
 ARCH         := -arch x86_64
-MINOS        := -mmacosx-version-min=11.0
+MINOS        := -mmacosx-version-min=13.0
 
 CC           := xcrun clang
 CXX          := xcrun clang++
@@ -53,7 +55,10 @@ LD           := xcrun clang++
 
 KEXT_FLAGS   := -fno-exceptions -fno-rtti \
                 -fno-stack-protector -mkernel \
+                -MMD -MP \
                 $(ARCH) $(MINOS) \
+                -ffile-prefix-map=$(PROJ_ROOT)=driver/AirPortRTW \
+                -fdebug-prefix-map=$(PROJ_ROOT)=driver/AirPortRTW \
                 -isysroot $(SDK) \
                 -I$(MKSDK)/Headers \
                 -I$(SDK)/System/Library/Frameworks/Kernel.framework/Headers
@@ -73,18 +78,16 @@ DRIVER_CFLAGS := \
     -I$(LINUX_SRC) \
     -DRTW88_MACOS=1 \
     -D__KERNEL__ \
+    -DCONFIG_RTW88_PCI=1 \
+    -DCONFIG_RTW88_8822B=1 \
     -DCONFIG_RTW88_8822BE=1 \
+    -DCONFIG_RTW88_8822C=1 \
     -DCONFIG_RTW88_8822CE=1 \
+    -DCONFIG_RTW88_8821C=1 \
     -DCONFIG_RTW88_8821CE=1 \
-    -DCONFIG_RTW88_8812AE=1 \
-    -DCONFIG_RTW88_8814AE=1 \
-    -DCONFIG_RTW88_8821AU=1 \
-    -DCONFIG_RTW88_8822BU=1 \
-    -DCONFIG_RTW88_8822CU=1 \
-    -DCONFIG_RTW88_8812AU=1 \
-    -Wno-implicit-function-declaration \
-    -Wno-int-conversion \
-    -Wno-incompatible-pointer-types \
+    -Werror=implicit-function-declaration \
+    -Werror=int-conversion \
+    -Werror=incompatible-pointer-types \
     -Wno-unused-variable \
     -Wno-unused-function
 
@@ -102,7 +105,7 @@ KEXT_CXXFLAGS := \
 # Source files                                                         #
 # ------------------------------------------------------------------ #
 
-# Linux driver core C files (compiled with compat headers)
+# Linux driver core C files (PCIe-only transport; compiled with compat headers)
 DRIVER_SRCS := \
     $(LINUX_SRC)/main.c \
     $(LINUX_SRC)/mac.c \
@@ -119,38 +122,23 @@ DRIVER_SRCS := \
     $(LINUX_SRC)/sar.c \
     $(LINUX_SRC)/util.c \
     $(LINUX_SRC)/pci.c \
-    $(LINUX_SRC)/usb.c \
-    $(LINUX_SRC)/sdio.c \
     $(LINUX_SRC)/mac80211.c
 
-# Chip-specific C files
+# Chip-specific C files (PCIe chip cores + PCIe frontends only)
 CHIP_SRCS := \
     $(LINUX_SRC)/rtw8822b.c \
     $(LINUX_SRC)/rtw8822b_table.c \
     $(LINUX_SRC)/rtw8822be.c \
-    $(LINUX_SRC)/rtw8822bu.c \
     $(LINUX_SRC)/rtw8822c.c \
     $(LINUX_SRC)/rtw8822c_table.c \
     $(LINUX_SRC)/rtw8822ce.c \
-    $(LINUX_SRC)/rtw8822cu.c \
     $(LINUX_SRC)/rtw8821c.c \
     $(LINUX_SRC)/rtw8821c_table.c \
-    $(LINUX_SRC)/rtw8821ce.c \
-    $(LINUX_SRC)/rtw8821cu.c \
-    $(LINUX_SRC)/rtw8812a.c \
-    $(LINUX_SRC)/rtw8812a_table.c \
-    $(LINUX_SRC)/rtw8812au.c \
-    $(LINUX_SRC)/rtw8814a.c \
-    $(LINUX_SRC)/rtw8814a_table.c \
-    $(LINUX_SRC)/rtw8814ae.c \
-    $(LINUX_SRC)/rtw8814au.c \
-    $(LINUX_SRC)/rtw8821a.c \
-    $(LINUX_SRC)/rtw8821a_table.c \
-    $(LINUX_SRC)/rtw8821au.c \
-    $(LINUX_SRC)/rtw88xxa.c
+    $(LINUX_SRC)/rtw8821ce.c
 
 # Compat C implementation
 COMPAT_SRCS := \
+    $(COMPAT_DIR)/rtw88_thread_call.c \
     $(COMPAT_DIR)/rtw88_compat.c
 
 # Firmware loader — compiled with system headers only (no Linux compat headers)
@@ -166,12 +154,12 @@ KMOD_SRCS := \
     $(KEXT_SRC)/kmod_info.c
 
 # IOKit C++ wrapper
-# RTW88USBDevice excluded: IOUSBHostFamily not in OSBundleLibraries
+# PCIe-only project: USB/SDIO device wrappers and transport backends are intentionally excluded
 KEXT_SRCS := \
     $(KEXT_SRC)/RTW88Kext.cpp \
     $(KEXT_SRC)/RTW88PCIDevice.cpp \
-    $(KEXT_SRC)/RTW88IEEE80211.cpp \
-    $(KEXT_SRC)/RTW88UserClient.cpp
+    $(KEXT_SRC)/RTW88UserClient.cpp \
+    $(KEXT_SRC)/RTW88IEEE80211.cpp
 
 # ------------------------------------------------------------------ #
 # Object files                                                         #
@@ -334,3 +322,61 @@ clean:
 #   The kext loads via OpenCore injection before the OS, so it works
 #   in BaseSystem automatically.  rtw88ctl is a standalone binary;
 #   copy it to the USB installer's /usr/local/bin or run from a path.
+# AirPortRTW native IO80211 target. Its controller and interface sources
+# live in src/kext/:
+#   AirPortRTW.hpp  AirPortRTW.cpp
+#   AirPortRTWInterface.hpp  AirPortRTWInterface.cpp
+
+AIRPORT_KEXT_SKEL := $(PROJ_ROOT)/AirPortRTW.kext
+AIRPORT_OUT_KEXT  := $(OUT_DIR)/AirPortRTW.kext
+AIRPORT_OUT_BIN   := $(AIRPORT_OUT_KEXT)/Contents/MacOS/AirPortRTW
+
+AIRPORT_KEXT_SRCS := \
+    $(KEXT_SRC)/RTW88IEEE80211.cpp \
+    $(KEXT_SRC)/RTW88HwOps.cpp \
+    $(KEXT_SRC)/AirPortRTW.cpp \
+    $(KEXT_SRC)/AirPortRTWAWDL.cpp \
+    $(KEXT_SRC)/RTW88AWDLManager.cpp \
+    $(KEXT_SRC)/AirPortRTWInterface.cpp
+
+AIRPORT_KEXT_OBJS := $(patsubst $(KEXT_SRC)/%.cpp, $(BUILD_DIR)/airport/%.o, $(AIRPORT_KEXT_SRCS))
+
+AIRPORT_KMOD_OBJ := $(BUILD_DIR)/airport/kmod_info.o
+
+AIRPORT_ALL_OBJS := $(DRIVER_OBJS) $(CHIP_OBJS) $(COMPAT_OBJS) $(FIRMWARE_OBJS) $(AIRPORT_KMOD_OBJ) $(AIRPORT_KEXT_OBJS)
+
+AIRPORT_LDFLAGS := \
+    $(ARCH) -static -nostdlib -Xlinker -kext \
+    $(MKSDK)/Library/x86_64/libkmod.a \
+    -Xlinker -undefined -Xlinker dynamic_lookup
+
+.PHONY: airport
+airport: $(AIRPORT_OUT_BIN)
+
+$(AIRPORT_OUT_BIN): $(AIRPORT_ALL_OBJS) $(AIRPORT_KEXT_SKEL)/Contents/Info.plist | $(AIRPORT_OUT_KEXT)/Contents/MacOS
+	@echo "  LD   $(notdir $@)"
+	$(LD) $(AIRPORT_LDFLAGS) -o $@ $(AIRPORT_ALL_OBJS)
+	@echo "  SYNC $(AIRPORT_OUT_KEXT)"
+	rsync -a --exclude='MacOS' $(AIRPORT_KEXT_SKEL)/ $(AIRPORT_OUT_KEXT)/
+	@echo "  OK   build/out/AirPortRTW.kext"
+
+$(BUILD_DIR)/airport/%.o: $(KEXT_SRC)/%.cpp | $(BUILD_DIR)/airport
+	@echo "  CXX  $(notdir $<)"
+	$(CXX) $(KEXT_CXXFLAGS) -D__IO80211_TARGET=__MAC_13_0 -DUSE_APPLE_SUPPLICANT=1 -D__PRIVATE_SPI__ -c $< -o $@
+
+$(AIRPORT_KMOD_OBJ): $(KEXT_SRC)/kmod_info.c | $(BUILD_DIR)/airport
+	@echo "  CC   airport/kmod_info.c"
+	$(CC) $(KEXT_FLAGS) -DRTW88_AIRPORT_KMOD=1 -c $< -o $@
+
+$(BUILD_DIR)/airport:
+	mkdir -p $@
+
+$(AIRPORT_OUT_KEXT)/Contents/MacOS:
+	mkdir -p $@
+
+# Rebuild objects when one of their headers changes.
+DEPFILES = $(ALL_OBJS:.o=.d) $(AIRPORT_KEXT_OBJS:.o=.d) $(AIRPORT_KMOD_OBJ:.o=.d)
+-include $(DEPFILES)
+
+# Compiler flags and ABI macros in this file affect every object.
+$(ALL_OBJS) $(AIRPORT_ALL_OBJS): Makefile
