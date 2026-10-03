@@ -15,7 +15,8 @@ int rtw88_log_level = KERN_DEBUG;
 struct task_struct *__rtw88_current_task = NULL;
 
 static IOSimpleLock *rtw88_log_lock = NULL;
-static char rtw88_log_ring[8192];
+static char rtw88_log_ring[32768];
+static uint64_t rtw88_log_bytes = 0;
 static uint32_t rtw88_log_head = 0;
 static uint32_t rtw88_log_tail = 0;
 
@@ -25,12 +26,46 @@ static void rtw88_log_append(const char *msg)
     IOSimpleLockLock(rtw88_log_lock);
     while (*msg) {
         rtw88_log_ring[rtw88_log_head] = *msg++;
+        rtw88_log_bytes++;
         rtw88_log_head = (rtw88_log_head + 1) % sizeof(rtw88_log_ring);
         if (rtw88_log_head == rtw88_log_tail) {
             rtw88_log_tail = (rtw88_log_tail + 1) % sizeof(rtw88_log_ring);
         }
     }
     IOSimpleLockUnlock(rtw88_log_lock);
+}
+
+/* Native-driver diagnostics share the compatibility ring. No key material,
+ * packet payloads or passphrases are recorded by this helper. */
+void rtw88_candidate_log(const char *fmt, ...)
+{
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    IOLog("%s", buf);
+    char record[576];
+    snprintf(record, sizeof(record), "[ticks=%llu] %s", mach_absolute_time(), buf);
+    rtw88_log_append(record);
+}
+
+/* Non-consuming snapshot: inspecting IORegistry does not drain diagnostics. */
+uint32_t rtw88_copy_log(char *out, uint32_t capacity, uint64_t *total_bytes)
+{
+    if (!out || capacity == 0) return 0;
+    out[0] = 0;
+    if (!rtw88_log_lock) return 0;
+    IOSimpleLockLock(rtw88_log_lock);
+    uint32_t pos = rtw88_log_tail, n = 0;
+    while (pos != rtw88_log_head && n + 1 < capacity) {
+        out[n++] = rtw88_log_ring[pos];
+        pos = (pos + 1) % sizeof(rtw88_log_ring);
+    }
+    out[n] = 0;
+    if (total_bytes) *total_bytes = rtw88_log_bytes;
+    IOSimpleLockUnlock(rtw88_log_lock);
+    return n;
 }
 
 void rtw88_printk(int level, const char *fmt, ...)
@@ -50,18 +85,6 @@ void rtw88_printk(int level, const char *fmt, ...)
     char ring_msg[512];
     snprintf(ring_msg, sizeof(ring_msg), "[rtw88 %s] %s", ls, buf);
     rtw88_log_append(ring_msg);
-}
-
-void rtw88_diag_log(const char *fmt, ...)
-{
-    char buf[512];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-
-    IOLog("%s", buf);
-    rtw88_log_append(buf);
 }
 
 void rtw88_dev_printk(int level, struct device *dev, const char *fmt, ...)
@@ -107,23 +130,10 @@ void rtw88_hex_dump(const char *prefix, const void *buf, size_t len)
 /*  Symbols not exported by macOS 15+ KPIs — provided internally       */
 /* ------------------------------------------------------------------ */
 
-/* fls: declared extern in MacKernelSDK libkern.h but not KPI-exported */
+/* fls: declared extern in the kernel SDK's libkern.h but not KPI-exported */
 int fls(unsigned int x)
 {
     return x ? (32 - __builtin_clz(x)) : 0;
-}
-
-/* thread_call_cancel_wait is declared in kern/thread_call.h but is NOT
- * exported as a kext KPI — the linker cannot resolve it externally.
- * Provide a local definition so the symbol resolves at link time.
- * We cancel any pending invocation and busy-wait briefly for any in-flight
- * execution: timer callbacks are short-lived so a small IODelay suffices. */
-boolean_t thread_call_cancel_wait(thread_call_t call)
-{
-    if (!call) return false;
-    thread_call_cancel(call);
-    IODelay(500);   /* 500 µs: enough for a running callback to exit */
-    return thread_call_cancel(call);
 }
 
 /* ------------------------------------------------------------------ */
@@ -134,18 +144,22 @@ struct rtw88_dma_alloc_ops *rtw88_dma_ops      = NULL;
 struct pci_ops_rtw88       *rtw88_pci_io_ops   = NULL;
 struct rtw88_usb_ops       *rtw88_usb_io_ops   = NULL;
 
-/* Diagnostic flag consumed by rtw_watch_dog_work() in main.c.  Default true:
- * the watchdog keeps rescheduling but performs no RF-dynamic work, to test
- * whether DPK/power-tracking is wedging BE TX.  Flip to false to restore
- * normal watchdog behaviour. */
+/* Until station iteration is implemented, main.c limits the watchdog to
+ * chip-local thermal power tracking. Full DIG/RA needs valid station stats. */
 bool rtw88_disable_watchdog_work = true;
 
 /* ------------------------------------------------------------------ */
 /*  Workqueue implementation (kernel threads + IOLock)                  */
 /* ------------------------------------------------------------------ */
 
+/* One state lock also serializes transfers/cancellation across queues. */
+static IOLock *work_state_lock;
 struct workqueue_struct *system_wq      = NULL;
 struct workqueue_struct *system_long_wq = NULL;
+/* Keep PCI threaded IRQ + NAPI off the control-plane workqueues. */
+static struct workqueue_struct *g_datapath_wq = NULL;
+static uint32_t g_rtw88_rx_poll_active = 0;
+static thread_t g_rtw88_rx_poll_thread = NULL;
 
 static void wq_thread_fn(void *arg, wait_result_t wr)
 {
@@ -159,15 +173,21 @@ static void wq_thread_fn(void *arg, wait_result_t wr)
         }
         struct work_struct *work = container_of(wq->queue.next,
                                                 struct work_struct, entry);
-        list_del(&work->entry);
+        list_del_init(&work->entry);
         work->pending = 0;
+        work->executing = true;
+        wq->active++;
         IOLockUnlock(wq->lock);
         if (work->func) work->func(work);
         IOLockLock(wq->lock);
+        work->executing = false;
+        wq->active--;
+        IOLockWakeup(wq->lock, work, false);
+        IOLockWakeup(wq->lock, &wq->queue, false);
     }
 
     wq->done = 1;
-    IOLockWakeup(wq->lock, &wq->done, false);
+    IOLockWakeup(wq->lock, (void *)&wq->done, false);
     IOLockUnlock(wq->lock);
     thread_terminate(current_thread());
 }
@@ -181,14 +201,13 @@ struct workqueue_struct *alloc_workqueue(const char *name, unsigned int flags,
     bzero(wq, sizeof(*wq));
     strlcpy(wq->name, name ? name : "wq", sizeof(wq->name));
     INIT_LIST_HEAD(&wq->queue);
-    wq->lock    = IOLockAlloc();
+    wq->lock    = work_state_lock;
     wq->running = 1;
     wq->done    = 0;
     if (!wq->lock) { IOFree(wq, sizeof(*wq)); return NULL; }
 
     kern_return_t kr = kernel_thread_start(wq_thread_fn, wq, &wq->thread);
     if (kr != KERN_SUCCESS) {
-        IOLockFree(wq->lock);
         IOFree(wq, sizeof(*wq));
         return NULL;
     }
@@ -209,25 +228,33 @@ void destroy_workqueue(struct workqueue_struct *wq)
     wq->running = 0;
     IOLockWakeup(wq->lock, &wq->queue, false);
     while (!wq->done)
-        IOLockSleep(wq->lock, &wq->done, THREAD_UNINT);
+        IOLockSleep(wq->lock, (void *)&wq->done, THREAD_UNINT);
     IOLockUnlock(wq->lock);
-    IOLockFree(wq->lock);
     IOFree(wq, sizeof(*wq));
+}
+
+/* All work state below is protected by work_state_lock. Owners must stop
+ * producers and cancel delayed work before destroying the target queue. */
+static bool queue_work_locked(struct workqueue_struct *wq, struct work_struct *work)
+{
+    if (!wq->running || work->pending || work->canceling)
+        return false;
+    if (work->executing && work->wq != wq)
+        return false;
+    work->wq = wq;
+    work->pending = 1;
+    list_add_tail(&work->entry, &wq->queue);
+    IOLockWakeup(work_state_lock, &wq->queue, false);
+    return true;
 }
 
 bool queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {
-    if (!wq || !work) return false;
-    IOLockLock(wq->lock);
-    if (work->pending) {
-        IOLockUnlock(wq->lock);
-        return false;
-    }
-    work->pending = 1;
-    list_add_tail(&work->entry, &wq->queue);
-    IOLockWakeup(wq->lock, &wq->queue, false);
-    IOLockUnlock(wq->lock);
-    return true;
+    if (!wq || !work || !work_state_lock) return false;
+    IOLockLock(work_state_lock);
+    bool queued = queue_work_locked(wq, work);
+    IOLockUnlock(work_state_lock);
+    return queued;
 }
 
 bool schedule_work(struct work_struct *work)
@@ -235,22 +262,37 @@ bool schedule_work(struct work_struct *work)
     return queue_work(system_wq, work);
 }
 
-/* Timer callback that dispatches a delayed_work to its workqueue */
-static void delayed_work_timer_fn(struct timer_list *t)
+void rtw88_delayed_work_timer_fn(struct timer_list *t)
 {
     struct delayed_work *dwork = from_timer(dwork, t, timer);
-    queue_work(system_wq, &dwork->work);
+    IOLockLock(work_state_lock);
+    if (dwork->work.pending == 2) {
+        dwork->work.pending = 0;
+        queue_work_locked(dwork->work.wq, &dwork->work);
+    }
+    IOLockWakeup(work_state_lock, &dwork->work, false);
+    IOLockUnlock(work_state_lock);
 }
 
 bool queue_delayed_work(struct workqueue_struct *wq,
-                         struct delayed_work *dwork, unsigned long delay)
+                       struct delayed_work *dwork, unsigned long delay)
 {
-    if (!wq || !dwork) return false;
-    if (delay == 0)
-        return queue_work(wq, &dwork->work);
-    timer_setup(&dwork->timer, delayed_work_timer_fn, 0);
+    if (!wq || !dwork || !work_state_lock) return false;
+    if (!delay) return queue_work(wq, &dwork->work);
+    IOLockLock(work_state_lock);
+    struct work_struct *work = &dwork->work;
+    if (!wq->running || work->pending || work->canceling ||
+        (work->executing && work->wq != wq)) {
+        IOLockUnlock(work_state_lock);
+        return false;
+    }
+    work->wq = wq;
+    work->pending = 2;
     mod_timer(&dwork->timer, jiffies + delay);
-    return true;
+    if (!dwork->timer.call) work->pending = 0;
+    bool queued = work->pending != 0;
+    IOLockUnlock(work_state_lock);
+    return queued;
 }
 
 bool schedule_delayed_work(struct delayed_work *dwork, unsigned long delay)
@@ -260,39 +302,71 @@ bool schedule_delayed_work(struct delayed_work *dwork, unsigned long delay)
 
 void flush_workqueue(struct workqueue_struct *wq)
 {
-    if (!wq) return;
-    for (int i = 0; i < 1000; i++) {
-        IOLockLock(wq->lock);
-        int empty = list_empty(&wq->queue);
-        IOLockUnlock(wq->lock);
-        if (empty) break;
-        IOSleep(5);
-    }
+    if (!wq || !work_state_lock) return;
+    IOLockLock(work_state_lock);
+    while (!list_empty(&wq->queue) || wq->active)
+        IOLockSleep(work_state_lock, &wq->queue, THREAD_UNINT);
+    IOLockUnlock(work_state_lock);
+}
+
+static bool remove_pending_work(struct work_struct *work)
+{
+    bool pending = work->pending != 0;
+    if (work->pending == 1) list_del_init(&work->entry);
+    work->pending = 0;
+    if (pending && work->wq)
+        IOLockWakeup(work_state_lock, &work->wq->queue, false);
+    IOLockWakeup(work_state_lock, work, false);
+    return pending;
 }
 
 bool cancel_work_sync(struct work_struct *work)
 {
-    work->pending = 0;
-    return true;
+    if (!work || !work_state_lock) return false;
+    IOLockLock(work_state_lock);
+    work->canceling = true;
+    bool pending = remove_pending_work(work);
+    while (work->executing)
+        IOLockSleep(work_state_lock, work, THREAD_UNINT);
+    work->canceling = false;
+    IOLockUnlock(work_state_lock);
+    return pending;
 }
 
 bool cancel_delayed_work_sync(struct delayed_work *dwork)
 {
+    if (!dwork || !work_state_lock) return false;
+    IOLockLock(work_state_lock);
+    dwork->work.canceling = true;
+    bool pending = remove_pending_work(&dwork->work);
+    IOLockUnlock(work_state_lock);
+    /* Never wait for a timer callback while holding its state lock. */
     del_timer_sync(&dwork->timer);
-    return cancel_work_sync(&dwork->work);
+    IOLockLock(work_state_lock);
+    while (dwork->work.executing)
+        IOLockSleep(work_state_lock, &dwork->work, THREAD_UNINT);
+    dwork->work.canceling = false;
+    IOLockUnlock(work_state_lock);
+    return pending;
 }
 
 bool cancel_delayed_work(struct delayed_work *dwork)
 {
+    if (!dwork || !work_state_lock) return false;
+    IOLockLock(work_state_lock);
+    bool pending = remove_pending_work(&dwork->work);
     del_timer(&dwork->timer);
-    dwork->work.pending = 0;
-    return true;
+    IOLockUnlock(work_state_lock);
+    return pending;
 }
 
 void flush_work(struct work_struct *work)
 {
-    for (int i = 0; i < 200 && work->pending; i++)
-        IOSleep(5);
+    if (!work || !work_state_lock) return;
+    IOLockLock(work_state_lock);
+    while (work->pending || work->executing)
+        IOLockSleep(work_state_lock, work, THREAD_UNINT);
+    IOLockUnlock(work_state_lock);
 }
 
 void flush_scheduled_work(void)
@@ -322,11 +396,7 @@ void timer_setup(struct timer_list *timer,
     timer->function = func;
     timer->expires  = 0;
     timer->active   = 0;
-    if (timer->call) {
-        thread_call_cancel(timer->call);
-        thread_call_free(timer->call);
-    }
-    timer->call = thread_call_allocate(timer_call_fn, (thread_call_param_t)timer);
+    timer->call = NULL;
 }
 
 int mod_timer(struct timer_list *timer, unsigned long expires)
@@ -336,6 +406,8 @@ int mod_timer(struct timer_list *timer, unsigned long expires)
     if (!timer->call)
         timer->call = thread_call_allocate(timer_call_fn,
                                             (thread_call_param_t)timer);
+
+    if (!timer->call) return was_active;
 
     long delay_ms = (long)expires - (long)jiffies;
     if (delay_ms <= 0) delay_ms = 1;
@@ -386,35 +458,71 @@ static struct ieee80211_hw *g_rtw88_hw;
 irq_handler_t g_irq_handler = NULL;
 irq_handler_t g_irq_thread_fn = NULL;
 void *g_irq_dev_id = NULL;
-thread_call_t g_irq_thread_call = NULL;
+
+/* XNU thread_call can be re-entered while an earlier invocation is still
+ * running. Linux NAPI/threaded IRQ relies on single-flight execution, so use
+ * one ordered queue for the PCI datapath instead. */
+static struct work_struct g_irq_work;
+static bool g_irq_work_initialized = false;
 
 /* Single active VIF — registered by the kext after add_interface so that
  * ieee80211_iterate_active_interfaces_atomic can deliver the iterator to
  * rtw88's internal callbacks (e.g. rtw_build_rsvd_page_iter). */
 static struct ieee80211_vif *g_rtw88_vif = NULL;
+static struct ieee80211_vif *g_rtw88_sta_vif = NULL;
+static struct ieee80211_sta *g_rtw88_sta = NULL;
+
+void rtw88_register_sta(struct ieee80211_vif *vif, struct ieee80211_sta *sta)
+{
+    g_rtw88_sta_vif = vif;
+    __atomic_store_n(&g_rtw88_sta, sta, __ATOMIC_SEQ_CST);
+}
+
+/* Returns false if an RX poll may still be using the station; the caller must
+ * then leak rather than free it. */
+bool rtw88_unregister_sta(struct ieee80211_sta *sta)
+{
+    if (!sta || __atomic_load_n(&g_rtw88_sta, __ATOMIC_SEQ_CST) != sta)
+        return true;
+    __atomic_store_n(&g_rtw88_sta, (struct ieee80211_sta *)NULL, __ATOMIC_SEQ_CST);
+    g_rtw88_sta_vif = NULL;
+
+    /* A poll on this thread has already finished its lookup for the frame
+     * that caused the disconnect; later lookups observe NULL. */
+    if (__atomic_load_n(&g_rtw88_rx_poll_thread, __ATOMIC_SEQ_CST) == current_thread())
+        return true;
+    for (int i = 0; i < 2000; i++) {
+        if (__atomic_load_n(&g_rtw88_rx_poll_active, __ATOMIC_SEQ_CST) == 0)
+            return true;
+        /* Callers are sleepable threads; sta_remove then takes rtwdev->mutex. */
+        IOSleep(1);
+    }
+    rtw88_candidate_log("rtw88: station unregister timed out waiting for RX poll; leaking station\n");
+    return false;
+}
 
 void rtw88_register_vif(struct ieee80211_vif *vif)   { g_rtw88_vif = vif; }
 void rtw88_unregister_vif(void)                       { g_rtw88_vif = NULL; }
 
-/* Kext-registered hook fired after the IRQ bottom-half (tx_isr) has run and
- * freed TX descriptors.  Runs on the thread_call thread with no rtw88 locks
- * held, so it can safely (async-)service a stalled output queue. */
+/* Kext hook fired after TX ISR has reclaimed descriptors. It runs on the
+ * ordered datapath worker, outside the Realtek IRQ handler itself. */
 static void (*g_tx_resume_cb)(void) = NULL;
 void rtw88_set_tx_resume_cb(void (*cb)(void)) { g_tx_resume_cb = cb; }
 
-static void rtw88_irq_thread_wrapper(thread_call_param_t param0, thread_call_param_t param1)
+static void rtw88_irq_work_fn(struct work_struct *work)
 {
+    (void)work;
     if (g_irq_thread_fn && g_irq_dev_id)
         g_irq_thread_fn(0, g_irq_dev_id);
 
-    /* tx_isr has now advanced the ring read pointer and freed slots; let the
-     * kext resume TX if it had stalled the output queue for backpressure. */
+    /* TX completions may have opened the BE ring. Wake an output queue that
+     * was deliberately stalled before rtw_tx() could start dropping skbs. */
     if (g_tx_resume_cb)
         g_tx_resume_cb();
 }
 
-/* BE-ring free-slot count for the kext flow-control decision. */
-extern u32 rtw88_be_ring_avail(struct rtw_dev *rtwdev);   /* pci.c */
+/* BE-ring free-slot count for kext flow control. */
+extern u32 rtw88_be_ring_avail(struct rtw_dev *rtwdev);
 u32 rtw88_be_tx_avail(void)
 {
     if (!g_irq_dev_id) return 0;
@@ -425,23 +533,22 @@ int rtw88_devm_request_threaded_irq(struct device *dev, unsigned int irq,
         irq_handler_t handler, irq_handler_t thread_fn,
         unsigned long flags, const char *name, void *dev_id)
 {
+    (void)dev; (void)irq; (void)flags; (void)name;
     g_irq_handler = handler;
     g_irq_thread_fn = thread_fn;
     g_irq_dev_id = dev_id;
-    if (g_irq_thread_call == NULL) {
-        g_irq_thread_call = thread_call_allocate((thread_call_func_t)rtw88_irq_thread_wrapper, NULL);
+    if (!g_irq_work_initialized) {
+        INIT_WORK(&g_irq_work, rtw88_irq_work_fn);
+        g_irq_work_initialized = true;
     }
     return 0;
 }
 
 void rtw88_devm_free_irq(struct device *dev, unsigned int irq, void *dev_id)
 {
-    if (g_irq_thread_call) {
-        /* Use the blocking variant so we don't free while still executing */
-        thread_call_cancel_wait(g_irq_thread_call);
-        thread_call_free(g_irq_thread_call);
-        g_irq_thread_call = NULL;
-    }
+    (void)dev; (void)irq; (void)dev_id;
+    if (g_irq_work_initialized)
+        cancel_work_sync(&g_irq_work);
     g_irq_handler = NULL;
     g_irq_thread_fn = NULL;
     g_irq_dev_id = NULL;
@@ -449,55 +556,82 @@ void rtw88_devm_free_irq(struct device *dev, unsigned int irq, void *dev_id)
 
 void rtw88_trigger_interrupt(void)
 {
-    if (g_irq_handler && g_irq_dev_id) {
-        int ret = g_irq_handler(0, g_irq_dev_id);
-        if (ret == IRQ_WAKE_THREAD && g_irq_thread_call) {
-            thread_call_enter(g_irq_thread_call);
-        }
-    }
+    if (!g_irq_handler || !g_irq_dev_id)
+        return;
+
+    int ret = g_irq_handler(0, g_irq_dev_id);
+    if (ret == IRQ_WAKE_THREAD && g_irq_work_initialized && g_datapath_wq)
+        queue_work(g_datapath_wq, &g_irq_work);
 }
 
-static void rtw88_napi_thread_wrapper(thread_call_param_t param0, thread_call_param_t param1)
+void rtw88_synchronize_irq(void)
 {
-    struct napi_struct *napi = (struct napi_struct *)param0;
-    if (napi && napi->poll) {
-        int work = napi->poll(napi, napi->weight);
-        if (work >= napi->weight) {
-            if (napi->thread_call) {
-                thread_call_enter((thread_call_t)napi->thread_call);
-            }
-        }
-    }
+    if (g_irq_work_initialized)
+        flush_work(&g_irq_work);
 }
 
-void rtw88_netif_napi_add(struct net_device *dev, struct napi_struct *napi, int (*poll_fn)(struct napi_struct *, int))
+static void rtw88_napi_work_fn(struct work_struct *work)
 {
+    struct napi_struct *napi = container_of(work, struct napi_struct, work);
+    if (!napi || !napi->enabled || !napi->poll)
+        return;
+
+    /* RX status lookup (rtw_rx_addr_match) dereferences the registered peer
+     * station outside rtwdev->mutex. Publish poll activity so station removal
+     * can wait for lookups that may have observed the old pointer. */
+    __atomic_store_n(&g_rtw88_rx_poll_thread, current_thread(), __ATOMIC_SEQ_CST);
+    __atomic_add_fetch(&g_rtw88_rx_poll_active, 1, __ATOMIC_SEQ_CST);
+    int done = napi->poll(napi, napi->weight);
+    __atomic_sub_fetch(&g_rtw88_rx_poll_active, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&g_rtw88_rx_poll_thread, (thread_t)NULL, __ATOMIC_SEQ_CST);
+
+    /* A full budget means Linux would leave NAPI scheduled. Requeue the same
+     * work item; the ordered queue guarantees the polls never overlap. */
+    if (napi->enabled && done >= napi->weight && g_datapath_wq)
+        queue_work(g_datapath_wq, &napi->work);
+}
+
+void rtw88_netif_napi_add(struct net_device *dev, struct napi_struct *napi,
+                           int (*poll_fn)(struct napi_struct *, int))
+{
+    if (!napi) return;
     napi->dev = dev;
     napi->poll = poll_fn;
     napi->weight = 64;
-    napi->running = 0;
-    if (napi->thread_call == NULL) {
-        napi->thread_call = (void *)thread_call_allocate((thread_call_func_t)rtw88_napi_thread_wrapper, (thread_call_param_t)napi);
-    }
+    napi->enabled = false;
+    INIT_WORK(&napi->work, rtw88_napi_work_fn);
+}
+
+void rtw88_napi_enable(struct napi_struct *napi)
+{
+    if (napi) napi->enabled = true;
+}
+
+void rtw88_napi_synchronize(struct napi_struct *napi)
+{
+    if (napi)
+        flush_work(&napi->work);
+}
+
+void rtw88_napi_disable(struct napi_struct *napi)
+{
+    if (!napi) return;
+    napi->enabled = false;
+    cancel_work_sync(&napi->work);
 }
 
 void rtw88_netif_napi_del(struct napi_struct *napi)
 {
-    if (napi->thread_call) {
-        thread_call_cancel_wait((thread_call_t)napi->thread_call);
-        thread_call_free((thread_call_t)napi->thread_call);
-        napi->thread_call = NULL;
-    }
+    if (!napi) return;
+    rtw88_napi_disable(napi);
     napi->poll = NULL;
     napi->dev = NULL;
-    napi->running = 0;
 }
 
 void rtw88_napi_schedule(struct napi_struct *napi)
 {
-    if (napi && napi->poll && napi->thread_call) {
-        thread_call_enter((thread_call_t)napi->thread_call);
-    }
+    if (napi && napi->enabled && napi->poll && g_datapath_wq)
+        queue_work(g_datapath_wq, &napi->work);
 }
 
 void rtw88_set_hw_callbacks(struct rtw88_hw_callbacks *cbs, void *kext_hw)
@@ -513,6 +647,17 @@ void rtw88_set_hw_callbacks(struct rtw88_hw_callbacks *cbs, void *kext_hw)
 
 void ieee80211_rx_irqsafe(struct ieee80211_hw *hw, struct sk_buff *skb)
 {
+    /* Linux mac80211 removes the trailing 802.11 FCS before handing frames to
+     * normal RX processing when a driver advertises RX_INCLUDES_FCS.  This
+     * port bypasses mac80211's RX core and forwards the rtw88 skb directly to
+     * RTW88IEEE80211, so preserving the four CRC bytes changes the effective
+     * ABI: data packets grow four bytes and, critically, AWDL action parsers
+     * interpret the CRC as another TLV/trailing garbage.  rtw88 explicitly
+     * sets RX_INCLUDES_FCS in rtw_register_hw(), therefore emulate the missing
+     * mac80211 normalization here, once, for every RX consumer. */
+    if (skb && hw && ieee80211_hw_check(hw, RX_INCLUDES_FCS) && skb->len >= 4)
+        skb_trim(skb, skb->len - 4);
+
     /* Use g_kext_hw as fallback in case hw->kext_hw wasn't set yet */
     void *ctx = hw ? hw->kext_hw : NULL;
     if (!ctx) ctx = g_kext_hw;
@@ -589,7 +734,12 @@ void ieee80211_iterate_active_interfaces(
 void ieee80211_iterate_stations_atomic(
     struct ieee80211_hw *hw,
     void (*iterator)(void *data, struct ieee80211_sta *sta),
-    void *data) {}
+    void *data)
+{
+    struct ieee80211_sta *sta = __atomic_load_n(&g_rtw88_sta, __ATOMIC_SEQ_CST);
+    if (hw == g_rtw88_hw && sta && iterator)
+        iterator(data, sta);
+}
 
 void ieee80211_iter_keys(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
     void (*iter)(struct ieee80211_hw *, struct ieee80211_vif *,
@@ -761,12 +911,25 @@ void ieee80211_queue_delayed_work(struct ieee80211_hw *hw,
 
 struct ieee80211_sta *ieee80211_find_sta(struct ieee80211_vif *vif,
                                           const u8 *addr)
-{ (void)vif; (void)addr; return NULL; }
+{
+    struct ieee80211_sta *sta = __atomic_load_n(&g_rtw88_sta, __ATOMIC_SEQ_CST);
+    if (!addr || !sta || vif != g_rtw88_sta_vif)
+        return NULL;
+    return memcmp(sta->addr, addr, ETH_ALEN) == 0 ? sta : NULL;
+}
 
 struct ieee80211_sta *ieee80211_find_sta_by_ifaddr(struct ieee80211_hw *hw,
                                                     const u8 *addr,
                                                     const u8 *localaddr)
-{ (void)hw; (void)addr; (void)localaddr; return NULL; }
+{
+    struct ieee80211_sta *sta = __atomic_load_n(&g_rtw88_sta, __ATOMIC_SEQ_CST);
+    struct ieee80211_vif *vif = g_rtw88_sta_vif;
+    if (hw != g_rtw88_hw || !addr || !sta || !vif)
+        return NULL;
+    if (localaddr && memcmp(vif->addr, localaddr, ETH_ALEN) != 0)
+        return NULL;
+    return memcmp(sta->addr, addr, ETH_ALEN) == 0 ? sta : NULL;
+}
 
 struct sk_buff *ieee80211_proberesp_get(struct ieee80211_hw *hw,
                                          struct ieee80211_vif *vif)
@@ -817,6 +980,11 @@ u8 ieee80211_vif_type_p2p(struct ieee80211_vif *vif)
 static struct ieee80211_hw *g_rtw88_hw = NULL;
 
 void rtw88_register_hw(struct ieee80211_hw *hw) { g_rtw88_hw = hw; }
+void rtw88_unregister_hw(struct ieee80211_hw *hw)
+{
+    if (g_rtw88_hw == hw)
+        g_rtw88_hw = NULL;
+}
 
 /* Accessor with external linkage so C++ TUs can retrieve the pointer without
  * declaring 'extern struct ieee80211_hw *g_rtw88_hw' — which would be UB
@@ -825,15 +993,8 @@ struct ieee80211_hw *rtw88_get_hw(void) { return g_rtw88_hw; }
 
 struct ieee80211_hw *wiphy_to_ieee80211_hw(struct wiphy *wiphy)
 {
-    /*
-     * wiphy->_dev (offset 0 in struct wiphy) holds rtwdev.
-     * struct ieee80211_hw::priv is also at offset 0.
-     * Casting wiphy to ieee80211_hw* lets callers do hw->priv
-     * and get rtwdev directly from wiphy memory — always valid
-     * as long as wiphy itself is alive (which it is during probe).
-     */
-    if (!wiphy) return g_rtw88_hw;  /* fallback: global */
-    return (struct ieee80211_hw *)wiphy;
+    /* Return the actual allocation, never reinterpret a different structure. */
+    return g_rtw88_hw && g_rtw88_hw->wiphy == wiphy ? g_rtw88_hw : NULL;
 }
 
 int cfg80211_get_ies_channel_number(const u8 *ie, size_t ielen,
@@ -851,7 +1012,8 @@ int regulatory_hint(struct wiphy *wiphy, const char *alpha2)
 { (void)wiphy; (void)alpha2; return 0; }
 
 /* sdio_align_size stub — not needed for PCIe-only build */
-void sdio_align_size(void) {}
+unsigned int sdio_align_size(struct sdio_func *func, unsigned int size)
+{ (void)func; return size; }
 
 /* firmware loading is in rtw88_firmware.c (separate TU, no compat header conflicts) */
 
@@ -919,31 +1081,53 @@ int timer_delete_sync(struct timer_list *timer)
 
 int rtw88_compat_init(void)
 {
+    if (system_wq || system_long_wq || g_datapath_wq || rtw88_log_lock)
+        return -EBUSY;
+
+    work_state_lock = IOLockAlloc();
+    if (!work_state_lock) return -ENOMEM;
     rtw88_log_lock = IOSimpleLockAlloc();
     system_wq      = alloc_workqueue("rtw88_system_wq", 0, 0);
     system_long_wq = alloc_workqueue("rtw88_long_wq",   0, 0);
-    if (!system_wq || !system_long_wq || !rtw88_log_lock) return -ENOMEM;
+    g_datapath_wq  = alloc_ordered_workqueue("rtw88_datapath_wq", 0);
+    if (!system_wq || !system_long_wq || !g_datapath_wq || !rtw88_log_lock) {
+        destroy_workqueue(g_datapath_wq);
+        destroy_workqueue(system_wq);
+        destroy_workqueue(system_long_wq);
+        g_datapath_wq = NULL;
+        system_wq = system_long_wq = NULL;
+        if (rtw88_log_lock) {
+            IOSimpleLockFree(rtw88_log_lock);
+            rtw88_log_lock = NULL;
+        }
+        IOLockFree(work_state_lock);
+        work_state_lock = NULL;
+        return -ENOMEM;
+    }
 
     return 0;
 }
 
 void rtw88_compat_exit(void)
 {
-    if (g_irq_thread_call) {
-        thread_call_cancel_wait(g_irq_thread_call);
-        thread_call_free(g_irq_thread_call);
-        g_irq_thread_call = NULL;
-    }
+    if (g_irq_work_initialized)
+        cancel_work_sync(&g_irq_work);
+    destroy_workqueue(g_datapath_wq);
+    g_datapath_wq = NULL;
     destroy_workqueue(system_wq);
     destroy_workqueue(system_long_wq);
     system_wq = system_long_wq = NULL;
+    if (work_state_lock) { IOLockFree(work_state_lock); work_state_lock = NULL; }
     g_irq_handler   = NULL;
     g_irq_thread_fn = NULL;
     g_irq_dev_id    = NULL;
+    g_irq_work_initialized = false;
     g_tx_resume_cb  = NULL;
     g_hw_cbs        = NULL;
     g_kext_hw       = NULL;
     g_rtw88_vif     = NULL;
+    g_rtw88_sta = NULL;
+    g_rtw88_sta_vif = NULL;
     if (rtw88_log_lock) {
         IOSimpleLockFree(rtw88_log_lock);
         rtw88_log_lock = NULL;
@@ -981,6 +1165,7 @@ extern void rtw88_get_be_bd(struct rtw_dev *rtwdev, u32 idx,
 #define RTW88_DBG_TRX_BD_IDX_MASK      0xFFF
 #define RTW88_DBG_IMR_BEDOK            (1u << 4)
 
+struct rtw_pci;
 extern void rtw_pci_enable_interrupt(struct rtw_dev *rtwdev, struct rtw_pci *rtwpci, bool exclude_rx);
 
 void rtw88_reenable_interrupt(void)
@@ -991,6 +1176,9 @@ void rtw88_reenable_interrupt(void)
         rtw_pci_enable_interrupt(rtwdev, rtwpci, false);
     }
 }
+
+/* Kernel serial/debug log (pexpert); not written to the diagnostic ring. */
+extern void kprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 extern void rtw88_get_be_ring_state(struct rtw_dev *rtwdev,
     u32 *sw_wp, u32 *sw_rp, u32 *qlen);
@@ -1005,6 +1193,23 @@ extern void rtw88_get_be_ring_state(struct rtw_dev *rtwdev,
  *   4) ring desync: hw_rp > hw_wp (chip consumed more than submitted)
  */
 void rtw88_debug_dump_tx_state(void)
+{
+    rtw88_debug_dump_tx_state_to(1);
+}
+
+/* True while the BE software ring holds queued frames. Reads only the SW
+ * ring counters (no register access), as the TX-state dump does. */
+int rtw88_be_tx_busy(void)
+{
+    if (!g_irq_dev_id) return 0;
+    u32 sw_wp = 0, sw_rp = 0, qlen = 0;
+    rtw88_get_be_ring_state((struct rtw_dev *)g_irq_dev_id, &sw_wp, &sw_rp, &qlen);
+    return qlen != 0;
+}
+
+/* to_ring=0 sends the line to kprintf only, keeping the 32 KiB diagnostic
+ * ring for events while the TX path is idle. */
+void rtw88_debug_dump_tx_state_to(int to_ring)
 {
     if (!g_irq_dev_id) return;
     struct rtw_dev *rtwdev = (struct rtw_dev *)g_irq_dev_id;
@@ -1047,16 +1252,22 @@ void rtw88_debug_dump_tx_state(void)
     u32 rx_hw_wp = (rxbd >> 16) & RTW88_DBG_TRX_BD_IDX_MASK;
     u32 rx_rp    = rxbd & RTW88_DBG_TRX_BD_IDX_MASK;
 
-    rtw88_diag_log(
-          "rtw88: TXSTATE BE hw_wp=%u hw_rp=%u sw_wp=%u sw_rp=%u qlen=%u "
-          "TXDMA_ST=0x%08x PKT_EMPTY=0x%04x BD[rp]:dma0=0x%08x dma1=0x%08x "
-          "sz0=%u sz1=%u psb=0x%04x RX_rp=%u RX_hwwp=%u "
-          "HISR0=0x%08x HISR3=0x%08x BEDOK_p=%d\n",
-          hw_wp, hw_rp, sw_wp, sw_rp, qlen,
-          txdma_st, pkt_empty, bd_dma0, bd_dma1, bd_sz0, bd_sz1, bd_psb,
-          rx_rp, rx_hw_wp,
-          hisr0, hisr3,
-          (hisr0 & RTW88_DBG_IMR_BEDOK) ? 1 : 0);
+#define RTW88_TXSTATE_FMT "rtw88: TXSTATE BE hw_wp=%u hw_rp=%u sw_wp=%u sw_rp=%u qlen=%u "\
+          "TXDMA_ST=0x%08x PKT_EMPTY=0x%04x BD[rp]:dma0=0x%08x dma1=0x%08x "\
+          "sz0=%u sz1=%u psb=0x%04x RX_rp=%u RX_hwwp=%u "\
+          "HISR0=0x%08x HISR3=0x%08x BEDOK_p=%d\n"
+#define RTW88_TXSTATE_ARGS\
+          hw_wp, hw_rp, sw_wp, sw_rp, qlen,\
+          txdma_st, pkt_empty, bd_dma0, bd_dma1, bd_sz0, bd_sz1, bd_psb,\
+          rx_rp, rx_hw_wp,\
+          hisr0, hisr3,\
+          (hisr0 & RTW88_DBG_IMR_BEDOK) ? 1 : 0
+    if (to_ring)
+        rtw88_candidate_log(RTW88_TXSTATE_FMT, RTW88_TXSTATE_ARGS);
+    else
+        kprintf(RTW88_TXSTATE_FMT, RTW88_TXSTATE_ARGS);
+#undef RTW88_TXSTATE_FMT
+#undef RTW88_TXSTATE_ARGS
 }
 
 bool rtw88_is_scanning(void)
@@ -1070,6 +1281,12 @@ bool rtw88_hw_scan_supported(struct ieee80211_hw *hw)
 {
     if (!hw || !hw->priv) return false;
     struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
+    /* The macOS caller does not populate the probe SSIDs/IEs required by
+     * this port's offload path. Use the existing software scanner on 8822C
+     * instead of advertising firmware scan capability as usable support.
+     * Keep other chips on their existing policy. */
+    if (rtwdev->chip->id == RTW_CHIP_TYPE_8822C)
+        return false;
     return rtw_fw_feature_check(&rtwdev->fw, FW_FEATURE_SCAN_OFFLOAD);
 }
 
@@ -1087,11 +1304,76 @@ void rtw88_sw_scan_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
     mutex_unlock(&rtwdev->mutex);
 }
 
+/* core_start resets MAC registers. Like rtw_leave_ips, restore the existing
+ * port after power-up; calling add_interface again would leak a port/mac_id. */
+int rtw88_restore_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+{
+    if (!hw || !hw->priv || !vif) return -EINVAL;
+    struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
+    struct rtw_vif *rtwvif = (struct rtw_vif *)vif->drv_priv;
+    if (!rtwvif->conf) return -EINVAL;
+    mutex_lock(&rtwdev->mutex);
+    rtw_vif_port_config(rtwdev, rtwvif, ~0U);
+    if (hw->conf.chandef.chan) rtw_set_channel(rtwdev);
+    rtwdev->need_rfk = true;
+    mutex_unlock(&rtwdev->mutex);
+    return 0;
+}
+
+int rtw88_set_station_mac(struct ieee80211_hw *hw,
+                          struct ieee80211_vif *vif,
+                          const uint8_t *mac)
+{
+    if (!hw || !hw->priv || !vif || !mac)
+        return -EINVAL;
+
+    struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
+    struct rtw_vif *rtwvif = (struct rtw_vif *)vif->drv_priv;
+    if (!rtwvif)
+        return -EINVAL;
+
+    memcpy(vif->addr, mac, ETH_ALEN);
+    memcpy(rtwvif->mac_addr, mac, ETH_ALEN);
+
+    mutex_lock(&rtwdev->mutex);
+    rtw_vif_port_config(rtwdev, rtwvif, PORT_SET_MAC_ADDR);
+    mutex_unlock(&rtwdev->mutex);
+    return 0;
+}
+
 void rtw88_sw_scan_switch_channel(struct ieee80211_hw *hw)
 {
     if (!hw || !hw->priv) return;
     struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
 
+    mutex_lock(&rtwdev->mutex);
+    rtw_set_channel(rtwdev);
+    mutex_unlock(&rtwdev->mutex);
+}
+
+/* Dedicated AWDL channel switch for the unassociated case. Unlike the scan
+ * helper, consume the RF-calibration request before transmitting data/action
+ * frames on the new channel. */
+void rtw88_awdl_switch_channel(struct ieee80211_hw *hw)
+{
+    if (!hw || !hw->priv) return;
+    struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
+    mutex_lock(&rtwdev->mutex);
+    rtw_set_channel(rtwdev);
+    rtwdev->need_rfk = true;
+    rtw_chip_prepare_tx(rtwdev);
+    mutex_unlock(&rtwdev->mutex);
+}
+
+/* Connected STA/AWDL coexistence must hop quickly enough to fit inside an
+ * AWDL common availability window.  Full IQK/DPK/GAPK on every 10-16 ms
+ * excursion would consume the window itself.  This mirrors the already
+ * proven connected software-scan channel hop: program the PHY only and keep
+ * the expensive RFK for normal association/channel setup. */
+void rtw88_awdl_timeslice_switch_channel(struct ieee80211_hw *hw)
+{
+    if (!hw || !hw->priv) return;
+    struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
     mutex_lock(&rtwdev->mutex);
     rtw_set_channel(rtwdev);
     mutex_unlock(&rtwdev->mutex);
@@ -1224,12 +1506,38 @@ void rtw88_restore_connected_hw(struct ieee80211_hw *hw,
         rtw_vif_port_config(rtwdev, rtwvif, PORT_SET_BSSID);
     }
 
-    rtwdev->need_rfk = true;
-    rtw_chip_prepare_tx(rtwdev);
+    /* rtw_set_channel deliberately defers calibration during a scan.
+     * Home-channel visits must obey that rule too: forcing IQK here can
+     * block for seconds on every visit while the AP buffers our traffic.
+     * Calibrate once after scan completion clears RTW_FLAG_SCANNING. */
+    if (!test_bit(RTW_FLAG_SCANNING, rtwdev->flags))
+        rtw_chip_prepare_tx(rtwdev);
 
     /* Firmware rate-adaptation on both bands (see rtw88_connect_hw_setup). */
     rtwdev->dm_info.fix_rate = 0xFF;
 
+    mutex_unlock(&rtwdev->mutex);
+}
+
+/* Fast home-channel restore used between AWDL availability windows.  The AP
+ * was put into power-save buffering before the hop; restore channel/BSSID and
+ * firmware RA without forcing a multi-millisecond RF calibration every EAW.
+ * The normal connect/recovery paths still run full RFK. */
+void rtw88_restore_connected_hw_timeslice(struct ieee80211_hw *hw,
+                                          struct ieee80211_vif *vif,
+                                          const uint8_t *bssid)
+{
+    if (!hw || !hw->priv || !vif || !bssid) return;
+    struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
+    struct rtw_vif *rtwvif = (struct rtw_vif *)vif->drv_priv;
+
+    mutex_lock(&rtwdev->mutex);
+    rtw_set_channel(rtwdev);
+    if (rtwvif) {
+        memcpy(rtwvif->bssid, bssid, ETH_ALEN);
+        rtw_vif_port_config(rtwdev, rtwvif, PORT_SET_BSSID);
+    }
+    rtwdev->dm_info.fix_rate = 0xFF;
     mutex_unlock(&rtwdev->mutex);
 }
 
@@ -1256,9 +1564,6 @@ void rtw88_get_chip_name(struct rtw_dev *rtwdev, char *name_buf, size_t buf_sz)
     case RTW_CHIP_TYPE_8723D: strlcpy(name_buf, "RTL8723DE", buf_sz); break;
     case RTW_CHIP_TYPE_8821C: strlcpy(name_buf, "RTL8821CE", buf_sz); break;
     case RTW_CHIP_TYPE_8703B: strlcpy(name_buf, "RTL8703BE", buf_sz); break;
-    case RTW_CHIP_TYPE_8821A: strlcpy(name_buf, "RTL8821AE", buf_sz); break;
-    case RTW_CHIP_TYPE_8812A: strlcpy(name_buf, "RTL8812AE", buf_sz); break;
-    case RTW_CHIP_TYPE_8814A: strlcpy(name_buf, "RTL8814AE", buf_sz); break;
     default: strlcpy(name_buf, "RTL88xx (Unknown)", buf_sz); break;
     }
 }
@@ -1270,6 +1575,20 @@ void rtw88_get_stats(struct rtw_dev *rtwdev, uint32_t *tx_bytes, uint32_t *rx_by
     if (!rtwdev) return;
     if (tx_bytes) *tx_bytes = (uint32_t)rtwdev->stats.tx_unicast;
     if (rx_bytes) *rx_bytes = (uint32_t)rtwdev->stats.rx_unicast;
+}
+
+uint8_t rtw88_get_tx_nss(struct rtw_dev *rtwdev)
+{
+    if (!rtwdev) return 1;
+
+    /* main.c normalises efuse.hw_cap.nss against rf_path_num during
+     * capability setup, but keep the fallback here as defensive ABI glue. */
+    uint8_t nss = rtwdev->efuse.hw_cap.nss;
+    if (nss == 0 || nss > 4)
+        nss = rtwdev->hal.rf_path_num;
+    if (nss == 0 || nss > 4)
+        nss = 1;
+    return nss;
 }
 
 uint32_t rtw88_read_log(char *out_buf, uint32_t max_len)

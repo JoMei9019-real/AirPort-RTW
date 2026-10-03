@@ -14,6 +14,8 @@
 #include <libkern/zlib.h>
 
 #include "fw_blobs.h"
+extern void rtw88_candidate_log(const char *, ...) __attribute__((format(printf, 1, 2)));
+#define IOLog rtw88_candidate_log
 
 /*
  * Must match linux/firmware.h field order (size then data).
@@ -27,7 +29,7 @@ struct firmware {
 };
 
 /* ------------------------------------------------------------------ */
-/*  zlib allocators — mirrors itlwm/itl80211/zutil.c exactly          */
+/*  zlib allocators — mirrors the common kernel zlib glue exactly          */
 /* ------------------------------------------------------------------ */
 
 typedef struct z_mem {
@@ -38,7 +40,11 @@ typedef struct z_mem {
 static voidpf rtw88_zcalloc(voidpf opaque, uInt items, uInt size)
 {
     (void)opaque;
-    uint32_t alloc = (uint32_t)(items * size) + (uint32_t)sizeof(z_mem *);
+    uint64_t data_size = (uint64_t)items * (uint64_t)size;
+    if (data_size > UINT32_MAX - offsetof(z_mem, data))
+        return Z_NULL;
+
+    uint32_t alloc = (uint32_t)data_size + (uint32_t)offsetof(z_mem, data);
     z_mem *zm = (z_mem *)IOMalloc(alloc);
     if (!zm) return Z_NULL;
     zm->alloc_size = alloc;
@@ -54,13 +60,13 @@ static void rtw88_zcfree(voidpf opaque, voidpf ptr)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Decompress one blob — mirrors itlwm's uncompressFirmware()        */
+/*  Decompress one blob — mirrors the usual firmware decompressor        */
 /* ------------------------------------------------------------------ */
 
 static int rtw88_decompress(uint8_t *dest, uint32_t *dest_len,
                              const uint8_t *src, uint32_t src_len)
 {
-    z_stream zs;
+    z_stream zs = { 0 };
     zs.next_in   = (Bytef *)src;
     zs.avail_in  = src_len;
     zs.next_out  = (Bytef *)dest;
@@ -100,8 +106,14 @@ static struct firmware *load_fw_from_blob(const char *base)
 
         const struct rtw88_fw_blob *b = &rtw88_fw_blobs[i];
 
-        /* 4× compressed size — same generous bound as itlwm */
-        size_t alloc = b->compressed_size * 4;
+        if (!b->data || b->compressed_size == 0 || b->original_size == 0 ||
+            b->compressed_size > UINT32_MAX || b->original_size > UINT32_MAX) {
+            IOLog("rtw88: invalid embedded metadata for %s\n", base);
+            return NULL;
+        }
+
+        /* The generator records the exact size; do not guess from compression. */
+        size_t alloc = b->original_size;
         uint32_t out_len = (uint32_t)alloc;
         uint8_t *buf = (uint8_t *)IOMalloc(alloc);
         if (!buf) {
@@ -112,6 +124,12 @@ static struct firmware *load_fw_from_blob(const char *base)
         if (rtw88_decompress(buf, &out_len,
                               b->data, (uint32_t)b->compressed_size) != 0) {
             IOLog("rtw88: decompress failed for %s\n", base);
+            IOFree(buf, alloc);
+            return NULL;
+        }
+        if (out_len != b->original_size) {
+            IOLog("rtw88: decompressed size mismatch for %s (%u != %zu)\n",
+                  base, out_len, b->original_size);
             IOFree(buf, alloc);
             return NULL;
         }

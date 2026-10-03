@@ -71,12 +71,6 @@ struct rtw_dev;
 void rtw88_dev_printk(int level, struct device *dev, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
-/* Diagnostic logger for the macOS MLME wrapper. Unlike IOLog alone, this
- * mirrors messages into the rtw88ctl log ring so short-lived deauth/roaming
- * events can be recovered after a drop. */
-void rtw88_diag_log(const char *fmt, ...)
-    __attribute__((format(printf, 1, 2)));
-
 #define dev_err(dev, fmt, ...)  rtw88_dev_printk(KERN_ERR,   dev, fmt, ##__VA_ARGS__)
 #define dev_warn(dev, fmt, ...) rtw88_dev_printk(KERN_WARN,  dev, fmt, ##__VA_ARGS__)
 #define dev_info(dev, fmt, ...) rtw88_dev_printk(KERN_INFO,  dev, fmt, ##__VA_ARGS__)
@@ -139,25 +133,11 @@ typedef atomic_t refcount_t;
 #define WLAN_EID_VHT_OPERATION      192
 #define WLAN_EID_EXT_CAPABILITY      127
 #define WLAN_EID_EXT_SUPP_RATES      50
-#define WLAN_EID_NEIGHBOR_REPORT      52
 #define WLAN_EID_VENDOR_SPECIFIC     221
 
-/* Action-frame categories used by the diagnostic MLME path. */
-#define WLAN_CATEGORY_BACK            3
-#define WLAN_CATEGORY_RADIO_MEASUREMENT 5
-#define WLAN_CATEGORY_WNM            10
-
-/* 802.11k Neighbor Report actions (Radio Measurement category). */
-#define WLAN_ACTION_NEIGHBOR_REPORT_REQ   4
-#define WLAN_ACTION_NEIGHBOR_REPORT_RESP  5
-
-/* 802.11v WNM BSS Transition Management actions. */
-#define WLAN_ACTION_BSS_TRANS_QUERY       6
-#define WLAN_ACTION_BSS_TRANS_REQ         7
-#define WLAN_ACTION_BSS_TRANS_RESP        8
-
-/* BlockAck actions (802.11 BlockAck, category 3).
+/* Action-frame categories / BlockAck actions (802.11 BlockAck, category 3).
  * Used by the MLME to negotiate A-MPDU aggregation over the air. */
+#define WLAN_CATEGORY_BACK           3
 #define WLAN_ACTION_ADDBA_REQ        0
 #define WLAN_ACTION_ADDBA_RESP       1
 #define WLAN_ACTION_DELBA            2
@@ -177,13 +157,21 @@ void rtw88_find_fw_dir(void);
 void rtw88_get_fw_version(struct rtw_dev *rtwdev, uint16_t *version, uint8_t *sub_version);
 void rtw88_get_chip_name(struct rtw_dev *rtwdev, char *name_buf, size_t buf_sz);
 void rtw88_get_stats(struct rtw_dev *rtwdev, uint32_t *tx_bytes, uint32_t *rx_bytes);
+/* Keep struct rtw_dev opaque to the C++ kext layer.  Capability queries that
+ * need the Linux driver's private layout live in rtw88_compat.c, after main.h
+ * has provided the complete definition. */
+uint8_t rtw88_get_tx_nss(struct rtw_dev *rtwdev);
 uint32_t rtw88_read_log(char *out_buf, uint32_t max_len);
+void rtw88_candidate_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+uint32_t rtw88_copy_log(char *out_buf, uint32_t max_len, uint64_t *total_bytes);
 
 void rtw88_reenable_interrupt(void);
 
 /* Dump BE TX ring + interrupt state to IOLog. Called periodically by the
  * kext's debug timer to diagnose TX freeze; see rtw88_compat.c. */
 void rtw88_debug_dump_tx_state(void);
+void rtw88_debug_dump_tx_state_to(int to_ring);
+int rtw88_be_tx_busy(void);
 
 /* Force-disable BT coexistence by clearing efuse.btcoex. Must be called
  * between rtw_pci_probe and the chip's start() op. See rtw88_compat.c. */
@@ -205,7 +193,17 @@ bool rtw88_is_scanning(void);
 bool rtw88_hw_scan_supported(struct ieee80211_hw *hw);
 void rtw88_sw_scan_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif);
 void rtw88_sw_scan_switch_channel(struct ieee80211_hw *hw);
+void rtw88_awdl_switch_channel(struct ieee80211_hw *hw);
+void rtw88_awdl_timeslice_switch_channel(struct ieee80211_hw *hw);
 void rtw88_sw_scan_complete(struct ieee80211_hw *hw, struct ieee80211_vif *vif);
+
+/* Program a new station MAC into both mac80211 VIF state and rtw88 hardware.
+ * Kept in the C compat layer because struct rtw_vif and PORT_SET_MAC_ADDR
+ * are private to the rtw88 backend headers. */
+int rtw88_set_station_mac(struct ieee80211_hw *hw,
+                          struct ieee80211_vif *vif,
+                          const uint8_t *mac);
+int rtw88_restore_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif);
 
 /*
  * Configure channel + BSSID in the chip for the connect flow.
@@ -219,11 +217,16 @@ void rtw88_connect_hw_setup(struct ieee80211_hw *hw,
 void rtw88_restore_connected_hw(struct ieee80211_hw *hw,
                                  struct ieee80211_vif *vif,
                                  const uint8_t *bssid);
+void rtw88_restore_connected_hw_timeslice(struct ieee80211_hw *hw,
+                                          struct ieee80211_vif *vif,
+                                          const uint8_t *bssid);
 
 /* Register the single active VIF so ieee80211_iterate_active_interfaces*
  * can call back into rtw88 internals (e.g. rtw_build_rsvd_page_iter for
  * the firmware reserved-page download after association). */
 void rtw88_register_vif(struct ieee80211_vif *vif);
+void rtw88_register_sta(struct ieee80211_vif *vif, struct ieee80211_sta *sta);
+bool rtw88_unregister_sta(struct ieee80211_sta *sta);
 void rtw88_unregister_vif(void);
 
 #endif /* _RTW88_COMPAT_H */
