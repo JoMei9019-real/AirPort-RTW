@@ -1,0 +1,27 @@
+name: Native AirPort build
+
+on:
+  push:
+    branches: [native-airport-integration]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap dependencies
+        run: ./scripts/bootstrap-deps.sh
+      - name: Build AirPortRTW
+        run: make airport
+      - name: Inspect bundle
+        run: |
+          test -f build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
+          plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
+          file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AirPortRTW-kext
+          path: build/out/AirPortRTW.kext
