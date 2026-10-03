@@ -21,7 +21,16 @@ jobs:
           test -f build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
+
+      - name: Package kext
+        run: |
+          cd build/out
+          ditto -c -k --sequesterRsrc --keepParent AirPortRTW.kext AirPortRTW.kext.zip
+          shasum -a 256 AirPortRTW.kext.zip > AirPortRTW.kext.zip.sha256
+
       - uses: actions/upload-artifact@v4
         with:
           name: AirPortRTW-kext
-          path: build/out/AirPortRTW.kext
+          path: |
+            build/out/AirPortRTW.kext.zip
+            build/out/AirPortRTW.kext.zip.sha256
