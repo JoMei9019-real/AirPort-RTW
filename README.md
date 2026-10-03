@@ -82,6 +82,7 @@ For the first real hardware test, use one reboot and validate the whole path:
 
 This branch is experimental kernel code. Keep a bootable fallback EFI.
 
+
 ## Lineage and licensing
 
 AirPort-RTW starts from Feixiao and incorporates GPL-compatible native IO80211 work from the RTL88WiFi / AirPort_RTW88 lineage. See `NOTICE.md` and the retained SPDX/copyright notices in individual source files.
