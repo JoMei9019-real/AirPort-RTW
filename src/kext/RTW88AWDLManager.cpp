@@ -133,6 +133,8 @@ void RTW88AWDLManager::reset()
     _lastActionRxUS = 0; _mifRx = 0; _versionRx = 0;
     _electionMismatchTolerated = 0; _sameChannelWindows = 0; _offChannelWindows = 0;
     _trailingPaddingAccepted = 0; _peerRefreshes = 0; _peerExpires = 0;
+    _retuneAttempts = 0; _retuneSuccess = 0; _retuneNotReady = 0; _sameChannelFastPath = 0;
+    _windowTargetChannel = 0; _radioChannelBefore = 0; _radioChannelAfter = 0;
     _mifPeersObserved = 0; _versionPeersObserved = 0;
     if (_txBuffer) { IOFree(_txBuffer, RTW88AWDL::MaxFrame); _txBuffer = nullptr; }
     _owner = nullptr;
@@ -794,7 +796,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.3-openawdl-radio");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.4-same-channel-fastpath");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -807,6 +809,13 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_TRAILING_PADDING_ACCEPTED", (uint64_t)_trailingPaddingAccepted, 32);
     _owner->setProperty("AWDL_PEER_REFRESHES", (uint64_t)_peerRefreshes, 32);
     _owner->setProperty("AWDL_PEER_EXPIRES", (uint64_t)_peerExpires, 32);
+    _owner->setProperty("AWDL_WINDOW_TARGET_CHANNEL", (uint64_t)_windowTargetChannel, 32);
+    _owner->setProperty("AWDL_RADIO_CHANNEL_BEFORE", (uint64_t)_radioChannelBefore, 32);
+    _owner->setProperty("AWDL_RADIO_CHANNEL_AFTER", (uint64_t)_radioChannelAfter, 32);
+    _owner->setProperty("AWDL_RETUNE_ATTEMPTS", (uint64_t)_retuneAttempts, 32);
+    _owner->setProperty("AWDL_RETUNE_SUCCESS", (uint64_t)_retuneSuccess, 32);
+    _owner->setProperty("AWDL_RETUNE_NOT_READY", (uint64_t)_retuneNotReady, 32);
+    _owner->setProperty("AWDL_SAME_CHANNEL_FASTPATH", (uint64_t)_sameChannelFastPath, 32);
     _owner->setProperty("AWDL_TEMPLATE_SOURCE",_nativeSchedule ? "driver" : "IO80211");
     _owner->setProperty("AWDL_DATA_RX",(uint64_t)_dataRx,32);
     _owner->setProperty("AWDL_DATA_RX_RESULT",(uint64_t)_lastDataRxResult,32);
@@ -949,17 +958,32 @@ bool RTW88AWDLManager::tick()
         (commonUS > guardUS * 2 && window.elapsedUS >= guardUS &&
          window.elapsedUS + guardUS < commonUS);
 
+    _windowTargetChannel = window.channel;
+    _radioChannelBefore = _backend->currentRadioChannel();
+
     if (offChannelWanted && !inCommonWindow) {
         _backend->restoreSTAChannelAfterAWDL();
         /* Not being inside an AWDL common window is normal scheduling, not
-         * a channel-switch failure.  v55 reported kIOReturnBusy here, making
-         * AWDL_CHANNEL_RESULT look broken even while the scheduler was simply
-         * keeping the PHY on the infrastructure AP. */
+         * a channel-switch failure.  Keep the PHY on the infrastructure AP. */
         _lastChannelResult = kIOReturnSuccess;
+    } else if (window.channel) {
+        const bool sameChannel = sta && homeChannel && window.channel == homeChannel;
+        if (sameChannel) {
+            ++_sameChannelFastPath;
+        } else {
+            ++_retuneAttempts;
+        }
+
+        _lastChannelResult = _backend->setAWDLChannel(window.channel);
+
+        if (!sameChannel) {
+            if (_lastChannelResult == kIOReturnSuccess) ++_retuneSuccess;
+            else if (_lastChannelResult == kIOReturnNotReady) ++_retuneNotReady;
+        }
     } else {
-        _lastChannelResult = window.channel ?
-            _backend->setAWDLChannel(window.channel) : kIOReturnNotReady;
+        _lastChannelResult = kIOReturnNotReady;
     }
+    _radioChannelAfter = _backend->currentRadioChannel();
 
     // A channel hop may cross the edge of the common window. Never send using
     // the timestamp/channel decision made before the retune completed.
