@@ -130,6 +130,7 @@ void RTW88AWDLManager::reset()
     _nextSocialSweepUS = 0; _socialSweeps = 0; _discoverySocialIndex = 0; _discoveryChannel = 6;
     _observedMasterChannel = 0; _nextAWChannel = 0; _masterChannelRaw = 0;
     _lastActionRxUS = 0; _mifRx = 0; _versionRx = 0;
+    _electionMismatchTolerated = 0; _sameChannelWindows = 0; _offChannelWindows = 0;
     _mifPeersObserved = 0; _versionPeersObserved = 0;
     if (_txBuffer) { IOFree(_txBuffer, RTW88AWDL::MaxFrame); _txBuffer = nullptr; }
     _owner = nullptr;
@@ -616,6 +617,8 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
     }
     RTW88AWDL::Clock clock;
     if (!clock.set(action, now)) { ++_actionClockRejected; return false; }
+    if (action.electionMasterMismatch)
+        ++_electionMismatchTolerated;
     Peer *peer = nullptr, *oldest = &_peers[0];
     for (auto &p : _peers) {
         if (!memcmp(p.mac, frame + 10, 6)) { peer = &p; break; }
@@ -785,13 +788,16 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-itlwm-control-openawdl-radio");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.2-openawdl-radio");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
     _owner->setProperty("AWDL_ACTION_CANDIDATES", (uint64_t)_actionCandidates, 32);
     _owner->setProperty("AWDL_ACTION_PARSE_REJECTED", (uint64_t)_actionParseRejected, 32);
     _owner->setProperty("AWDL_ACTION_CLOCK_REJECTED", (uint64_t)_actionClockRejected, 32);
+    _owner->setProperty("AWDL_ELECTION_MISMATCH_TOLERATED", (uint64_t)_electionMismatchTolerated, 32);
+    _owner->setProperty("AWDL_SAME_CHANNEL_WINDOWS", (uint64_t)_sameChannelWindows, 32);
+    _owner->setProperty("AWDL_OFF_CHANNEL_WINDOWS", (uint64_t)_offChannelWindows, 32);
     _owner->setProperty("AWDL_TEMPLATE_SOURCE",_nativeSchedule ? "driver" : "IO80211");
     _owner->setProperty("AWDL_DATA_RX",(uint64_t)_dataRx,32);
     _owner->setProperty("AWDL_DATA_RX_RESULT",(uint64_t)_lastDataRxResult,32);
@@ -923,6 +929,10 @@ bool RTW88AWDLManager::tick()
     const uint16_t homeChannel = sta ? _backend->infrastructureChannel() : 0;
     const bool offChannelWanted = sta && window.channel && homeChannel &&
                                   window.channel != homeChannel;
+    if (sta && window.channel && homeChannel) {
+        if (offChannelWanted) ++_offChannelWindows;
+        else ++_sameChannelWindows;
+    }
     const uint64_t commonUS = uint64_t(_action.commonLength ?
                                        _action.commonLength : _action.awPeriod) * 1024ULL;
     const uint64_t guardUS = 3ULL * 1024ULL;
