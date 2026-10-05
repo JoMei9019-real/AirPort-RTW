@@ -9,6 +9,7 @@
 #include <mach/mach_time.h>
 
 namespace {
+constexpr uint64_t kAWDLPeerLifetimeUS = 5000000ULL;
 template <typename R> struct AWDLResult {
     R value{};
     template <typename F> void call(F &f) { value = f(); }
@@ -131,6 +132,7 @@ void RTW88AWDLManager::reset()
     _observedMasterChannel = 0; _nextAWChannel = 0; _masterChannelRaw = 0;
     _lastActionRxUS = 0; _mifRx = 0; _versionRx = 0;
     _electionMismatchTolerated = 0; _sameChannelWindows = 0; _offChannelWindows = 0;
+    _trailingPaddingAccepted = 0; _peerRefreshes = 0; _peerExpires = 0;
     _mifPeersObserved = 0; _versionPeersObserved = 0;
     if (_txBuffer) { IOFree(_txBuffer, RTW88AWDL::MaxFrame); _txBuffer = nullptr; }
     _owner = nullptr;
@@ -619,12 +621,15 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
     if (!clock.set(action, now)) { ++_actionClockRejected; return false; }
     if (action.electionMasterMismatch)
         ++_electionMismatchTolerated;
+    if (action.trailingPaddingBytes)
+        ++_trailingPaddingAccepted;
     Peer *peer = nullptr, *oldest = &_peers[0];
     for (auto &p : _peers) {
         if (!memcmp(p.mac, frame + 10, 6)) { peer = &p; break; }
         if (p.seenUS < oldest->seenUS) oldest = &p;
     }
     if (!peer) peer = oldest;
+    else if (peer->seenUS) ++_peerRefreshes;
     memcpy(peer->mac, frame + 10, 6);
     peer->clock = clock; peer->sequence = action.sequence; peer->seenUS = now;
     /* OpenAWDL only flips the peer's fully-valid lifecycle state after MIF +
@@ -715,7 +720,7 @@ uint32_t RTW88AWDLManager::expirePublishedPeers(uint8_t *outMacs, uint32_t capac
         uint32_t count = 0;
         for (auto &peer : _peers) {
             if (!peer.announced || !peer.seenUS || now < peer.seenUS ||
-                now - peer.seenUS <= 3000000ULL)
+                now - peer.seenUS <= kAWDLPeerLifetimeUS)
                 continue;
             if (count < capacity) {
                 memcpy(outMacs + count * 6, peer.mac, 6);
@@ -731,6 +736,7 @@ uint32_t RTW88AWDLManager::expirePublishedPeers(uint8_t *outMacs, uint32_t capac
             peer.versionValid = false;
             peer.version = 0;
             peer.deviceClass = 0;
+            ++_peerExpires;
         }
         return count;
     });
@@ -761,7 +767,7 @@ void RTW88AWDLManager::drainData(uint64_t now, const RTW88AWDL::Window &window)
                  * publication/lifecycle state, not a prerequisite for using
                  * the peer's clock and channel sequence. */
                 if (!peer.seenUS || now < peer.seenUS ||
-                    now - peer.seenUS > 3000000 || memcmp(destination, peer.mac, 6)) continue;
+                    now - peer.seenUS > kAWDLPeerLifetimeUS || memcmp(destination, peer.mac, 6)) continue;
                 const auto pw = RTW88AWDL::window(peer.clock, peer.sequence, now);
                 ready = pw.channel == window.channel && RTW88AWDL::insideGuard(pw);
                 break;
@@ -788,7 +794,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.2-openawdl-radio");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.3-openawdl-radio");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -798,6 +804,9 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_ELECTION_MISMATCH_TOLERATED", (uint64_t)_electionMismatchTolerated, 32);
     _owner->setProperty("AWDL_SAME_CHANNEL_WINDOWS", (uint64_t)_sameChannelWindows, 32);
     _owner->setProperty("AWDL_OFF_CHANNEL_WINDOWS", (uint64_t)_offChannelWindows, 32);
+    _owner->setProperty("AWDL_TRAILING_PADDING_ACCEPTED", (uint64_t)_trailingPaddingAccepted, 32);
+    _owner->setProperty("AWDL_PEER_REFRESHES", (uint64_t)_peerRefreshes, 32);
+    _owner->setProperty("AWDL_PEER_EXPIRES", (uint64_t)_peerExpires, 32);
     _owner->setProperty("AWDL_TEMPLATE_SOURCE",_nativeSchedule ? "driver" : "IO80211");
     _owner->setProperty("AWDL_DATA_RX",(uint64_t)_dataRx,32);
     _owner->setProperty("AWDL_DATA_RX_RESULT",(uint64_t)_lastDataRxResult,32);
@@ -814,7 +823,7 @@ void RTW88AWDLManager::publishStats()
     uint32_t validPeers = 0, observedPeers = 0, mifPeers = 0, versionPeers = 0;
     const uint64_t peerNow = nowUS();
     for (const auto &peer : _peers) {
-        if (!peer.seenUS || peerNow < peer.seenUS || peerNow - peer.seenUS > 3000000)
+        if (!peer.seenUS || peerNow < peer.seenUS || peerNow - peer.seenUS > kAWDLPeerLifetimeUS)
             continue;
         ++observedPeers;
         if (peer.sawMIF) ++mifPeers;
