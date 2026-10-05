@@ -828,9 +828,11 @@ void RTW88AWDLManager::drainData(uint64_t now, const RTW88AWDL::Window &window)
         bool expired = now < entry.queuedUS || now - entry.queuedUS > 2000000;
         if (expired || mbuf_copydata(entry.packet, 0, 6, destination) != 0) {
             mbuf_freem(entry.packet); ++_dataDropped;
+            if (expired) ++_dataExpired;
             continue;
         }
         bool ready = false;
+        bool peerFound = (destination[0] & 1) != 0;
         if (destination[0] & 1) {
             ready = RTW88AWDL::multicastWindow(window);
         } else {
@@ -841,16 +843,23 @@ void RTW88AWDLManager::drainData(uint64_t now, const RTW88AWDL::Window &window)
                  * the peer's clock and channel sequence. */
                 if (!peer.seenUS || now < peer.seenUS ||
                     now - peer.seenUS > kAWDLPeerLifetimeUS || memcmp(destination, peer.mac, 6)) continue;
+                peerFound = true;
                 const auto pw = RTW88AWDL::window(peer.clock, peer.sequence, now);
                 ready = pw.channel == window.channel && RTW88AWDL::insideGuard(pw);
                 break;
             }
         }
-        if (ready && submitted < 16 && _backend->canTransmitAWDL()) {
+
+        const bool radioReady = _backend->canTransmitAWDL();
+        if (ready && submitted < 16 && radioReady) {
+            ++_dataTxAttempts;
             if (_backend->txAWDLDataFrame(entry.packet)) ++_dataTx;
-            else ++_dataDropped;
+            else { ++_dataDropped; ++_dataTxFailures; }
             ++submitted;
         } else {
+            if (!peerFound && !(destination[0] & 1)) ++_dataPeerDeferred;
+            else if (!ready || submitted >= 16) ++_dataWindowDeferred;
+            else if (!radioReady) ++_dataRadioDeferred;
             _pending[(_queueHead + _queueCount) % 128] = entry;
             ++_queueCount;
         }
