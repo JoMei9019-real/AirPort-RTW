@@ -15,13 +15,13 @@
 	<key>CFBundleDisplayName</key>
 	<string>AirPortRTW for RTL88xx</string>
 	<key>CFBundleGetInfoString</key>
-	<string>AirPortRTW 1.0.1 — Feixiao-derived native RTL88xx PCIe Wi-Fi driver</string>
+	<string>AirPortRTW 2.0.0-beta.1 — AWDL/AirDrop diagnostic beta</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.1</string>
+	<string>2.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.1</string>
+	<string>2.0.1</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>MacOSX</string>
