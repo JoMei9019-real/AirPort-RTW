@@ -80,6 +80,7 @@ struct Action {
     uint8_t subtype=0, presence=0, nextAwChannel=0, masterChannel=0, master[6]={};
     Sequence sequence;
     bool electionValid=false, electionMasterMismatch=false, versionValid=false;
+    bool serviceResponse=false, serviceParams=false, dataPathState=false, arpa=false, bloom=false;
     uint8_t trailingPaddingBytes=0;
     uint8_t version=0, deviceClass=0;
     uint8_t syncAddress[6]={};
@@ -154,6 +155,16 @@ inline bool parseAction(const uint8_t *p, size_t n, Action &out, ParseFailure *f
         } else if (type==21) {
             if (haveVersion || len<2) return reject("version-size-or-duplicate",pos);
             haveVersion=true; a.version=v[0]; a.deviceClass=v[1];
+        } else if (type==2) {
+            a.serviceResponse = true;
+        } else if (type==6) {
+            a.serviceParams = true;
+        } else if (type==12) {
+            a.dataPathState = true;
+        } else if (type==16) {
+            a.arpa = true;
+        } else if (type==22) {
+            a.bloom = true;
         }
         pos+=len;
     }
