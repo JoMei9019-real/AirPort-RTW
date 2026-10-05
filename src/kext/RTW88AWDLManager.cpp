@@ -142,6 +142,7 @@ void RTW88AWDLManager::reset()
     _peerSequenceEncoding = 0; _peerSequenceStride = 0; _peerScheduleNextAW = 0;
     _windowTargetChannel = 0; _radioChannelBefore = 0; _radioChannelAfter = 0;
     _mifPeersObserved = 0; _versionPeersObserved = 0;
+    _serviceResponseRx = 0; _serviceParamsRx = 0; _dataPathStateRx = 0; _arpaRx = 0; _bloomRx = 0;
     if (_txBuffer) { IOFree(_txBuffer, RTW88AWDL::MaxFrame); _txBuffer = nullptr; }
     _owner = nullptr;
     bzero(_peers, sizeof(_peers));
@@ -695,6 +696,11 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
         peer->deviceClass = action.deviceClass;
         ++_versionRx;
     }
+    if (action.serviceResponse) ++_serviceResponseRx;
+    if (action.serviceParams) { ++_serviceParamsRx; peer->sawServiceParams = true; }
+    if (action.dataPathState) { ++_dataPathStateRx; peer->sawDataPathState = true; }
+    if (action.arpa) { ++_arpaRx; peer->sawArpa = true; }
+    if (action.bloom) ++_bloomRx;
     /* Keep OpenAWDL's full peer-promotion rule for IO80211 publication, but
      * do not confuse that lifecycle bit with whether the peer may take part
      * in synchronization/election. OWL creates the peer on the first valid
@@ -843,7 +849,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.7-next-aw-fallback");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.8-service-datapath");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -908,6 +914,11 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_VALID_PEERS", (uint64_t)validPeers, 32);
     _owner->setProperty("AWDL_MIF_RX", (uint64_t)_mifRx, 32);
     _owner->setProperty("AWDL_VERSION_RX", (uint64_t)_versionRx, 32);
+    _owner->setProperty("AWDL_SERVICE_RESPONSE_RX", (uint64_t)_serviceResponseRx, 32);
+    _owner->setProperty("AWDL_SERVICE_PARAMS_RX", (uint64_t)_serviceParamsRx, 32);
+    _owner->setProperty("AWDL_DATA_PATH_STATE_RX", (uint64_t)_dataPathStateRx, 32);
+    _owner->setProperty("AWDL_ARPA_RX", (uint64_t)_arpaRx, 32);
+    _owner->setProperty("AWDL_BLOOM_RX", (uint64_t)_bloomRx, 32);
     _owner->setProperty("AWDL_MIF_PEERS_EVER", (uint64_t)_mifPeersObserved, 32);
     _owner->setProperty("AWDL_VERSION_PEERS_EVER", (uint64_t)_versionPeersObserved, 32);
     _owner->setProperty("AWDL_ACTION_RX", (uint64_t)_actionRx, 32);
