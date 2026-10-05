@@ -134,6 +134,7 @@ void RTW88AWDLManager::reset()
     _electionMismatchTolerated = 0; _sameChannelWindows = 0; _offChannelWindows = 0;
     _trailingPaddingAccepted = 0; _peerRefreshes = 0; _peerExpires = 0;
     _retuneAttempts = 0; _retuneSuccess = 0; _retuneNotReady = 0; _sameChannelFastPath = 0;
+    _retuneUnsupported = 0; _retuneBusy = 0; _retuneOther = 0; _noChannelWindows = 0;
     _windowTargetChannel = 0; _radioChannelBefore = 0; _radioChannelAfter = 0;
     _mifPeersObserved = 0; _versionPeersObserved = 0;
     if (_txBuffer) { IOFree(_txBuffer, RTW88AWDL::MaxFrame); _txBuffer = nullptr; }
@@ -432,6 +433,45 @@ void RTW88AWDLManager::setSyncEnabled(bool enabled)
     });
 }
 
+uint32_t RTW88AWDLManager::reportedChannel() const
+{
+    const uint64_t now = nowUS();
+    const bool freshValidPeer = _lastValidPeerUS && now >= _lastValidPeerUS &&
+                                now - _lastValidPeerUS <= kAWDLPeerLifetimeUS;
+    /* APPLE80211_IOC_CHANNEL describes the VIF's current/next operating
+     * channel, not the election master's social channel. Once a fully valid
+     * peer is flowing, prefer its advertised next AW channel. */
+    if (freshValidPeer && isConcreteChannel(_nextAWChannel))
+        return _nextAWChannel;
+    if (isConcreteChannel(_observedMasterChannel))
+        return _observedMasterChannel;
+    if (isConcreteChannel(_masterChannel))
+        return _masterChannel;
+    if (isConcreteChannel(_discoveryChannel))
+        return _discoveryChannel;
+    return 6;
+}
+
+uint32_t RTW88AWDLManager::reportedMasterChannel() const
+{
+    if (isConcreteChannel(_masterChannel)) return _masterChannel;
+    if (isConcreteChannel(_observedMasterChannel)) return _observedMasterChannel;
+    if (isConcreteChannel(_discoveryChannel)) return _discoveryChannel;
+    return 6;
+}
+
+const char *RTW88AWDLManager::reportedChannelSource() const
+{
+    const uint64_t now = nowUS();
+    const bool freshValidPeer = _lastValidPeerUS && now >= _lastValidPeerUS &&
+                                now - _lastValidPeerUS <= kAWDLPeerLifetimeUS;
+    if (freshValidPeer && isConcreteChannel(_nextAWChannel)) return "next-aw";
+    if (isConcreteChannel(_observedMasterChannel)) return "observed-master";
+    if (isConcreteChannel(_masterChannel)) return "master-hint";
+    if (isConcreteChannel(_discoveryChannel)) return "discovery";
+    return "fallback-6";
+}
+
 void RTW88AWDLManager::setLocalAddress(const uint8_t *mac)
 {
     return awdlGated<void>(_workLoop, _owner, [&]() -> void {
@@ -655,6 +695,7 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
      * action frame and only flips is_valid after MIF+Version+devclass. */
     peer->valid = peer->sawMIF && peer->versionValid &&
                   peer->version != 0 && peer->deviceClass != 0;
+    if (peer->valid) _lastValidPeerUS = now;
     _lastActionRxUS = now;
     if (isConcreteChannel(action.masterChannel))
         _observedMasterChannel = action.masterChannel;
@@ -796,7 +837,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.4-same-channel-fastpath");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.5-channel-control-plane");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -815,6 +856,10 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_RETUNE_ATTEMPTS", (uint64_t)_retuneAttempts, 32);
     _owner->setProperty("AWDL_RETUNE_SUCCESS", (uint64_t)_retuneSuccess, 32);
     _owner->setProperty("AWDL_RETUNE_NOT_READY", (uint64_t)_retuneNotReady, 32);
+    _owner->setProperty("AWDL_RETUNE_UNSUPPORTED", (uint64_t)_retuneUnsupported, 32);
+    _owner->setProperty("AWDL_RETUNE_BUSY", (uint64_t)_retuneBusy, 32);
+    _owner->setProperty("AWDL_RETUNE_OTHER", (uint64_t)_retuneOther, 32);
+    _owner->setProperty("AWDL_NO_CHANNEL_WINDOWS", (uint64_t)_noChannelWindows, 32);
     _owner->setProperty("AWDL_SAME_CHANNEL_FASTPATH", (uint64_t)_sameChannelFastPath, 32);
     _owner->setProperty("AWDL_TEMPLATE_SOURCE",_nativeSchedule ? "driver" : "IO80211");
     _owner->setProperty("AWDL_DATA_RX",(uint64_t)_dataRx,32);
@@ -861,6 +906,8 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_OBSERVED_MASTER_CHANNEL", (uint64_t)_observedMasterChannel, 32);
     _owner->setProperty("AWDL_NEXT_AW_CHANNEL", (uint64_t)_nextAWChannel, 32);
     _owner->setProperty("AWDL_REPORTED_CHANNEL", (uint64_t)reportedChannel(), 32);
+    _owner->setProperty("AWDL_REPORTED_MASTER_CHANNEL", (uint64_t)reportedMasterChannel(), 32);
+    _owner->setProperty("AWDL_REPORTED_CHANNEL_SOURCE", reportedChannelSource());
     _owner->setProperty("AWDL_CHANNEL_RESULT", (uint64_t)(uint32_t)_lastChannelResult, 32);
 }
 
@@ -979,9 +1026,16 @@ bool RTW88AWDLManager::tick()
         if (!sameChannel) {
             if (_lastChannelResult == kIOReturnSuccess) ++_retuneSuccess;
             else if (_lastChannelResult == kIOReturnNotReady) ++_retuneNotReady;
+            else if (_lastChannelResult == kIOReturnUnsupported) ++_retuneUnsupported;
+            else if (_lastChannelResult == kIOReturnBusy) ++_retuneBusy;
+            else ++_retuneOther;
         }
     } else {
-        _lastChannelResult = kIOReturnNotReady;
+        /* A zero channel is an intentional unavailable slot in an AWDL
+         * sequence, not a radio failure. Keep the last operation successful
+         * while the ready calculation below naturally refuses to transmit. */
+        ++_noChannelWindows;
+        _lastChannelResult = kIOReturnSuccess;
     }
     _radioChannelAfter = _backend->currentRadioChannel();
 
