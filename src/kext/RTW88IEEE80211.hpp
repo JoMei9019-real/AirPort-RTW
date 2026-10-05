@@ -174,6 +174,9 @@ public:
     bool canTransmitAWDL() const;
     bool staAssociatedForAWDL() const { return _associatedVisible && _state == RTW88_STATE_CONNECTED; }
     uint16_t infrastructureChannel() const { return _targetBSS.channel; }
+    uint16_t currentRadioChannel() const {
+        return (_hw && _hw->conf.chandef.chan) ? _hw->conf.chandef.chan->hw_value : 0;
+    }
     bool staTxBlockedByAWDL() const { return _awdlOffChannel; }
     void restoreSTAChannelAfterAWDL();
     void setAWDLAddress(const uint8_t *mac);
