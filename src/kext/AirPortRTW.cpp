@@ -107,13 +107,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 
 bool AirPortRTW::start(IOService *provider)
 {
-    setProperty("DriverBuild", "2.0.0-beta.7-awdl-next-aw-fallback");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.7");
+    setProperty("DriverBuild", "2.0.0-beta.8-awdl-service-datapath");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.8");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
-    IOLog("AirPortRTW: 2.0.0-beta.7 start (AWDL next-AW fallback beta)\n");
+    IOLog("AirPortRTW: 2.0.0-beta.8 start (AWDL service/data-path beta)\n");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
         IOLog("AirPortRTW: provider is not IOPCIDevice\n");
@@ -2097,7 +2097,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.7)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.8)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3342,7 +3342,12 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
         ++_awdlPeerPresencePosts;
         setProperty("AWDL_PEER_PRESENCE_POSTS", (uint64_t)_awdlPeerPresencePosts, 32);
         setProperty("AWDL_PEER_PRESENCE_RESULT", (uint64_t)(uint32_t)presenceRet, 32);
-        /* A newly usable peer may unblock queued mDNS/IPv6 traffic on awdl0. */
+        /* A newly usable peer may unblock queued mDNS/IPv6 traffic on awdl0.
+         * Also notify IO80211's service layer so sharingd/rapportd re-evaluate
+         * Bonjour discovery for this just-promoted AWDL peer. */
+        p2p->postServiceIndication();
+        ++_awdlServiceIndications;
+        setProperty("AWDL_SERVICE_INDICATIONS", (uint64_t)_awdlServiceIndications, 32);
         p2p->signalOutputThread();
 
 #if __IO80211_TARGET >= __MAC_10_15
@@ -3390,6 +3395,24 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
     }
 }
 
+static bool rtw88AWDLMdnsPacket(mbuf_t m, bool *ipv6)
+{
+    if (ipv6) *ipv6 = false;
+    if (!m || mbuf_pkthdr_len(m) < 14) return false;
+    uint8_t h[62] = {};
+    const size_t total = mbuf_pkthdr_len(m);
+    const size_t copy = total < sizeof(h) ? total : sizeof(h);
+    if (mbuf_copydata(m, 0, copy, h) != 0) return false;
+    const uint16_t type = (uint16_t(h[12]) << 8) | h[13];
+    if (type != 0x86dd || copy < 54) return false;
+    if (ipv6) *ipv6 = true;
+    if (h[20] != 17 || copy < 62) return false; /* IPv6 next-header UDP */
+    const uint8_t *udp = h + 54;
+    const uint16_t sport = (uint16_t(udp[0]) << 8) | udp[1];
+    const uint16_t dport = (uint16_t(udp[2]) << 8) | udp[3];
+    return sport == 5353 || dport == 5353;
+}
+
 void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
 {
     if (!m) return;
@@ -3399,9 +3422,33 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
         return;
     }
     const unsigned long packetLen = (unsigned long)mbuf_pkthdr_len(m);
+    /* Ensure the mbuf carries a coherent Ethernet length before crossing the
+     * private IO80211P2PInterface input ABI. */
+    mbuf_pkthdr_setlen(m, packetLen);
+    if (!mbuf_next(m) && mbuf_len(m) != packetLen)
+        mbuf_setlen(m, packetLen);
+
+    bool ipv6 = false;
+    const bool mdns = rtw88AWDLMdnsPacket(m, &ipv6);
+    if (ipv6) {
+        ++_awdlIPv6Rx;
+        setProperty("AWDL_IPV6_RX", (uint64_t)_awdlIPv6Rx, 32);
+    }
+    if (mdns) {
+        ++_awdlMdnsRx;
+        setProperty("AWDL_MDNS_RX", (uint64_t)_awdlMdnsRx, 32);
+    }
+
     alignas(8) uint8_t tagStorage[64];
     UInt32 ret = awdl->inputPacket(m, rtw88ZeroPacketInfo(tagStorage));
     if (_awdlManager) _awdlManager->noteDataRX(ret);
+    if (mdns) {
+        if (auto *p2p = OSDynamicCast(IO80211P2PInterface, awdl)) {
+            p2p->postServiceIndication();
+            ++_awdlServiceIndications;
+            setProperty("AWDL_SERVICE_INDICATIONS", (uint64_t)_awdlServiceIndications, 32);
+        }
+    }
     /* IO80211P2PInterface::inputPacket is a private ABI. Keep the raw value
      * as bounded telemetry only; do not flood the shutdown console. */
     setProperty("AWDL_LAST_DATA_INPUT_RAW", (uint64_t)ret, 32);
