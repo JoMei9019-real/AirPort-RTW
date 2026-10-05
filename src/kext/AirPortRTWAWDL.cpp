@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.7 — Ventura IO80211 AWDL/P2P virtual-interface bridge.
+ * AirPortRTW 2.0.0-beta.8 — Ventura IO80211 AWDL/P2P virtual-interface bridge.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -16,6 +16,24 @@
 static const char *rtw88VifRoleName(UInt role)
 {
     return role == APPLE80211_VIF_AWDL ? "awdl" : "p2p";
+}
+
+static bool rtw88AWDLQueuedMdnsPacket(mbuf_t m, bool *ipv6)
+{
+    if (ipv6) *ipv6 = false;
+    if (!m || mbuf_pkthdr_len(m) < 14) return false;
+    uint8_t h[62] = {};
+    const size_t total = mbuf_pkthdr_len(m);
+    const size_t copy = total < sizeof(h) ? total : sizeof(h);
+    if (mbuf_copydata(m, 0, copy, h) != 0) return false;
+    const uint16_t type = (uint16_t(h[12]) << 8) | h[13];
+    if (type != 0x86dd || copy < 54) return false;
+    if (ipv6) *ipv6 = true;
+    if (h[20] != 17 || copy < 62) return false;
+    const uint8_t *udp = h + 54;
+    const uint16_t sport = (uint16_t(udp[0]) << 8) | udp[1];
+    const uint16_t dport = (uint16_t(udp[2]) << 8) | udp[3];
+    return sport == 5353 || dport == 5353;
 }
 
 static uint16_t rtw88PreferredAWDLSocialChannel(RTW88IEEE80211 *backend)
@@ -691,6 +709,18 @@ void AirPortRTW::requestPacketTx(void *object, UInt options)
         while (m) {
             mbuf_t next = mbuf_nextpkt(m);
             mbuf_setnextpkt(m, nullptr);
+
+            bool ipv6 = false;
+            const bool mdns = rtw88AWDLQueuedMdnsPacket(m, &ipv6);
+            if (ipv6) {
+                ++_awdlIPv6Tx;
+                setProperty("AWDL_IPV6_TX", (uint64_t)_awdlIPv6Tx, 32);
+            }
+            if (mdns) {
+                ++_awdlMdnsTx;
+                setProperty("AWDL_MDNS_TX", (uint64_t)_awdlMdnsTx, 32);
+            }
+
             if (_awdlManager) {
                 if (_awdlManager->enqueueData(m)) sent++;
             } else mbuf_freem(m);
