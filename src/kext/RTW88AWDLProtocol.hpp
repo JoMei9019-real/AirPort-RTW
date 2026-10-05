@@ -235,7 +235,11 @@ inline size_t buildNativeAction(uint8_t *out, size_t capacity, const uint8_t *lo
     v=tlv(18,41); if(!v) return 0; sequence(v);
     v=tlv(24,40); if(!v) return 0; memcpy(v,a.master,6);memcpy(v+6,a.syncAddress,6);
     put32(v+12,a.masterCounter);put32(v+16,a.height);put32(v+20,a.masterMetric);put32(v+24,60);
-    v=tlv(6,9); if(!v) return 0; // Empty service bitmap; mDNS is carried by the host's IPv6 stack.
+    /* Service Parameters are retained even with an empty legacy bitmap.
+     * Modern AirDrop service discovery itself is Bonjour/mDNS over awdl0; this
+     * TLV still advertises the service update index/control-plane presence. */
+    v=tlv(6,9); if(!v) return 0;
+    v[0]=v[1]=v[2]=0; put16(v+3,0); put32(v+5,0);
     // OWL advertises HT capabilities and ARPA only in MIFs, not PSFs.  Keeping
     // that distinction matters because MIF is the peer-promotion frame.
     if (subtype==3) {
