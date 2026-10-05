@@ -2,7 +2,7 @@ name: Native AirPort build
 
 on:
   push:
-    branches: [native-airport-integration]
+    branches: [native-airport-integration, beta-2.0.0]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-kext
+          name: AirPortRTW-2.0.0-beta.1
           path: |
             build/out/AirPortRTW.kext.zip
             build/out/AirPortRTW.kext.zip.sha256
