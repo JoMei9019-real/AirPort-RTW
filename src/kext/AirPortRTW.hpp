@@ -305,7 +305,7 @@ private:
     uint32_t                _awdlPeerPresencePosts = 0;
     uint32_t                _awdlPeerAbsencePosts = 0;
     uint32_t                _awdlPeerIPv6Posts = 0;
-    uint32_t                _awdlServiceIndications = 0;
+    uint32_t                _awdlServiceRefreshSignals = 0;
     uint32_t                _awdlMdnsRx = 0, _awdlMdnsTx = 0;
     uint32_t                _awdlIPv6Rx = 0, _awdlIPv6Tx = 0;
     /* Sonoma + OCLP legacy IO80211 can service CoreWiFi scans entirely from
