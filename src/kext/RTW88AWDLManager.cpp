@@ -876,7 +876,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.8-service-datapath");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.9-tx-pipeline");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -952,7 +952,26 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_SYNC_UPDATES", (uint64_t)_syncUpdates, 32);
     _owner->setProperty("AWDL_DATA_TX", (uint64_t)_dataTx, 32);
     _owner->setProperty("AWDL_DATA_DROPPED", (uint64_t)_dataDropped, 32);
+    _owner->setProperty("AWDL_TX_ENQUEUE_SUCCESS", (uint64_t)_dataEnqueueSuccess, 32);
+    _owner->setProperty("AWDL_TX_ENQUEUE_FAILURE", (uint64_t)_dataEnqueueFailure, 32);
+    _owner->setProperty("AWDL_TX_ATTEMPTS", (uint64_t)_dataTxAttempts, 32);
+    _owner->setProperty("AWDL_TX_FAILURES", (uint64_t)_dataTxFailures, 32);
+    _owner->setProperty("AWDL_TX_WINDOW_DEFERRED", (uint64_t)_dataWindowDeferred, 32);
+    _owner->setProperty("AWDL_TX_PEER_DEFERRED", (uint64_t)_dataPeerDeferred, 32);
+    _owner->setProperty("AWDL_TX_RADIO_DEFERRED", (uint64_t)_dataRadioDeferred, 32);
+    _owner->setProperty("AWDL_TX_EXPIRED", (uint64_t)_dataExpired, 32);
+    _owner->setProperty("AWDL_TX_MULTICAST_QUEUED", (uint64_t)_dataMulticastQueued, 32);
+    _owner->setProperty("AWDL_TX_UNICAST_QUEUED", (uint64_t)_dataUnicastQueued, 32);
     _owner->setProperty("AWDL_QUEUE_DEPTH", (uint64_t)_queueCount, 32);
+    _owner->setProperty("AWDL_TX_QUEUE_HIGH_WATER", (uint64_t)_dataQueueHighWater, 32);
+    uint64_t oldestAgeMS = 0;
+    if (_queueCount) {
+        const Pending &oldest = _pending[_queueHead];
+        const uint64_t qnow = nowUS();
+        if (oldest.packet && oldest.queuedUS && qnow >= oldest.queuedUS)
+            oldestAgeMS = (qnow - oldest.queuedUS) / 1000ULL;
+    }
+    _owner->setProperty("AWDL_TX_PENDING_OLDEST_MS", oldestAgeMS, 64);
     _owner->setProperty("AWDL_BLOCKED_WINDOWS", (uint64_t)_blockedWindows, 32);
     _owner->setProperty("AWDL_WINDOW_SKIPS", (uint64_t)_windowSkips, 32);
     _owner->setProperty("AWDL_DISCOVERY_CHANNEL", (uint64_t)_discoveryChannel, 32);
