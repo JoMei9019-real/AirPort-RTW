@@ -137,6 +137,9 @@ void RTW88AWDLManager::reset()
     _retuneUnsupported = 0; _retuneBusy = 0; _retuneOther = 0; _noChannelWindows = 0;
     _peerScheduleWindows = 0; _peerScheduleSameChannel = 0; _peerScheduleOffChannel = 0;
     _nativeBootstrapWindows = 0; _busyState = 0;
+    _peerNextAWFallbackWindows = 0; _peerSequenceHomeMatches = 0;
+    _peerSequenceZeroSlots = 0; _peerSequenceNonzeroSlots = 0;
+    _peerSequenceEncoding = 0; _peerSequenceStride = 0; _peerScheduleNextAW = 0;
     _windowTargetChannel = 0; _radioChannelBefore = 0; _radioChannelAfter = 0;
     _mifPeersObserved = 0; _versionPeersObserved = 0;
     if (_txBuffer) { IOFree(_txBuffer, RTW88AWDL::MaxFrame); _txBuffer = nullptr; }
@@ -675,7 +678,8 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
     if (!peer) peer = oldest;
     else if (peer->seenUS) ++_peerRefreshes;
     memcpy(peer->mac, frame + 10, 6);
-    peer->clock = clock; peer->sequence = action.sequence; peer->commonLength = action.commonLength; peer->seenUS = now;
+    peer->clock = clock; peer->sequence = action.sequence; peer->commonLength = action.commonLength;
+    peer->nextAwChannel = action.nextAwChannel; peer->seenUS = now;
     /* OpenAWDL only flips the peer's fully-valid lifecycle state after MIF +
      * Version TLV + device class, but it creates/uses the peer earlier for
      * synchronization, election and channel tracking. Keep those concepts
@@ -839,7 +843,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.6-peer-schedule");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.7-next-aw-fallback");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -868,6 +872,13 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_PEER_SCHEDULE_OFFCHANNEL", (uint64_t)_peerScheduleOffChannel, 32);
     _owner->setProperty("AWDL_NATIVE_BOOTSTRAP_WINDOWS", (uint64_t)_nativeBootstrapWindows, 32);
     _owner->setProperty("AWDL_BUSY_STATE", (uint64_t)_busyState, 32);
+    _owner->setProperty("AWDL_PEER_NEXT_AW_FALLBACK_WINDOWS", (uint64_t)_peerNextAWFallbackWindows, 32);
+    _owner->setProperty("AWDL_PEER_SEQUENCE_HOME_MATCH", (uint64_t)_peerSequenceHomeMatches, 32);
+    _owner->setProperty("AWDL_PEER_SEQUENCE_ZERO", (uint64_t)_peerSequenceZeroSlots, 8);
+    _owner->setProperty("AWDL_PEER_SEQUENCE_NONZERO", (uint64_t)_peerSequenceNonzeroSlots, 8);
+    _owner->setProperty("AWDL_PEER_SEQUENCE_ENCODING", (uint64_t)_peerSequenceEncoding, 8);
+    _owner->setProperty("AWDL_PEER_SEQUENCE_STRIDE", (uint64_t)_peerSequenceStride, 8);
+    _owner->setProperty("AWDL_PEER_SCHEDULE_NEXT_AW", (uint64_t)_peerScheduleNextAW, 8);
     _owner->setProperty("AWDL_TEMPLATE_SOURCE",_nativeSchedule ? "driver" : "IO80211");
     _owner->setProperty("AWDL_DATA_RX",(uint64_t)_dataRx,32);
     _owner->setProperty("AWDL_DATA_RX_RESULT",(uint64_t)_lastDataRxResult,32);
@@ -1017,6 +1028,34 @@ bool RTW88AWDLManager::tick()
      * from infrastructure and return home for the rest of the EAW. */
     const bool sta = _backend->staAssociatedForAWDL();
     const uint16_t homeChannel = sta ? _backend->infrastructureChannel() : 0;
+
+    /* Apple sequences legitimately contain zero/unavailable entries. On a
+     * single-PHY Mac those entries otherwise discard most opportunities even
+     * when the peer simultaneously advertises its next AW on the exact STA
+     * home channel. In that one safe case, remain on the already-associated
+     * home channel and use nextAwChannel as the operational window. Never use
+     * this fallback to initiate an off-channel transmission. */
+    if (schedulePeer) {
+        uint8_t zeroSlots = 0, nonzeroSlots = 0, homeMatches = 0;
+        for (unsigned i = 0; i < schedulePeer->sequence.count && i < 16; ++i) {
+            const uint8_t ch = schedulePeer->sequence.channel[i];
+            if (ch) ++nonzeroSlots; else ++zeroSlots;
+            if (homeChannel && ch == homeChannel) ++homeMatches;
+        }
+        _peerSequenceZeroSlots = zeroSlots;
+        _peerSequenceNonzeroSlots = nonzeroSlots;
+        _peerSequenceEncoding = schedulePeer->sequence.encoding;
+        _peerSequenceStride = schedulePeer->sequence.stride;
+        _peerScheduleNextAW = schedulePeer->nextAwChannel;
+        _peerSequenceHomeMatches = homeMatches;
+
+        if (!window.channel && sta && homeChannel &&
+            isConcreteChannel(schedulePeer->nextAwChannel) &&
+            schedulePeer->nextAwChannel == homeChannel) {
+            window.channel = schedulePeer->nextAwChannel;
+            ++_peerNextAWFallbackWindows;
+        }
+    }
     const bool offChannelWanted = sta && window.channel && homeChannel &&
                                   window.channel != homeChannel;
     if (schedulePeer) {
