@@ -135,6 +135,8 @@ void RTW88AWDLManager::reset()
     _trailingPaddingAccepted = 0; _peerRefreshes = 0; _peerExpires = 0;
     _retuneAttempts = 0; _retuneSuccess = 0; _retuneNotReady = 0; _sameChannelFastPath = 0;
     _retuneUnsupported = 0; _retuneBusy = 0; _retuneOther = 0; _noChannelWindows = 0;
+    _peerScheduleWindows = 0; _peerScheduleSameChannel = 0; _peerScheduleOffChannel = 0;
+    _nativeBootstrapWindows = 0; _busyState = 0;
     _windowTargetChannel = 0; _radioChannelBefore = 0; _radioChannelAfter = 0;
     _mifPeersObserved = 0; _versionPeersObserved = 0;
     if (_txBuffer) { IOFree(_txBuffer, RTW88AWDL::MaxFrame); _txBuffer = nullptr; }
@@ -673,7 +675,7 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
     if (!peer) peer = oldest;
     else if (peer->seenUS) ++_peerRefreshes;
     memcpy(peer->mac, frame + 10, 6);
-    peer->clock = clock; peer->sequence = action.sequence; peer->seenUS = now;
+    peer->clock = clock; peer->sequence = action.sequence; peer->commonLength = action.commonLength; peer->seenUS = now;
     /* OpenAWDL only flips the peer's fully-valid lifecycle state after MIF +
      * Version TLV + device class, but it creates/uses the peer earlier for
      * synchronization, election and channel tracking. Keep those concepts
@@ -837,7 +839,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.5-channel-control-plane");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.6-peer-schedule");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -861,6 +863,11 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_RETUNE_OTHER", (uint64_t)_retuneOther, 32);
     _owner->setProperty("AWDL_NO_CHANNEL_WINDOWS", (uint64_t)_noChannelWindows, 32);
     _owner->setProperty("AWDL_SAME_CHANNEL_FASTPATH", (uint64_t)_sameChannelFastPath, 32);
+    _owner->setProperty("AWDL_PEER_SCHEDULE_WINDOWS", (uint64_t)_peerScheduleWindows, 32);
+    _owner->setProperty("AWDL_PEER_SCHEDULE_SAME_CHANNEL", (uint64_t)_peerScheduleSameChannel, 32);
+    _owner->setProperty("AWDL_PEER_SCHEDULE_OFFCHANNEL", (uint64_t)_peerScheduleOffChannel, 32);
+    _owner->setProperty("AWDL_NATIVE_BOOTSTRAP_WINDOWS", (uint64_t)_nativeBootstrapWindows, 32);
+    _owner->setProperty("AWDL_BUSY_STATE", (uint64_t)_busyState, 32);
     _owner->setProperty("AWDL_TEMPLATE_SOURCE",_nativeSchedule ? "driver" : "IO80211");
     _owner->setProperty("AWDL_DATA_RX",(uint64_t)_dataRx,32);
     _owner->setProperty("AWDL_DATA_RX_RESULT",(uint64_t)_lastDataRxResult,32);
@@ -984,7 +991,25 @@ bool RTW88AWDLManager::tick()
         }
     }
 
-    auto window = RTW88AWDL::window(_clock, _action.sequence, now);
+    /* Once a fully valid Apple peer is flowing, use the freshest peer's
+     * advertised clock + channel sequence for actual single-PHY ownership.
+     * Keep the native/election schedule intact for our own management-frame
+     * stamping; this only changes where the radio spends availability windows. */
+    const Peer *schedulePeer = nullptr;
+    for (const auto &peer : _peers) {
+        if (!peer.valid || !peer.seenUS || now < peer.seenUS ||
+            now - peer.seenUS > kAWDLPeerLifetimeUS ||
+            !peer.clock.periodTU || !peer.sequence.count || !peer.sequence.stride)
+            continue;
+        if (!schedulePeer || peer.seenUS > schedulePeer->seenUS)
+            schedulePeer = &peer;
+    }
+
+    const RTW88AWDL::Clock &operatingClock = schedulePeer ? schedulePeer->clock : _clock;
+    const RTW88AWDL::Sequence &operatingSequence = schedulePeer ? schedulePeer->sequence : _action.sequence;
+    const uint16_t operatingCommonLength = schedulePeer && schedulePeer->commonLength
+        ? schedulePeer->commonLength : _action.commonLength;
+    auto window = RTW88AWDL::window(operatingClock, operatingSequence, now);
 
     /* One RTL88 PHY must time-share infrastructure STA and AWDL. Apple AWDL
      * advertises a common availability window inside the larger EAW. When
@@ -994,12 +1019,22 @@ bool RTW88AWDLManager::tick()
     const uint16_t homeChannel = sta ? _backend->infrastructureChannel() : 0;
     const bool offChannelWanted = sta && window.channel && homeChannel &&
                                   window.channel != homeChannel;
+    if (schedulePeer) {
+        ++_peerScheduleWindows;
+        if (sta && window.channel && homeChannel) {
+            if (offChannelWanted) ++_peerScheduleOffChannel;
+            else ++_peerScheduleSameChannel;
+        }
+    } else {
+        ++_nativeBootstrapWindows;
+    }
     if (sta && window.channel && homeChannel) {
         if (offChannelWanted) ++_offChannelWindows;
         else ++_sameChannelWindows;
     }
-    const uint64_t commonUS = uint64_t(_action.commonLength ?
-                                       _action.commonLength : _action.awPeriod) * 1024ULL;
+    const uint64_t commonUS = uint64_t(operatingCommonLength ?
+                                       operatingCommonLength :
+                                       (schedulePeer ? operatingClock.periodTU : _action.awPeriod)) * 1024ULL;
     const uint64_t guardUS = 3ULL * 1024ULL;
     const bool inCommonWindow = !offChannelWanted ||
         (commonUS > guardUS * 2 && window.elapsedUS >= guardUS &&
@@ -1027,7 +1062,10 @@ bool RTW88AWDLManager::tick()
             if (_lastChannelResult == kIOReturnSuccess) ++_retuneSuccess;
             else if (_lastChannelResult == kIOReturnNotReady) ++_retuneNotReady;
             else if (_lastChannelResult == kIOReturnUnsupported) ++_retuneUnsupported;
-            else if (_lastChannelResult == kIOReturnBusy) ++_retuneBusy;
+            else if (_lastChannelResult == kIOReturnBusy) {
+                ++_retuneBusy;
+                _busyState = (uint32_t)_backend->rawState();
+            }
             else ++_retuneOther;
         }
     } else {
@@ -1042,7 +1080,7 @@ bool RTW88AWDLManager::tick()
     // A channel hop may cross the edge of the common window. Never send using
     // the timestamp/channel decision made before the retune completed.
     now = nowUS();
-    auto after = RTW88AWDL::window(_clock, _action.sequence, now);
+    auto after = RTW88AWDL::window(operatingClock, operatingSequence, now);
     const bool afterCommon = !offChannelWanted ||
         (commonUS > guardUS * 2 && after.elapsedUS >= guardUS &&
          after.elapsedUS + guardUS < commonUS);
@@ -1056,31 +1094,35 @@ bool RTW88AWDLManager::tick()
          * the single RTL PHY actually owns an AWDL availability window. */
         drainActions(now);
         if (_nativeSchedule) {
-            /* OWL/OpenAWDL uses independent action-frame cadences: PSFs are
-             * periodic, while one MIF is emitted per EAW.  A single-PHY Mac
-             * cannot stay away from its infrastructure AP for the entire EAW,
-             * so place that MIF near the center of the common window we
-             * actually own instead of alternating PSF/MIF every afPeriod. */
-            const uint64_t commonCenterUS = (uint64_t(_action.commonLength) * 1024) / 2;
-            const uint32_t eaw = _action.presence ? uint32_t(after.aw / _action.presence) : 0;
-            const bool mifDue = (!_lastMIFEAWValid || eaw != _lastMIFEAW) &&
-                after.elapsedUS >= commonCenterUS;
-            if (mifDue) {
-                uint32_t frameLength=(uint32_t)RTW88AWDL::buildNativeAction(
-                    _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,3);
-                RTW88AWDL::stamp(_txBuffer,_action,after,now,_actionSequence++);
-                if (frameLength && _backend->txRawManagementFrame(_txBuffer,frameLength)) {
-                    ++_actionTx; ++_mifTx;
-                    _lastMIFEAW=eaw; _lastMIFEAWValid=true;
+            /* Our own PSF/MIF must still be stamped against our advertised
+             * control schedule. If peer-driven radio ownership currently
+             * differs, wait for an overlapping channel instead of publishing
+             * contradictory timing fields. */
+            const auto controlWindow = RTW88AWDL::window(_clock, _action.sequence, now);
+            const bool controlReady = controlWindow.channel &&
+                controlWindow.channel == after.channel && RTW88AWDL::insideGuard(controlWindow);
+            if (controlReady) {
+                const uint64_t commonCenterUS = (uint64_t(_action.commonLength) * 1024) / 2;
+                const uint32_t eaw = _action.presence ? uint32_t(controlWindow.aw / _action.presence) : 0;
+                const bool mifDue = (!_lastMIFEAWValid || eaw != _lastMIFEAW) &&
+                    controlWindow.elapsedUS >= commonCenterUS;
+                if (mifDue) {
+                    uint32_t frameLength=(uint32_t)RTW88AWDL::buildNativeAction(
+                        _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,3);
+                    RTW88AWDL::stamp(_txBuffer,_action,controlWindow,now,_actionSequence++);
+                    if (frameLength && _backend->txRawManagementFrame(_txBuffer,frameLength)) {
+                        ++_actionTx; ++_mifTx;
+                        _lastMIFEAW=eaw; _lastMIFEAWValid=true;
+                    }
                 }
-            }
-            if (now >= _nextPSFUS) {
-                uint32_t frameLength=(uint32_t)RTW88AWDL::buildNativeAction(
-                    _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,0);
-                RTW88AWDL::stamp(_txBuffer,_action,after,now,_actionSequence++);
-                if (frameLength && _backend->txRawManagementFrame(_txBuffer,frameLength)) {
-                    ++_actionTx; ++_psfTx;
-                    _nextPSFUS = now + uint64_t(_action.afPeriod) * 1024;
+                if (now >= _nextPSFUS) {
+                    uint32_t frameLength=(uint32_t)RTW88AWDL::buildNativeAction(
+                        _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,0);
+                    RTW88AWDL::stamp(_txBuffer,_action,controlWindow,now,_actionSequence++);
+                    if (frameLength && _backend->txRawManagementFrame(_txBuffer,frameLength)) {
+                        ++_actionTx; ++_psfTx;
+                        _nextPSFUS = now + uint64_t(_action.afPeriod) * 1024;
+                    }
                 }
             }
         } else if (now >= _nextActionUS) {
