@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.4 — Ventura IO80211 AWDL/P2P virtual-interface bridge.
+ * AirPortRTW 2.0.0-beta.5 — Ventura IO80211 AWDL/P2P virtual-interface bridge.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -447,7 +447,7 @@ SInt32 AirPortRTW::handleAWDLVirtualRequest(UInt request_type, int request_numbe
         if (set) {
             if (!d->master_channel) return kIOReturnBadArgument;
             _awdlManager->setMasterChannel(d->master_channel);
-        } else { bzero(d, sizeof(*d)); d->version = APPLE80211_VERSION; d->master_channel = _awdlManager->reportedChannel(); }
+        } else { bzero(d, sizeof(*d)); d->version = APPLE80211_VERSION; d->master_channel = _awdlManager->reportedMasterChannel(); }
         return kIOReturnSuccess;
     }
 
