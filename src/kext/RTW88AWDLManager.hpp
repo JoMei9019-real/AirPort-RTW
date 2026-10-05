@@ -149,6 +149,10 @@ private:
     bool _lastMIFEAWValid = false;
     uint16_t _actionSequence = 0;
     uint32_t _actionTx = 0, _psfTx = 0, _mifTx = 0, _actionRx = 0, _dataTx = 0, _dataDropped = 0, _syncUpdates = 0;
+    uint32_t _dataEnqueueSuccess = 0, _dataEnqueueFailure = 0, _dataQueueHighWater = 0;
+    uint32_t _dataTxAttempts = 0, _dataTxFailures = 0, _dataWindowDeferred = 0;
+    uint32_t _dataPeerDeferred = 0, _dataRadioDeferred = 0, _dataExpired = 0;
+    uint32_t _dataMulticastQueued = 0, _dataUnicastQueued = 0;
     uint32_t _appleActionQueued = 0, _appleActionTx = 0, _appleActionDropped = 0, _appleActionRestamped = 0;
     uint32_t _bpfTemplateAdoptions = 0;
     uint32_t _blockedWindows = 0, _windowSkips = 0;
