@@ -632,15 +632,29 @@ bool RTW88AWDLManager::enqueueData(mbuf_t m)
 {
     return awdlGated<bool>(_workLoop, _owner, [&]() -> bool {
     if (!m) return false;
-    if (!_syncEnabled || !_awdlInterface || !_airTemplate || _queueCount == 128 ||
-        mbuf_pkthdr_len(m) < 14 || mbuf_pkthdr_len(m) > 4096) {
-        mbuf_freem(m); ++_dataDropped;
+    const size_t len = mbuf_pkthdr_len(m);
+    if (!_syncEnabled || !_awdlInterface || _queueCount == 128 ||
+        len < 14 || len > 4096) {
+        mbuf_freem(m);
+        ++_dataDropped;
+        ++_dataEnqueueFailure;
+        publishStats();
         return false;
     }
+
+    uint8_t dst = 0;
+    if (mbuf_copydata(m, 0, 1, &dst) == 0) {
+        if (dst & 1) ++_dataMulticastQueued;
+        else ++_dataUnicastQueued;
+    }
+
     Pending &entry = _pending[(_queueHead + _queueCount) % 128];
     entry.packet = m; entry.queuedUS = nowUS();
     ++_queueCount;
+    ++_dataEnqueueSuccess;
+    if (_queueCount > _dataQueueHighWater) _dataQueueHighWater = _queueCount;
     arm(1);
+    publishStats();
     return true;
     });
 }
