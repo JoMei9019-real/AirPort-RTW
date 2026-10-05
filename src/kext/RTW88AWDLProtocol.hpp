@@ -77,7 +77,7 @@ struct Action {
     uint16_t awPeriod=0, afPeriod=0, countdown=0, awCounter=0, commonLength=0;
     uint8_t subtype=0, presence=0, nextAwChannel=0, masterChannel=0, master[6]={};
     Sequence sequence;
-    bool electionValid=false, versionValid=false;
+    bool electionValid=false, electionMasterMismatch=false, versionValid=false;
     uint8_t version=0, deviceClass=0;
     uint8_t syncAddress[6]={};
     uint32_t masterCounter=0, masterMetric=0, height=0;
@@ -143,8 +143,15 @@ inline bool parseAction(const uint8_t *p, size_t n, Action &out, ParseFailure *f
         pos+=len;
     }
     if (!haveSync) return reject("missing-sync",n);
-    if (haveElection && memcmp(electedMaster,a.master,6)) return reject("master-mismatch",n);
-    a.electionValid=haveElection; a.versionValid=haveVersion;
+    /* Election-v2 and Sync-Parameters can legitimately straddle an election
+     * transition and momentarily name different masters.  Do not discard the
+     * whole MIF/PSF: timing, channel sequence, Version TLV and peer identity
+     * are still useful.  Mark Election-v2 unusable for this frame instead of
+     * trusting either conflicting master. */
+    if (haveElection && memcmp(electedMaster,a.master,6))
+        a.electionMasterMismatch=true;
+    a.electionValid=haveElection && !a.electionMasterMismatch;
+    a.versionValid=haveVersion;
     if (!haveSequence) a.sequence=embedded;
     if (!a.sequence.count || a.sequence.stride!=a.presence) return reject("sequence-presence",n);
     out=a;
