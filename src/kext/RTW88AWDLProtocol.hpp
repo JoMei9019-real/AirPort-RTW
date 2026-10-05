@@ -78,6 +78,7 @@ struct Action {
     uint8_t subtype=0, presence=0, nextAwChannel=0, masterChannel=0, master[6]={};
     Sequence sequence;
     bool electionValid=false, electionMasterMismatch=false, versionValid=false;
+    uint8_t trailingPaddingBytes=0;
     uint8_t version=0, deviceClass=0;
     uint8_t syncAddress[6]={};
     uint32_t masterCounter=0, masterMetric=0, height=0;
@@ -106,7 +107,19 @@ inline bool parseAction(const uint8_t *p, size_t n, Action &out, ParseFailure *f
     Sequence embedded;
     size_t pos=a.actionOffset+16;
     while (pos<n) {
-        if (n-pos<3) return reject("trailing-tlv-header",pos);
+        if (n-pos<3) {
+            /* Real Apple AWDL action frames may carry up to two NUL pad bytes
+             * after the final TLV. They are not another TLV header and must
+             * not invalidate an otherwise complete MIF/PSF. Be deliberately
+             * strict: only 1-2 zero bytes are accepted. */
+            const size_t rem = n-pos;
+            bool zeroPad = rem <= 2;
+            for (size_t i=0; zeroPad && i<rem; ++i) zeroPad = p[pos+i] == 0;
+            if (!zeroPad) return reject("trailing-tlv-header",pos);
+            a.trailingPaddingBytes = (uint8_t)rem;
+            pos = n;
+            break;
+        }
         const unsigned type=p[pos], len=le16(p+pos+1);
         pos+=3;
         if (len>n-pos) return reject("truncated-tlv",pos-3);
