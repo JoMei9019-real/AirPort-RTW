@@ -171,6 +171,7 @@ private:
     uint8_t _peerSequenceEncoding = 0, _peerSequenceStride = 0, _peerScheduleNextAW = 0;
     uint16_t _windowTargetChannel = 0, _radioChannelBefore = 0, _radioChannelAfter = 0;
     uint32_t _mifRx = 0, _versionRx = 0, _mifPeersObserved = 0, _versionPeersObserved = 0;
+    uint32_t _serviceResponseRx = 0, _serviceParamsRx = 0, _dataPathStateRx = 0, _arpaRx = 0, _bloomRx = 0;
     uint64_t _lastRejectReportUS = 0, _lastActionRxUS = 0, _lastValidPeerUS = 0;
     IOReturn _lastChannelResult = kIOReturnNotReady;
     struct Peer {
@@ -181,6 +182,7 @@ private:
         uint16_t commonLength = 0;
         uint8_t nextAwChannel = 0;
         bool sawMIF = false, versionValid = false, valid = false, announced = false;
+        bool sawServiceParams = false, sawDataPathState = false, sawArpa = false;
         uint64_t lastPresenceUS = 0;
         uint8_t version = 0, deviceClass = 0;
     } _peers[32];
