@@ -308,6 +308,11 @@ private:
     uint32_t                _awdlServiceRefreshSignals = 0;
     uint32_t                _awdlMdnsRx = 0, _awdlMdnsTx = 0;
     uint32_t                _awdlIPv6Rx = 0, _awdlIPv6Tx = 0;
+    uint32_t                _awdlTxRequestCallbacks = 0, _awdlTxScheduleNotReady = 0;
+    uint32_t                _awdlTxDequeueCalls = 0, _awdlTxDequeuePackets = 0, _awdlTxEmptyDequeues = 0;
+    uint64_t                _awdlTxDequeueBytes = 0;
+    uint32_t                _awdlTxEnqueueSuccess = 0, _awdlTxEnqueueFailure = 0;
+    uint32_t                _awdlTxClassPackets[10] = {};
     /* Sonoma + OCLP legacy IO80211 can service CoreWiFi scans entirely from
      * the family cache and issue only GET SCAN_RESULT calls.  Remember whether
      * we already performed the one demand-driven bootstrap scan for an empty
