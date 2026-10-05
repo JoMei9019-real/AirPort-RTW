@@ -1037,6 +1037,11 @@ void RTW88IEEE80211::setAWDLAddress(const uint8_t *mac)
     if (mac) memcpy(_awdlAddress, mac, sizeof(_awdlAddress));
 }
 
+uint16_t RTW88IEEE80211::currentRadioChannel() const
+{
+    return (_hw && _hw->conf.chandef.chan) ? _hw->conf.chandef.chan->hw_value : 0;
+}
+
 bool RTW88IEEE80211::canTransmitAWDL() const
 {
     return _powered && _awdlReceiveMode && _hw && _hw->conf.chandef.chan &&
