@@ -1090,6 +1090,21 @@ IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
     if (!_powered || !_hw || !_hw->wiphy || channel == 0)
         return kIOReturnNotReady;
 
+    _awdlChannel = channel;
+
+    /* Same-channel AWDL is a pure fast path and must be evaluated before the
+     * off-channel eligibility filter below. This matters when the associated
+     * AP itself is on a DFS/NO-IR channel (for example channel 100): reusing
+     * the channel we are already associated on does not initiate radiation on
+     * a new channel and requires no RF retune. */
+    if (_state == RTW88_STATE_CONNECTED && _associatedVisible &&
+        channel == _targetBSS.channel) {
+        if (_awdlOffChannel) restoreSTAChannelAfterAWDL();
+        return (_hw->conf.chandef.chan &&
+                _hw->conf.chandef.chan->hw_value == channel)
+                   ? kIOReturnSuccess : kIOReturnNotReady;
+    }
+
     struct ieee80211_channel *target = nullptr;
     for (int b = 0; b < NL80211_NUM_BANDS && !target; ++b) {
         struct ieee80211_supported_band *band = _hw->wiphy->bands[b];
@@ -1105,18 +1120,6 @@ IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
     }
     if (!target)
         return kIOReturnUnsupported;
-
-    _awdlChannel = channel;
-
-    /* Same-channel AWDL needs no timeslice at all.  If a previous window left
-     * us off-channel, return home first. */
-    if (_state == RTW88_STATE_CONNECTED && _associatedVisible &&
-        channel == _targetBSS.channel) {
-        if (_awdlOffChannel) restoreSTAChannelAfterAWDL();
-        return (_hw->conf.chandef.chan &&
-                _hw->conf.chandef.chan->hw_value == channel)
-                   ? kIOReturnSuccess : kIOReturnNotReady;
-    }
 
     /* Connected single-PHY coexistence.  The AWDL scheduler calls this only
      * inside a bounded common availability window.  Put the AP into PS before
