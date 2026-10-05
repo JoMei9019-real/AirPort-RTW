@@ -107,13 +107,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 
 bool AirPortRTW::start(IOService *provider)
 {
-    setProperty("DriverBuild", "2.0.0-beta.1-awdl-diagnostic");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.1");
+    setProperty("DriverBuild", "2.0.0-beta.2-awdl-interoperability");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.2");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
-    IOLog("AirPortRTW: 2.0.0-beta.1 start (AWDL diagnostic beta; radio logic unchanged)\n");
+    IOLog("AirPortRTW: 2.0.0-beta.2 start (AWDL interoperability beta)\n");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
         IOLog("AirPortRTW: provider is not IOPCIDevice\n");
@@ -2097,7 +2097,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.1)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.2)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3336,11 +3336,12 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
     if (p2p && validatedPeer && presenceDue) {
         ether_addr peer = {};
         memcpy(peer.octet, sa, sizeof(peer.octet));
-        (void)p2p->postPeerPresence(&peer, (int)rssi,
+        IOReturn presenceRet = p2p->postPeerPresence(&peer, (int)rssi,
                                     (int)channel,
                                     (int)subtype, nullptr);
         ++_awdlPeerPresencePosts;
         setProperty("AWDL_PEER_PRESENCE_POSTS", (uint64_t)_awdlPeerPresencePosts, 32);
+        setProperty("AWDL_PEER_PRESENCE_RESULT", (uint64_t)(uint32_t)presenceRet, 32);
         /* A newly usable peer may unblock queued mDNS/IPv6 traffic on awdl0. */
         p2p->signalOutputThread();
 
@@ -3358,11 +3359,12 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
         ipv6[13] = sa[3];
         ipv6[14] = sa[4];
         ipv6[15] = sa[5];
-        (void)p2p->postPeerPresenceIPv6(&peer, (int)rssi,
+        IOReturn ipv6Ret = p2p->postPeerPresenceIPv6(&peer, (int)rssi,
                                         (int)channel,
                                         (int)subtype, nullptr,
                                         ipv6);
         ++_awdlPeerIPv6Posts;
+        setProperty("AWDL_PEER_IPV6_RESULT", (uint64_t)(uint32_t)ipv6Ret, 32);
         setProperty("AWDL_PEER_IPV6_POSTED", kOSBooleanTrue);
         setProperty("AWDL_PEER_IPV6_POSTS", (uint64_t)_awdlPeerIPv6Posts, 32);
         setProperty("AWDL_PEER_IPV6", ipv6, sizeof(ipv6));
