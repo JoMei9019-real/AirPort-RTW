@@ -143,6 +143,10 @@ void RTW88AWDLManager::reset()
     _windowTargetChannel = 0; _radioChannelBefore = 0; _radioChannelAfter = 0;
     _mifPeersObserved = 0; _versionPeersObserved = 0;
     _serviceResponseRx = 0; _serviceParamsRx = 0; _dataPathStateRx = 0; _arpaRx = 0; _bloomRx = 0;
+    _dataEnqueueSuccess = 0; _dataEnqueueFailure = 0; _dataQueueHighWater = 0;
+    _dataTxAttempts = 0; _dataTxFailures = 0; _dataWindowDeferred = 0;
+    _dataPeerDeferred = 0; _dataRadioDeferred = 0; _dataExpired = 0;
+    _dataMulticastQueued = 0; _dataUnicastQueued = 0;
     if (_txBuffer) { IOFree(_txBuffer, RTW88AWDL::MaxFrame); _txBuffer = nullptr; }
     _owner = nullptr;
     bzero(_peers, sizeof(_peers));
