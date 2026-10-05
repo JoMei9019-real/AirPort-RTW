@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.8 — Ventura IO80211 AWDL/P2P virtual-interface bridge.
+ * AirPortRTW 2.0.0-beta.9 — Ventura IO80211 AWDL/P2P TX-pipeline bridge.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -682,29 +682,50 @@ void AirPortRTW::requestPacketTx(void *object, UInt options)
     if (!vif || !_ieee80211 || vif->getInterfaceRole() != APPLE80211_VIF_AWDL)
         return;
 
-    if (!_awdlManager || !_awdlManager->scheduleReady()) return;
+    ++_awdlTxRequestCallbacks;
+    setProperty("AWDL_TX_REQUEST_CALLBACKS", (uint64_t)_awdlTxRequestCallbacks, 32);
 
-    /* Ventura's IO80211VirtualInterface has its own private output queues.
-     * requestPacketTx is the controller's opportunity to drain them. The
-     * private method returns bool with undocumented semantics, so packetHead
-     * (initialized to null) is authoritative rather than the return value. */
+    if (!_awdlManager) return;
+    if (!_awdlManager->scheduleReady()) {
+        ++_awdlTxScheduleNotReady;
+        setProperty("AWDL_TX_SCHEDULE_NOT_READY", (uint64_t)_awdlTxScheduleNotReady, 32);
+        /* Beta 8 returned here and could leave Bonjour/IPv6 in IO80211's
+         * private queues. Beta 9 takes ownership now and lets the AWDL
+         * manager wait for a safe RF window. */
+    }
+
     static const IOMbufServiceClass classes[] = {
         kIOMbufServiceClassCTL, kIOMbufServiceClassVO, kIOMbufServiceClassVI,
         kIOMbufServiceClassRV, kIOMbufServiceClassAV, kIOMbufServiceClassOAM,
         kIOMbufServiceClassRD, kIOMbufServiceClassBE, kIOMbufServiceClassBK,
         kIOMbufServiceClassBKSYS
     };
+    static const char *classProps[] = {
+        "AWDL_TX_CLASS_CTL", "AWDL_TX_CLASS_VO", "AWDL_TX_CLASS_VI",
+        "AWDL_TX_CLASS_RV", "AWDL_TX_CLASS_AV", "AWDL_TX_CLASS_OAM",
+        "AWDL_TX_CLASS_RD", "AWDL_TX_CLASS_BE", "AWDL_TX_CLASS_BK",
+        "AWDL_TX_CLASS_BKSYS"
+    };
 
-    UInt32 sent = 0;
-    for (unsigned c = 0; c < sizeof(classes) / sizeof(classes[0]); c++) {
-        /* Bound each callback so one chatty class cannot monopolize the
-         * IO80211 workloop. IO80211 will signal us again if more remains. */
+    UInt32 accepted = 0;
+    for (unsigned cidx = 0; cidx < sizeof(classes) / sizeof(classes[0]); cidx++) {
         mbuf_t head = nullptr, tail = nullptr;
         UInt count = 0;
         unsigned long long bytes = 0;
-        (void)vif->dequeueOutputPacketsWithServiceClass(32, classes[c],
+
+        ++_awdlTxDequeueCalls;
+        (void)vif->dequeueOutputPacketsWithServiceClass(32, classes[cidx],
                                                         &head, &tail,
                                                         &count, &bytes);
+        if (!head) {
+            ++_awdlTxEmptyDequeues;
+        } else {
+            _awdlTxDequeuePackets += count;
+            _awdlTxDequeueBytes += bytes;
+            _awdlTxClassPackets[cidx] += count;
+            setProperty(classProps[cidx], (uint64_t)_awdlTxClassPackets[cidx], 32);
+        }
+
         mbuf_t m = head;
         while (m) {
             mbuf_t next = mbuf_nextpkt(m);
@@ -721,16 +742,23 @@ void AirPortRTW::requestPacketTx(void *object, UInt options)
                 setProperty("AWDL_MDNS_TX", (uint64_t)_awdlMdnsTx, 32);
             }
 
-            if (_awdlManager) {
-                if (_awdlManager->enqueueData(m)) sent++;
-            } else mbuf_freem(m);
-            /* The manager owns m until a matching availability window. */
+            if (_awdlManager->enqueueData(m)) {
+                ++accepted;
+                ++_awdlTxEnqueueSuccess;
+            } else {
+                ++_awdlTxEnqueueFailure;
+            }
             m = next;
         }
     }
 
-    if (sent)
-        setProperty("AWDL_LAST_DEQUEUE_COUNT", (uint64_t)sent, 32);
+    setProperty("AWDL_TX_DEQUEUE_CALLS", (uint64_t)_awdlTxDequeueCalls, 32);
+    setProperty("AWDL_TX_DEQUEUE_PACKETS", (uint64_t)_awdlTxDequeuePackets, 32);
+    setProperty("AWDL_TX_DEQUEUE_BYTES", _awdlTxDequeueBytes, 64);
+    setProperty("AWDL_TX_EMPTY_DEQUEUES", (uint64_t)_awdlTxEmptyDequeues, 32);
+    setProperty("AWDL_TX_CONTROLLER_ENQUEUE_SUCCESS", (uint64_t)_awdlTxEnqueueSuccess, 32);
+    setProperty("AWDL_TX_CONTROLLER_ENQUEUE_FAILURE", (uint64_t)_awdlTxEnqueueFailure, 32);
+    setProperty("AWDL_LAST_DEQUEUE_COUNT", (uint64_t)accepted, 32);
     (void)options;
 }
 
