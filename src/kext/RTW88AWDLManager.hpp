@@ -164,6 +164,8 @@ private:
     uint32_t _trailingPaddingAccepted = 0, _peerRefreshes = 0, _peerExpires = 0;
     uint32_t _retuneAttempts = 0, _retuneSuccess = 0, _retuneNotReady = 0, _sameChannelFastPath = 0;
     uint32_t _retuneUnsupported = 0, _retuneBusy = 0, _retuneOther = 0, _noChannelWindows = 0;
+    uint32_t _peerScheduleWindows = 0, _peerScheduleSameChannel = 0, _peerScheduleOffChannel = 0;
+    uint32_t _nativeBootstrapWindows = 0, _busyState = 0;
     uint16_t _windowTargetChannel = 0, _radioChannelBefore = 0, _radioChannelAfter = 0;
     uint32_t _mifRx = 0, _versionRx = 0, _mifPeersObserved = 0, _versionPeersObserved = 0;
     uint64_t _lastRejectReportUS = 0, _lastActionRxUS = 0, _lastValidPeerUS = 0;
@@ -173,6 +175,7 @@ private:
         uint64_t seenUS = 0;
         RTW88AWDL::Sequence sequence;
         RTW88AWDL::Clock clock;
+        uint16_t commonLength = 0;
         bool sawMIF = false, versionValid = false, valid = false, announced = false;
         uint64_t lastPresenceUS = 0;
         uint8_t version = 0, deviceClass = 0;
