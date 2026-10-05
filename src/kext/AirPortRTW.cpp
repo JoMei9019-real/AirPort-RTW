@@ -3343,11 +3343,10 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
         setProperty("AWDL_PEER_PRESENCE_POSTS", (uint64_t)_awdlPeerPresencePosts, 32);
         setProperty("AWDL_PEER_PRESENCE_RESULT", (uint64_t)(uint32_t)presenceRet, 32);
         /* A newly usable peer may unblock queued mDNS/IPv6 traffic on awdl0.
-         * Also notify IO80211's service layer so sharingd/rapportd re-evaluate
-         * Bonjour discovery for this just-promoted AWDL peer. */
-        p2p->postServiceIndication();
-        ++_awdlServiceIndications;
-        setProperty("AWDL_SERVICE_INDICATIONS", (uint64_t)_awdlServiceIndications, 32);
+         * The pinned Ventura IO80211 header does not expose the newer service-
+         * indication helper, so use the supported output wakeup and record it. */
+        ++_awdlServiceRefreshSignals;
+        setProperty("AWDL_SERVICE_REFRESH_SIGNALS", (uint64_t)_awdlServiceRefreshSignals, 32);
         p2p->signalOutputThread();
 
 #if __IO80211_TARGET >= __MAC_10_15
@@ -3444,9 +3443,9 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
     if (_awdlManager) _awdlManager->noteDataRX(ret);
     if (mdns) {
         if (auto *p2p = OSDynamicCast(IO80211P2PInterface, awdl)) {
-            p2p->postServiceIndication();
-            ++_awdlServiceIndications;
-            setProperty("AWDL_SERVICE_INDICATIONS", (uint64_t)_awdlServiceIndications, 32);
+            ++_awdlServiceRefreshSignals;
+            setProperty("AWDL_SERVICE_REFRESH_SIGNALS", (uint64_t)_awdlServiceRefreshSignals, 32);
+            p2p->signalOutputThread();
         }
     }
     /* IO80211P2PInterface::inputPacket is a private ABI. Keep the raw value
