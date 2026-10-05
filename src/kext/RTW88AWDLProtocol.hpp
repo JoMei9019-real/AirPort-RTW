@@ -55,7 +55,8 @@ inline bool unicast(const uint8_t *p) {
 }
 struct Sequence {
     uint8_t channel[16] = {};
-    uint8_t count = 0, stride = 0;
+    uint8_t count = 0, stride = 0, encoding = 0;
+    uint16_t fillChannel = 0;
 };
 inline bool parseSequence(const uint8_t *p, size_t n, Sequence &out) {
     if (!p || n<6 || p[0]!=15 || p[2]!=0 || p[3]>15) return false;
@@ -64,6 +65,7 @@ inline bool parseSequence(const uint8_t *p, size_t n, Sequence &out) {
     // 0xffff means no fill beyond the sequence; support the common full list.
     if (le16(p+4)!=0xffff) return false;
     Sequence value; value.count=16; value.stride=uint8_t(p[3]+1);
+    value.encoding=p[1]; value.fillChannel=le16(p+4);
     for (unsigned i=0;i<16;++i) {
         uint8_t ch=p[6+i*width+(p[1]==1 ? 1 : 0)];
         if (ch>196) return false; // 0 explicitly means unavailable.
