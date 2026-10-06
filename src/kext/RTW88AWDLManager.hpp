@@ -166,7 +166,7 @@ private:
     uint32_t _masterChannelRaw = 0;
     uint32_t _actionCandidates = 0, _actionParseRejected = 0, _actionClockRejected = 0;
     uint32_t _electionMismatchTolerated = 0, _sameChannelWindows = 0, _offChannelWindows = 0;
-    uint32_t _trailingPaddingAccepted = 0, _peerRefreshes = 0, _peerExpires = 0;
+    uint32_t _trailingPaddingAccepted = 0, _peerRefreshes = 0, _peerExpires = 0, _peerServiceRefreshes = 0;
     uint32_t _retuneAttempts = 0, _retuneSuccess = 0, _retuneNotReady = 0, _sameChannelFastPath = 0;
     uint32_t _retuneUnsupported = 0, _retuneBusy = 0, _retuneOther = 0, _noChannelWindows = 0;
     uint32_t _peerScheduleWindows = 0, _peerScheduleSameChannel = 0, _peerScheduleOffChannel = 0;
@@ -203,6 +203,7 @@ private:
         uint8_t nextAwChannel = 0;
         bool sawMIF = false, versionValid = false, valid = false, announced = false;
         bool sawServiceParams = false, sawDataPathState = false, sawArpa = false;
+        bool sawServiceResponse = false, serviceReadyNotified = false;
         uint64_t lastPresenceUS = 0;
         uint8_t version = 0, deviceClass = 0;
     } _peers[32];
