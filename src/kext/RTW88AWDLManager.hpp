@@ -113,8 +113,10 @@ public:
     void setP2PEnabled(bool enabled) { _p2pEnabled = enabled; }
     bool p2pEnabled() const { return _p2pEnabled; }
 
-    void notePeerTrafficRegistration(bool active);
+    void notePeerTrafficRegistration(bool active, const char *name, uint32_t nameLength);
     uint32_t peerRegistrationCount() const { return _peerRegistrations; }
+    bool receiverIntent() const { return _receiverIntent; }
+    bool airDropRegistrationActive() const { return _airDropRegistrations != 0; }
 
     bool hasVirtualTransport() const {
         return _awdlInterface != nullptr || _p2pInterface != nullptr;
@@ -223,6 +225,12 @@ private:
     uint32_t _masterChannel = 0;
     uint32_t _secondaryMasterChannel = 0;
     uint32_t _peerRegistrations = 0;
+    uint32_t _airDropRegistrations = 0;
+    uint32_t _peerTrafficRegistrationEvents = 0;
+    uint32_t _airDropRegistrationEvents = 0;
+    uint32_t _receiverStateEntries = 0;
+    uint32_t _peerTrafficLastNameLength = 0;
+    bool _receiverIntent = false;
     uint32_t _presenceMode = 0;
     uint32_t _syncState = 0;
     uint64_t _actionFrameTxMode = 0;
