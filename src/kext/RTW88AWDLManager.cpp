@@ -143,6 +143,15 @@ void RTW88AWDLManager::reset()
     _windowTargetChannel = 0; _radioChannelBefore = 0; _radioChannelAfter = 0;
     _mifPeersObserved = 0; _versionPeersObserved = 0;
     _serviceResponseRx = 0; _serviceParamsRx = 0; _dataPathStateRx = 0; _arpaRx = 0; _bloomRx = 0;
+    _rxTlvMask = 0; _rxMifLength = 0; _rxServiceResponseLength = 0; _rxServiceParamsLength = 0;
+    _rxDataPathStateLength = 0; _rxArpaLength = 0; _rxBloomLength = 0;
+    _rxServiceValueLength = 0; _rxServiceFragmentOffset = 0;
+    _rxDataPathFlags = 0; _rxDataPathSocialChannels = 0; _rxDataPathExtFlags = 0;
+    _rxServiceUpdateIndex = 0; _rxServiceBitmask = 0;
+    _rxServiceKeyLength = 0; _rxServiceDnsType = 0; _rxServiceResponseCount = 0;
+    _rxArpaFlags = 0; _rxArpaNameLength = 0;
+    bzero(_localAirDropServiceId, sizeof(_localAirDropServiceId));
+    _localAirDropServiceIdLength = 0; _localAirDropServiceCaptures = 0; _nativeServiceResponseTx = 0;
     _dataEnqueueSuccess = 0; _dataEnqueueFailure = 0; _dataQueueHighWater = 0;
     _dataTxAttempts = 0; _dataTxFailures = 0; _dataWindowDeferred = 0;
     _dataPeerDeferred = 0; _dataRadioDeferred = 0; _dataExpired = 0;
@@ -516,7 +525,7 @@ void RTW88AWDLManager::bootstrapNative()
     memcpy(initial.master,_localAddress,6);memcpy(initial.syncAddress,_localAddress,6);
     initial.masterMetric=60;
     uint8_t frame[RTW88AWDL::NativeFrameSize];
-    const size_t length=RTW88AWDL::buildNativeAction(frame,sizeof(frame),_localAddress,initial,0);
+    const size_t length=RTW88AWDL::buildNativeAction(frame,sizeof(frame),_localAddress,initial,0,nullptr,0);
     if (length && setSyncFrameTemplate(frame,(uint32_t)length,false)==kIOReturnSuccess) {
         _nextPSFUS=0; _lastMIFEAW=0; _lastMIFEAWValid=false;
         publishStats();
@@ -527,6 +536,22 @@ void RTW88AWDLManager::noteDataRX(uint32_t result)
 {
     awdlGated<void>(_workLoop,_owner,[&]() -> void {
         ++_dataRx;_lastDataRxResult=result;
+    });
+}
+
+void RTW88AWDLManager::noteLocalAirDropServiceId(const uint8_t *serviceId, uint8_t length)
+{
+    if (!serviceId || length != sizeof(_localAirDropServiceId))
+        return;
+    awdlGated<void>(_workLoop, _owner, [&]() -> void {
+        bool same = _localAirDropServiceIdLength == length &&
+                    !memcmp(_localAirDropServiceId, serviceId, length);
+        if (!same) {
+            memcpy(_localAirDropServiceId, serviceId, length);
+            _localAirDropServiceIdLength = length;
+        }
+        ++_localAirDropServiceCaptures;
+        publishStats();
     });
 }
 
@@ -714,11 +739,37 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
         peer->deviceClass = action.deviceClass;
         ++_versionRx;
     }
-    if (action.serviceResponse) ++_serviceResponseRx;
-    if (action.serviceParams) { ++_serviceParamsRx; peer->sawServiceParams = true; }
-    if (action.dataPathState) { ++_dataPathStateRx; peer->sawDataPathState = true; }
-    if (action.arpa) { ++_arpaRx; peer->sawArpa = true; }
-    if (action.bloom) ++_bloomRx;
+    _rxTlvMask = action.tlvMask;
+    if (action.subtype == 3) _rxMifLength = (uint16_t)(length > 0xffff ? 0xffff : length);
+    if (action.serviceResponse) {
+        ++_serviceResponseRx;
+        _rxServiceResponseLength = action.serviceResponseLength;
+        _rxServiceValueLength = action.serviceResponseValueLength;
+        _rxServiceFragmentOffset = action.serviceResponseFragmentOffset;
+        _rxServiceKeyLength = action.serviceResponseKeyLength;
+        _rxServiceDnsType = action.serviceResponseDnsType;
+        _rxServiceResponseCount = action.serviceResponseCount;
+    }
+    if (action.serviceParams) {
+        ++_serviceParamsRx; peer->sawServiceParams = true;
+        _rxServiceParamsLength = action.serviceParamsLength;
+        _rxServiceUpdateIndex = action.serviceUpdateIndex;
+        _rxServiceBitmask = action.serviceBitmask;
+    }
+    if (action.dataPathState) {
+        ++_dataPathStateRx; peer->sawDataPathState = true;
+        _rxDataPathStateLength = action.dataPathStateLength;
+        _rxDataPathFlags = action.dataPathFlags;
+        _rxDataPathSocialChannels = action.dataPathSocialChannels;
+        _rxDataPathExtFlags = action.dataPathExtFlags;
+    }
+    if (action.arpa) {
+        ++_arpaRx; peer->sawArpa = true;
+        _rxArpaLength = action.arpaLength;
+        _rxArpaFlags = action.arpaFlags;
+        _rxArpaNameLength = action.arpaNameLength;
+    }
+    if (action.bloom) { ++_bloomRx; _rxBloomLength = action.bloomLength; }
     /* Keep OpenAWDL's full peer-promotion rule for IO80211 publication, but
      * do not confuse that lifecycle bit with whether the peer may take part
      * in synchronization/election. OWL creates the peer on the first valid
@@ -876,7 +927,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.9-tx-pipeline");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.10-service-response");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -946,6 +997,34 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_DATA_PATH_STATE_RX", (uint64_t)_dataPathStateRx, 32);
     _owner->setProperty("AWDL_ARPA_RX", (uint64_t)_arpaRx, 32);
     _owner->setProperty("AWDL_BLOOM_RX", (uint64_t)_bloomRx, 32);
+    _owner->setProperty("AWDL_RX_TLV_MASK", (uint64_t)_rxTlvMask, 32);
+    _owner->setProperty("AWDL_RX_MIF_LENGTH", (uint64_t)_rxMifLength, 32);
+    _owner->setProperty("AWDL_RX_SERVICE_RESPONSE_LENGTH", (uint64_t)_rxServiceResponseLength, 32);
+    _owner->setProperty("AWDL_RX_SERVICE_RESPONSE_COUNT", (uint64_t)_rxServiceResponseCount, 8);
+    _owner->setProperty("AWDL_RX_SERVICE_KEY_LENGTH", (uint64_t)_rxServiceKeyLength, 8);
+    _owner->setProperty("AWDL_RX_SERVICE_DNS_TYPE", (uint64_t)_rxServiceDnsType, 8);
+    _owner->setProperty("AWDL_RX_SERVICE_VALUE_LENGTH", (uint64_t)_rxServiceValueLength, 16);
+    _owner->setProperty("AWDL_RX_SERVICE_FRAGMENT_OFFSET", (uint64_t)_rxServiceFragmentOffset, 16);
+    _owner->setProperty("AWDL_RX_SERVICE_PARAMS_LENGTH", (uint64_t)_rxServiceParamsLength, 16);
+    _owner->setProperty("AWDL_RX_SERVICE_UPDATE_INDEX", (uint64_t)_rxServiceUpdateIndex, 16);
+    _owner->setProperty("AWDL_RX_SERVICE_BITMASK", (uint64_t)_rxServiceBitmask, 32);
+    _owner->setProperty("AWDL_RX_DATA_PATH_LENGTH", (uint64_t)_rxDataPathStateLength, 16);
+    _owner->setProperty("AWDL_RX_DATA_PATH_FLAGS", (uint64_t)_rxDataPathFlags, 16);
+    _owner->setProperty("AWDL_RX_SOCIAL_CHANNEL_MAP", (uint64_t)_rxDataPathSocialChannels, 16);
+    _owner->setProperty("AWDL_RX_DATA_PATH_EXT_FLAGS", (uint64_t)_rxDataPathExtFlags, 16);
+    _owner->setProperty("AWDL_RX_ARPA_LENGTH", (uint64_t)_rxArpaLength, 16);
+    _owner->setProperty("AWDL_RX_ARPA_FLAGS", (uint64_t)_rxArpaFlags, 8);
+    _owner->setProperty("AWDL_RX_ARPA_NAME_LENGTH", (uint64_t)_rxArpaNameLength, 8);
+    _owner->setProperty("AWDL_RX_BLOOM_LENGTH", (uint64_t)_rxBloomLength, 16);
+    _owner->setProperty("AWDL_LOCAL_AIRDROP_SERVICE_CAPTURES", (uint64_t)_localAirDropServiceCaptures, 32);
+    _owner->setProperty("AWDL_LOCAL_AIRDROP_SERVICE_READY",
+                        _localAirDropServiceIdLength == 12 ? kOSBooleanTrue : kOSBooleanFalse);
+    if (_localAirDropServiceIdLength == 12)
+        _owner->setProperty("AWDL_LOCAL_AIRDROP_SERVICE_ID",
+                            _localAirDropServiceId, sizeof(_localAirDropServiceId));
+    _owner->setProperty("AWDL_NATIVE_SERVICE_RESPONSE_TX", (uint64_t)_nativeServiceResponseTx, 32);
+    _owner->setProperty("AWDL_TX_MIF_TLV_MASK", (uint64_t)(
+        (1u<<2)|(1u<<4)|(1u<<5)|(1u<<6)|(1u<<7)|(1u<<12)|(1u<<16)|(1u<<18)|(1u<<21)|(1u<<24)), 32);
     _owner->setProperty("AWDL_MIF_PEERS_EVER", (uint64_t)_mifPeersObserved, 32);
     _owner->setProperty("AWDL_VERSION_PEERS_EVER", (uint64_t)_versionPeersObserved, 32);
     _owner->setProperty("AWDL_ACTION_RX", (uint64_t)_actionRx, 32);
@@ -1204,7 +1283,11 @@ bool RTW88AWDLManager::tick()
                     controlWindow.elapsedUS >= commonCenterUS;
                 if (mifDue) {
                     uint32_t frameLength=(uint32_t)RTW88AWDL::buildNativeAction(
-                        _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,3);
+                        _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,3,
+                        _localAirDropServiceId,
+                        _localAirDropServiceIdLength);
+                    if (frameLength && _localAirDropServiceIdLength == 12)
+                        ++_nativeServiceResponseTx;
                     RTW88AWDL::stamp(_txBuffer,_action,controlWindow,now,_actionSequence++);
                     if (frameLength && _backend->txRawManagementFrame(_txBuffer,frameLength)) {
                         ++_actionTx; ++_mifTx;
@@ -1213,7 +1296,8 @@ bool RTW88AWDLManager::tick()
                 }
                 if (now >= _nextPSFUS) {
                     uint32_t frameLength=(uint32_t)RTW88AWDL::buildNativeAction(
-                        _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,0);
+                        _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,0,
+                        nullptr,0);
                     RTW88AWDL::stamp(_txBuffer,_action,controlWindow,now,_actionSequence++);
                     if (frameLength && _backend->txRawManagementFrame(_txBuffer,frameLength)) {
                         ++_actionTx; ++_psfTx;
