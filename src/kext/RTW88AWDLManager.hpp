@@ -65,6 +65,7 @@ public:
     bool scheduleReady() const { return _syncEnabled && _awdlInterface && _airTemplate; }
     void publishStats();
     void noteDataRX(uint32_t result);
+    void noteLocalAirDropServiceId(const uint8_t *serviceId, uint8_t length);
 
     uint32_t electionMetric() const { return _electionMetric; }
     void setElectionMetric(uint32_t metric) { _electionMetric = metric; }
@@ -176,6 +177,17 @@ private:
     uint16_t _windowTargetChannel = 0, _radioChannelBefore = 0, _radioChannelAfter = 0;
     uint32_t _mifRx = 0, _versionRx = 0, _mifPeersObserved = 0, _versionPeersObserved = 0;
     uint32_t _serviceResponseRx = 0, _serviceParamsRx = 0, _dataPathStateRx = 0, _arpaRx = 0, _bloomRx = 0;
+    uint32_t _rxTlvMask = 0;
+    uint16_t _rxMifLength = 0, _rxServiceResponseLength = 0, _rxServiceParamsLength = 0;
+    uint16_t _rxDataPathStateLength = 0, _rxArpaLength = 0, _rxBloomLength = 0;
+    uint16_t _rxServiceValueLength = 0, _rxServiceFragmentOffset = 0;
+    uint16_t _rxDataPathFlags = 0, _rxDataPathSocialChannels = 0, _rxDataPathExtFlags = 0;
+    uint16_t _rxServiceUpdateIndex = 0; uint32_t _rxServiceBitmask = 0;
+    uint8_t _rxServiceKeyLength = 0, _rxServiceDnsType = 0, _rxServiceResponseCount = 0;
+    uint8_t _rxArpaFlags = 0, _rxArpaNameLength = 0;
+    uint8_t _localAirDropServiceId[12] = {};
+    uint8_t _localAirDropServiceIdLength = 0;
+    uint32_t _localAirDropServiceCaptures = 0, _nativeServiceResponseTx = 0;
     uint64_t _lastRejectReportUS = 0, _lastActionRxUS = 0, _lastValidPeerUS = 0;
     IOReturn _lastChannelResult = kIOReturnNotReady;
     struct Peer {
