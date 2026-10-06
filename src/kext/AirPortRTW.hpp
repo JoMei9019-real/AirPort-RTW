@@ -311,6 +311,8 @@ private:
     uint32_t                _awdlMdnsRxQueries = 0, _awdlMdnsRxResponses = 0;
     uint32_t                _awdlMdnsTxQueries = 0, _awdlMdnsTxResponses = 0;
     uint32_t                _awdlAirDropMdnsRx = 0, _awdlAirDropMdnsTx = 0;
+    uint32_t                _awdlAirDropMdnsRxQueries = 0, _awdlAirDropMdnsRxResponses = 0;
+    uint32_t                _awdlAirDropMdnsTxQueries = 0, _awdlAirDropMdnsTxResponses = 0;
     uint32_t                _awdlTxRequestCallbacks = 0, _awdlTxScheduleNotReady = 0;
     uint32_t                _awdlTxDequeueCalls = 0, _awdlTxDequeuePackets = 0, _awdlTxEmptyDequeues = 0;
     uint64_t                _awdlTxDequeueBytes = 0;
