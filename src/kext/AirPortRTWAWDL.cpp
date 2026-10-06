@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.10 — Ventura IO80211 AWDL/P2P service-response bridge.
+ * AirPortRTW 2.0.0-beta.11 — Ventura IO80211 AWDL/P2P data-path/service bridge.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -790,11 +790,17 @@ void AirPortRTW::requestPacketTx(void *object, UInt options)
                 ++_awdlMdnsTx;
                 if (mdns.response) ++_awdlMdnsTxResponses;
                 else ++_awdlMdnsTxQueries;
-                if (mdns.airDrop) ++_awdlAirDropMdnsTx;
+                if (mdns.airDrop) {
+                    ++_awdlAirDropMdnsTx;
+                    if (mdns.response) ++_awdlAirDropMdnsTxResponses;
+                    else ++_awdlAirDropMdnsTxQueries;
+                }
                 setProperty("AWDL_MDNS_TX", (uint64_t)_awdlMdnsTx, 32);
                 setProperty("AWDL_MDNS_TX_QUERIES", (uint64_t)_awdlMdnsTxQueries, 32);
                 setProperty("AWDL_MDNS_TX_RESPONSES", (uint64_t)_awdlMdnsTxResponses, 32);
                 setProperty("AWDL_AIRDROP_MDNS_TX", (uint64_t)_awdlAirDropMdnsTx, 32);
+                setProperty("AWDL_AIRDROP_MDNS_TX_QUERIES", (uint64_t)_awdlAirDropMdnsTxQueries, 32);
+                setProperty("AWDL_AIRDROP_MDNS_TX_RESPONSES", (uint64_t)_awdlAirDropMdnsTxResponses, 32);
                 if (mdns.serviceIdValid)
                     _awdlManager->noteLocalAirDropServiceId(mdns.serviceId, 12);
             }
