@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.11 — Ventura IO80211 AWDL/P2P data-path/service bridge.
+ * AirPortRTW 2.0.0-beta.12 — Ventura IO80211 AWDL/P2P receiver-state bridge.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -370,7 +370,10 @@ SInt32 AirPortRTW::handleAWDLVirtualRequest(UInt request_type, int request_numbe
         if (!set)
             return kIOReturnNotFound;
         uint32_t n = d->name_len < sizeof(d->name) ? d->name_len : (uint32_t)sizeof(d->name);
-        if (_awdlManager) _awdlManager->notePeerTrafficRegistration(d->active != 0);
+        if (_awdlManager)
+            _awdlManager->notePeerTrafficRegistration(d->active != 0,
+                                                      (const char *)d->name,
+                                                      n);
         IOLog("AirPortRTW: AWDL peer traffic registration active=%u name_len=%u peers=%u\n",
               d->active, n, _awdlManager ? _awdlManager->peerRegistrationCount() : 0);
         return kIOReturnSuccess;
