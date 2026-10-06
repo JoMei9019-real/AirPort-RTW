@@ -182,8 +182,12 @@ private:
     uint16_t _rxDataPathStateLength = 0, _rxArpaLength = 0, _rxBloomLength = 0;
     uint16_t _rxServiceValueLength = 0, _rxServiceFragmentOffset = 0;
     uint16_t _rxDataPathFlags = 0, _rxDataPathSocialChannels = 0, _rxDataPathExtFlags = 0;
+    uint16_t _rxDataPathInfraChannel = 0, _rxDataPathUmi = 0, _rxDataPathUnicastOptionsLength = 0;
+    uint8_t _rxDataPathInfraBSSID[6] = {}, _rxDataPathInfraAddress[6] = {}, _rxDataPathAWDLAddress[6] = {};
+    bool _rxDataPathLayoutValid = false;
     uint16_t _rxServiceUpdateIndex = 0; uint32_t _rxServiceBitmask = 0;
     uint8_t _rxServiceKeyLength = 0, _rxServiceDnsType = 0, _rxServiceResponseCount = 0;
+    uint8_t _rxServicePtrCount = 0, _rxServiceTxtCount = 0, _rxServiceSrvCount = 0, _rxServiceOtherCount = 0;
     uint8_t _rxArpaFlags = 0, _rxArpaNameLength = 0;
     uint8_t _localAirDropServiceId[12] = {};
     uint8_t _localAirDropServiceIdLength = 0;
