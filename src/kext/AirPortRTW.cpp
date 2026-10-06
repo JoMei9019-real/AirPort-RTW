@@ -107,13 +107,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 
 bool AirPortRTW::start(IOService *provider)
 {
-    setProperty("DriverBuild", "2.0.0-beta.9-awdl-tx-pipeline");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.9");
+    setProperty("DriverBuild", "2.0.0-beta.10-awdl-service-response");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.10");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
-    IOLog("AirPortRTW: 2.0.0-beta.9 start (AWDL TX-pipeline beta)\n");
+    IOLog("AirPortRTW: 2.0.0-beta.10 start (AWDL service-response beta)\n");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
         IOLog("AirPortRTW: provider is not IOPCIDevice\n");
@@ -2097,7 +2097,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.9)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.10)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3394,22 +3394,39 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
     }
 }
 
-static bool rtw88AWDLMdnsPacket(mbuf_t m, bool *ipv6)
+static bool rtw88AWDLMdnsPacket(mbuf_t m, bool *ipv6, bool *response, bool *airDrop)
 {
     if (ipv6) *ipv6 = false;
-    if (!m || mbuf_pkthdr_len(m) < 14) return false;
-    uint8_t h[62] = {};
+    if (response) *response = false;
+    if (airDrop) *airDrop = false;
+    if (!m || mbuf_pkthdr_len(m) < 62) return false;
+
+    uint8_t h[512] = {};
     const size_t total = mbuf_pkthdr_len(m);
     const size_t copy = total < sizeof(h) ? total : sizeof(h);
     if (mbuf_copydata(m, 0, copy, h) != 0) return false;
-    const uint16_t type = (uint16_t(h[12]) << 8) | h[13];
+    const uint16_t type = (uint16_t(uint16_t(h[12]) << 8) | h[13]);
     if (type != 0x86dd || copy < 54) return false;
     if (ipv6) *ipv6 = true;
     if (h[20] != 17 || copy < 62) return false; /* IPv6 next-header UDP */
     const uint8_t *udp = h + 54;
-    const uint16_t sport = (uint16_t(udp[0]) << 8) | udp[1];
-    const uint16_t dport = (uint16_t(udp[2]) << 8) | udp[3];
-    return sport == 5353 || dport == 5353;
+    const uint16_t sport = (uint16_t(uint16_t(udp[0]) << 8) | udp[1]);
+    const uint16_t dport = (uint16_t(uint16_t(udp[2]) << 8) | udp[3]);
+    if (sport != 5353 && dport != 5353) return false;
+
+    const size_t dns = 62;
+    if (response && copy >= dns + 12)
+        *response = (h[dns + 2] & 0x80U) != 0;
+    if (airDrop) {
+        static const uint8_t needle[] = {'_','a','i','r','d','r','o','p'};
+        for (size_t i = dns; i + sizeof(needle) <= copy; ++i) {
+            if (!memcmp(h + i, needle, sizeof(needle))) {
+                *airDrop = true;
+                break;
+            }
+        }
+    }
+    return true;
 }
 
 void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
@@ -3427,15 +3444,21 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
     if (!mbuf_next(m) && mbuf_len(m) != packetLen)
         mbuf_setlen(m, packetLen);
 
-    bool ipv6 = false;
-    const bool mdns = rtw88AWDLMdnsPacket(m, &ipv6);
+    bool ipv6 = false, mdnsResponse = false, airDropMdns = false;
+    const bool mdns = rtw88AWDLMdnsPacket(m, &ipv6, &mdnsResponse, &airDropMdns);
     if (ipv6) {
         ++_awdlIPv6Rx;
         setProperty("AWDL_IPV6_RX", (uint64_t)_awdlIPv6Rx, 32);
     }
     if (mdns) {
         ++_awdlMdnsRx;
+        if (mdnsResponse) ++_awdlMdnsRxResponses;
+        else ++_awdlMdnsRxQueries;
+        if (airDropMdns) ++_awdlAirDropMdnsRx;
         setProperty("AWDL_MDNS_RX", (uint64_t)_awdlMdnsRx, 32);
+        setProperty("AWDL_MDNS_RX_QUERIES", (uint64_t)_awdlMdnsRxQueries, 32);
+        setProperty("AWDL_MDNS_RX_RESPONSES", (uint64_t)_awdlMdnsRxResponses, 32);
+        setProperty("AWDL_AIRDROP_MDNS_RX", (uint64_t)_awdlAirDropMdnsRx, 32);
     }
 
     alignas(8) uint8_t tagStorage[64];
