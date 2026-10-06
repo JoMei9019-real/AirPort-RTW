@@ -84,7 +84,11 @@ struct Action {
     uint32_t tlvMask=0;
     uint16_t serviceResponseLength=0, serviceParamsLength=0, dataPathStateLength=0, arpaLength=0, bloomLength=0;
     uint16_t serviceResponseValueLength=0, serviceResponseFragmentOffset=0;
+    uint8_t servicePtrCount=0, serviceTxtCount=0, serviceSrvCount=0, serviceOtherCount=0;
     uint16_t dataPathFlags=0, dataPathSocialChannels=0, dataPathExtFlags=0;
+    uint16_t dataPathInfraChannel=0, dataPathUmi=0, dataPathUnicastOptionsLength=0;
+    uint8_t dataPathInfraBSSID[6]={}, dataPathInfraAddress[6]={}, dataPathAWDLAddress[6]={};
+    bool dataPathLayoutValid=false;
     uint16_t serviceUpdateIndex=0; uint32_t serviceBitmask=0;
     uint8_t serviceResponseKeyLength=0, serviceResponseDnsType=0, serviceResponseCount=0;
     uint8_t arpaFlags=0, arpaNameLength=0;
@@ -176,6 +180,10 @@ inline bool parseAction(const uint8_t *p, size_t n, Action &out, ParseFailure *f
                 if (keyLen && keyLen <= 255 && size_t(keyLen)+6 <= len) {
                     a.serviceResponseKeyLength=(uint8_t)keyLen;
                     a.serviceResponseDnsType=v[1+keyLen];
+                    if (a.serviceResponseDnsType==12 && a.servicePtrCount!=0xff) ++a.servicePtrCount;
+                    else if (a.serviceResponseDnsType==16 && a.serviceTxtCount!=0xff) ++a.serviceTxtCount;
+                    else if (a.serviceResponseDnsType==33 && a.serviceSrvCount!=0xff) ++a.serviceSrvCount;
+                    else if (a.serviceOtherCount!=0xff) ++a.serviceOtherCount;
                     a.serviceResponseValueLength=le16(v+2+keyLen);
                     a.serviceResponseFragmentOffset=le16(v+4+keyLen);
                 }
@@ -185,9 +193,54 @@ inline bool parseAction(const uint8_t *p, size_t n, Action &out, ParseFailure *f
             if (len >= 9) { a.serviceUpdateIndex=le16(v+3); a.serviceBitmask=le32(v+5); }
         } else if (type==12) {
             a.dataPathState = true; a.dataPathStateLength=(uint16_t)len;
-            if (len >= 15) {
-                a.dataPathFlags=le16(v); a.dataPathSocialChannels=le16(v+5);
-                a.dataPathExtFlags=le16(v+13);
+            if (len >= 2) {
+                a.dataPathFlags=le16(v);
+                size_t dp=2;
+                bool ok=true;
+                if (a.dataPathFlags & 0x0100) {
+                    if (dp+3>len) ok=false; else dp+=3;
+                }
+                if (ok && (a.dataPathFlags & 0x0200)) {
+                    if (dp+2>len) ok=false;
+                    else { a.dataPathSocialChannels=le16(v+dp); dp+=2; }
+                }
+                if (ok && (a.dataPathFlags & 0x0001)) {
+                    if (dp+8>len) ok=false;
+                    else {
+                        memcpy(a.dataPathInfraBSSID,v+dp,6); dp+=6;
+                        a.dataPathInfraChannel=le16(v+dp); dp+=2;
+                    }
+                }
+                if (ok && (a.dataPathFlags & 0x0002)) {
+                    if (dp+6>len) ok=false;
+                    else { memcpy(a.dataPathInfraAddress,v+dp,6); dp+=6; }
+                }
+                if (ok && (a.dataPathFlags & 0x0004)) {
+                    if (dp+6>len) ok=false;
+                    else { memcpy(a.dataPathAWDLAddress,v+dp,6); dp+=6; }
+                }
+                if (ok && (a.dataPathFlags & 0x0010)) {
+                    if (dp+2>len) ok=false;
+                    else { a.dataPathUmi=le16(v+dp); dp+=2; }
+                }
+                if (ok && (a.dataPathFlags & 0x1000)) {
+                    if (dp+2>len) ok=false;
+                    else {
+                        a.dataPathUnicastOptionsLength=le16(v+dp); dp+=2;
+                        if (dp+a.dataPathUnicastOptionsLength>len) ok=false;
+                        else dp+=a.dataPathUnicastOptionsLength;
+                    }
+                }
+                if (ok && (a.dataPathFlags & 0x8000)) {
+                    if (dp+2>len) ok=false;
+                    else {
+                        a.dataPathExtFlags=le16(v+dp); dp+=2;
+                        if (a.dataPathExtFlags & 0x0001) { if (dp+2>len) ok=false; else dp+=2; }
+                        if (ok && (a.dataPathExtFlags & 0x0004)) { if (dp+4>len) ok=false; else dp+=4; }
+                        if (ok && (a.dataPathExtFlags & 0x0040)) { if (dp+12>len) ok=false; else dp+=12; }
+                    }
+                }
+                a.dataPathLayoutValid=ok && dp<=len;
             }
         } else if (type==16) {
             a.arpa = true; a.arpaLength=(uint16_t)len;
@@ -224,7 +277,10 @@ inline uint8_t opClassForChannel(uint8_t channel) {
 inline size_t buildNativeAction(uint8_t *out, size_t capacity, const uint8_t *local,
                                const Action &a, uint8_t subtype,
                                const uint8_t *airDropServiceId=nullptr,
-                               uint8_t airDropServiceIdLength=0) {
+                               uint8_t airDropServiceIdLength=0,
+                               const uint8_t *infraAddress=nullptr,
+                               const uint8_t *infraBSSID=nullptr,
+                               uint16_t infraChannel=0) {
     if (!out || capacity<NativeFrameSize || !local || !unicast(local) ||
         !unicast(a.master) || !unicast(a.syncAddress) || a.sequence.count!=16 ||
         a.sequence.stride!=a.presence || !a.presence || a.presence>16 ||
@@ -302,10 +358,31 @@ inline size_t buildNativeAction(uint8_t *out, size_t capacity, const uint8_t *lo
         for(unsigned i=0;i<6;++i){v[8+2*i]=digits[local[i]>>4];v[9+2*i]=digits[local[i]&15];}
         v[20]=0xc0;v[21]=0x0c; // compressed .local suffix
     }
-    v=tlv(12,15); if(!v) return 0; put16(v,0x8f24);v[2]='X';v[3]='0';
+    /* Data Path State: emit only capabilities whose fields we actually
+     * provide. Beta 10 advertised bits 10/11 without their modern Apple
+     * semantics. Beta 11 switches to a self-consistent variable layout:
+     * country + social map + optional infrastructure identity + AWDL address
+     * + extension flags declaring that the social-channel map is supported. */
     uint16_t social=0;
     for(unsigned i=0;i<16;++i) social |= a.sequence.channel[i]==6 ? 1 : a.sequence.channel[i]==44 ? 2 : a.sequence.channel[i]==149 ? 4 : 0;
-    put16(v+5,social);memcpy(v+7,local,6);
+    const bool haveInfraAddr = infraAddress && unicast(infraAddress);
+    const bool haveInfra = infraBSSID && unicast(infraBSSID) && infraChannel>0 && infraChannel<=196;
+    uint16_t dpFlags = 0x8324; // ext flags, country, social map, dualband, AWDL addr
+    unsigned dpLength = 15;
+    if (haveInfra) { dpFlags |= 0x0001; dpLength += 8; }
+    if (haveInfraAddr) { dpFlags |= 0x0002; dpLength += 6; }
+    v=tlv(12,dpLength); if(!v) return 0;
+    put16(v,dpFlags);
+    unsigned dp=2;
+    v[dp++]='X'; v[dp++]='0'; v[dp++]=0;
+    put16(v+dp,social); dp+=2;
+    if (haveInfra) {
+        memcpy(v+dp,infraBSSID,6); dp+=6;
+        put16(v+dp,infraChannel); dp+=2;
+    }
+    if (haveInfraAddr) { memcpy(v+dp,infraAddress,6); dp+=6; }
+    memcpy(v+dp,local,6); dp+=6;
+    put16(v+dp,0x0008); dp+=2; // social-channel-map supported
     v=tlv(21,2); if(!v) return 0; v[0]=0x34;v[1]=1; // AWDL 3.4 / macOS
     return offset;
 }
