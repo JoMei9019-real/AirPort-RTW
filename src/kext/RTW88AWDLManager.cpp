@@ -1023,8 +1023,10 @@ void RTW88AWDLManager::publishStats()
         _owner->setProperty("AWDL_LOCAL_AIRDROP_SERVICE_ID",
                             _localAirDropServiceId, sizeof(_localAirDropServiceId));
     _owner->setProperty("AWDL_NATIVE_SERVICE_RESPONSE_TX", (uint64_t)_nativeServiceResponseTx, 32);
-    _owner->setProperty("AWDL_TX_MIF_TLV_MASK", (uint64_t)(
-        (1u<<2)|(1u<<4)|(1u<<5)|(1u<<6)|(1u<<7)|(1u<<12)|(1u<<16)|(1u<<18)|(1u<<21)|(1u<<24)), 32);
+    uint32_t txMifMask =
+        (1u<<4)|(1u<<5)|(1u<<6)|(1u<<7)|(1u<<12)|(1u<<16)|(1u<<18)|(1u<<21)|(1u<<24);
+    if (_localAirDropServiceIdLength == 12) txMifMask |= (1u<<2);
+    _owner->setProperty("AWDL_TX_MIF_TLV_MASK", (uint64_t)txMifMask, 32);
     _owner->setProperty("AWDL_MIF_PEERS_EVER", (uint64_t)_mifPeersObserved, 32);
     _owner->setProperty("AWDL_VERSION_PEERS_EVER", (uint64_t)_versionPeersObserved, 32);
     _owner->setProperty("AWDL_ACTION_RX", (uint64_t)_actionRx, 32);
@@ -1286,11 +1288,11 @@ bool RTW88AWDLManager::tick()
                         _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,3,
                         _localAirDropServiceId,
                         _localAirDropServiceIdLength);
-                    if (frameLength && _localAirDropServiceIdLength == 12)
-                        ++_nativeServiceResponseTx;
                     RTW88AWDL::stamp(_txBuffer,_action,controlWindow,now,_actionSequence++);
                     if (frameLength && _backend->txRawManagementFrame(_txBuffer,frameLength)) {
                         ++_actionTx; ++_mifTx;
+                        if (_localAirDropServiceIdLength == 12)
+                            ++_nativeServiceResponseTx;
                         _lastMIFEAW=eaw; _lastMIFEAWValid=true;
                     }
                 }
