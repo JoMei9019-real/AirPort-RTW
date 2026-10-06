@@ -107,13 +107,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 
 bool AirPortRTW::start(IOService *provider)
 {
-    setProperty("DriverBuild", "2.0.0-beta.10-awdl-service-response");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.10");
+    setProperty("DriverBuild", "2.0.0-beta.11-awdl-datapath-service");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.11");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
-    IOLog("AirPortRTW: 2.0.0-beta.10 start (AWDL service-response beta)\n");
+    IOLog("AirPortRTW: 2.0.0-beta.11 start (AWDL data-path/service beta)\n");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
         IOLog("AirPortRTW: provider is not IOPCIDevice\n");
@@ -2097,7 +2097,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.10)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.11)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3454,11 +3454,17 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
         ++_awdlMdnsRx;
         if (mdnsResponse) ++_awdlMdnsRxResponses;
         else ++_awdlMdnsRxQueries;
-        if (airDropMdns) ++_awdlAirDropMdnsRx;
+        if (airDropMdns) {
+            ++_awdlAirDropMdnsRx;
+            if (mdnsResponse) ++_awdlAirDropMdnsRxResponses;
+            else ++_awdlAirDropMdnsRxQueries;
+        }
         setProperty("AWDL_MDNS_RX", (uint64_t)_awdlMdnsRx, 32);
         setProperty("AWDL_MDNS_RX_QUERIES", (uint64_t)_awdlMdnsRxQueries, 32);
         setProperty("AWDL_MDNS_RX_RESPONSES", (uint64_t)_awdlMdnsRxResponses, 32);
         setProperty("AWDL_AIRDROP_MDNS_RX", (uint64_t)_awdlAirDropMdnsRx, 32);
+        setProperty("AWDL_AIRDROP_MDNS_RX_QUERIES", (uint64_t)_awdlAirDropMdnsRxQueries, 32);
+        setProperty("AWDL_AIRDROP_MDNS_RX_RESPONSES", (uint64_t)_awdlAirDropMdnsRxResponses, 32);
     }
 
     alignas(8) uint8_t tagStorage[64];
