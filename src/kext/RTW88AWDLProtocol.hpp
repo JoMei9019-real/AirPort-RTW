@@ -81,6 +81,13 @@ struct Action {
     Sequence sequence;
     bool electionValid=false, electionMasterMismatch=false, versionValid=false;
     bool serviceResponse=false, serviceParams=false, dataPathState=false, arpa=false, bloom=false;
+    uint32_t tlvMask=0;
+    uint16_t serviceResponseLength=0, serviceParamsLength=0, dataPathStateLength=0, arpaLength=0, bloomLength=0;
+    uint16_t serviceResponseValueLength=0, serviceResponseFragmentOffset=0;
+    uint16_t dataPathFlags=0, dataPathSocialChannels=0, dataPathExtFlags=0;
+    uint16_t serviceUpdateIndex=0; uint32_t serviceBitmask=0;
+    uint8_t serviceResponseKeyLength=0, serviceResponseDnsType=0, serviceResponseCount=0;
+    uint8_t arpaFlags=0, arpaNameLength=0;
     uint8_t trailingPaddingBytes=0;
     uint8_t version=0, deviceClass=0;
     uint8_t syncAddress[6]={};
@@ -124,6 +131,7 @@ inline bool parseAction(const uint8_t *p, size_t n, Action &out, ParseFailure *f
             break;
         }
         const unsigned type=p[pos], len=le16(p+pos+1);
+        if (type < 32) a.tlvMask |= (1u << type);
         pos+=3;
         if (len>n-pos) return reject("truncated-tlv",pos-3);
         const uint8_t *v=p+pos;
@@ -157,14 +165,35 @@ inline bool parseAction(const uint8_t *p, size_t n, Action &out, ParseFailure *f
             haveVersion=true; a.version=v[0]; a.deviceClass=v[1];
         } else if (type==2) {
             a.serviceResponse = true;
+            if (a.serviceResponseCount != 0xff) ++a.serviceResponseCount;
+            if (!a.serviceResponseLength) a.serviceResponseLength=(uint16_t)len;
+            /* Service Response Descriptor: key-length + key (DNS name plus
+             * one-byte RR type) + total value length + fragment offset +
+             * fragment. Keep only bounded scalar metadata; payload stays
+             * opaque and is never trusted for allocation sizes. */
+            if (len >= 8) {
+                const uint16_t keyLen=le16(v);
+                if (keyLen && keyLen <= 255 && size_t(keyLen)+6 <= len) {
+                    a.serviceResponseKeyLength=(uint8_t)keyLen;
+                    a.serviceResponseDnsType=v[1+keyLen];
+                    a.serviceResponseValueLength=le16(v+2+keyLen);
+                    a.serviceResponseFragmentOffset=le16(v+4+keyLen);
+                }
+            }
         } else if (type==6) {
-            a.serviceParams = true;
+            a.serviceParams = true; a.serviceParamsLength=(uint16_t)len;
+            if (len >= 9) { a.serviceUpdateIndex=le16(v+3); a.serviceBitmask=le32(v+5); }
         } else if (type==12) {
-            a.dataPathState = true;
+            a.dataPathState = true; a.dataPathStateLength=(uint16_t)len;
+            if (len >= 15) {
+                a.dataPathFlags=le16(v); a.dataPathSocialChannels=le16(v+5);
+                a.dataPathExtFlags=le16(v+13);
+            }
         } else if (type==16) {
-            a.arpa = true;
+            a.arpa = true; a.arpaLength=(uint16_t)len;
+            if (len >= 2) { a.arpaFlags=v[0]; a.arpaNameLength=v[1]; }
         } else if (type==22) {
-            a.bloom = true;
+            a.bloom = true; a.bloomLength=(uint16_t)len;
         }
         pos+=len;
     }
@@ -193,7 +222,9 @@ inline uint8_t opClassForChannel(uint8_t channel) {
     return channel <= 14 ? 0x51 : 0x80;
 }
 inline size_t buildNativeAction(uint8_t *out, size_t capacity, const uint8_t *local,
-                               const Action &a, uint8_t subtype) {
+                               const Action &a, uint8_t subtype,
+                               const uint8_t *airDropServiceId=nullptr,
+                               uint8_t airDropServiceIdLength=0) {
     if (!out || capacity<NativeFrameSize || !local || !unicast(local) ||
         !unicast(a.master) || !unicast(a.syncAddress) || a.sequence.count!=16 ||
         a.sequence.stride!=a.presence || !a.presence || a.presence>16 ||
@@ -240,6 +271,27 @@ inline size_t buildNativeAction(uint8_t *out, size_t capacity, const uint8_t *lo
      * TLV still advertises the service update index/control-plane presence. */
     v=tlv(6,9); if(!v) return 0;
     v[0]=v[1]=v[2]=0; put16(v+3,0); put32(v+5,0);
+
+    /* Beta 10: when macOS has actually emitted its local _airdrop._tcp
+     * Bonjour instance, mirror that exact 12-hex service ID into the native
+     * MIF Service Response descriptor. This avoids inventing AirDrop identity:
+     * until the host stack provides a service ID, no Service Response is sent.
+     *
+     * Descriptor value (Wireshark/Project Zero compatible):
+     *   key = compressed "_airdrop._tcp.local" (C007) + PTR type
+     *   value = <service-id>._airdrop._tcp.local
+     */
+    if (subtype==3 && airDropServiceId && airDropServiceIdLength==12) {
+        v=tlv(2,24); if(!v) return 0;
+        put16(v,3);                 // key length includes DNS RR type
+        v[2]=0xc0; v[3]=0x07;      // _airdrop._tcp.local
+        v[4]=12;                    // PTR
+        put16(v+5,15);              // total PTR value length
+        put16(v+7,0);               // fragment offset
+        v[9]=12;
+        memcpy(v+10,airDropServiceId,12);
+        v[22]=0xc0; v[23]=0x07;
+    }
     // OWL advertises HT capabilities and ARPA only in MIFs, not PSFs.  Keeping
     // that distinction matters because MIF is the peer-promotion frame.
     if (subtype==3) {
