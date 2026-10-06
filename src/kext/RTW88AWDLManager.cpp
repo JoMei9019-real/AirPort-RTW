@@ -132,7 +132,7 @@ void RTW88AWDLManager::reset()
     _observedMasterChannel = 0; _nextAWChannel = 0; _masterChannelRaw = 0;
     _lastActionRxUS = 0; _mifRx = 0; _versionRx = 0;
     _electionMismatchTolerated = 0; _sameChannelWindows = 0; _offChannelWindows = 0;
-    _trailingPaddingAccepted = 0; _peerRefreshes = 0; _peerExpires = 0;
+    _trailingPaddingAccepted = 0; _peerRefreshes = 0; _peerExpires = 0; _peerServiceRefreshes = 0;
     _retuneAttempts = 0; _retuneSuccess = 0; _retuneNotReady = 0; _sameChannelFastPath = 0;
     _retuneUnsupported = 0; _retuneBusy = 0; _retuneOther = 0; _noChannelWindows = 0;
     _peerScheduleWindows = 0; _peerScheduleSameChannel = 0; _peerScheduleOffChannel = 0;
@@ -749,6 +749,7 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
     if (action.subtype == 3) _rxMifLength = (uint16_t)(length > 0xffff ? 0xffff : length);
     if (action.serviceResponse) {
         ++_serviceResponseRx;
+        peer->sawServiceResponse = true;
         _rxServiceResponseLength = action.serviceResponseLength;
         _rxServiceValueLength = action.serviceResponseValueLength;
         _rxServiceFragmentOffset = action.serviceResponseFragmentOffset;
@@ -838,15 +839,22 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
         ++_syncUpdates;
     }
     if (peer->valid && presenceDue) {
-        /* IO80211 peer presence is a lifecycle event, not a per-frame trace.
-         * Publish on promotion and at most once per second thereafter so the
-         * peer manager can refresh RSSI/channel without being flooded by every
-         * PSF/MIF. */
-        if (!peer->announced || !peer->lastPresenceUS ||
+        /* A service-bearing MIF is a stronger transition than a plain timing
+         * refresh. Re-publish immediately the first time Service Response +
+         * Data Path State + ARPA are all present so IO80211/sharingd does not
+         * have to wait for the one-second periodic presence refresh. */
+        const bool serviceReady = peer->sawServiceResponse &&
+                                  peer->sawDataPathState && peer->sawArpa;
+        const bool serviceTransition = serviceReady && !peer->serviceReadyNotified;
+        if (!peer->announced || serviceTransition || !peer->lastPresenceUS ||
             now < peer->lastPresenceUS || now - peer->lastPresenceUS >= 1000000ULL) {
             *presenceDue = true;
             peer->announced = true;
             peer->lastPresenceUS = now;
+            if (serviceTransition) {
+                peer->serviceReadyNotified = true;
+                ++_peerServiceRefreshes;
+            }
         }
     }
     return peer->valid;
@@ -875,6 +883,11 @@ uint32_t RTW88AWDLManager::expirePublishedPeers(uint8_t *outMacs, uint32_t capac
             peer.valid = false;
             peer.sawMIF = false;
             peer.versionValid = false;
+            peer.sawServiceParams = false;
+            peer.sawDataPathState = false;
+            peer.sawArpa = false;
+            peer.sawServiceResponse = false;
+            peer.serviceReadyNotified = false;
             peer.version = 0;
             peer.deviceClass = 0;
             ++_peerExpires;
@@ -957,6 +970,7 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_TRAILING_PADDING_ACCEPTED", (uint64_t)_trailingPaddingAccepted, 32);
     _owner->setProperty("AWDL_PEER_REFRESHES", (uint64_t)_peerRefreshes, 32);
     _owner->setProperty("AWDL_PEER_EXPIRES", (uint64_t)_peerExpires, 32);
+    _owner->setProperty("AWDL_PEER_SERVICE_REFRESHES", (uint64_t)_peerServiceRefreshes, 32);
     _owner->setProperty("AWDL_WINDOW_TARGET_CHANNEL", (uint64_t)_windowTargetChannel, 32);
     _owner->setProperty("AWDL_RADIO_CHANNEL_BEFORE", (uint64_t)_radioChannelBefore, 32);
     _owner->setProperty("AWDL_RADIO_CHANNEL_AFTER", (uint64_t)_radioChannelAfter, 32);
@@ -1056,6 +1070,15 @@ void RTW88AWDLManager::publishStats()
         (1u<<4)|(1u<<5)|(1u<<6)|(1u<<7)|(1u<<12)|(1u<<16)|(1u<<18)|(1u<<21)|(1u<<24);
     if (_localAirDropServiceIdLength == 12) txMifMask |= (1u<<2);
     _owner->setProperty("AWDL_TX_MIF_TLV_MASK", (uint64_t)txMifMask, 32);
+    uint16_t txDataPathFlags = 0x8324;
+    uint16_t txDataPathLength = 15;
+    if (_backend && _backend->staAssociatedForAWDL()) {
+        txDataPathFlags |= 0x0003;
+        txDataPathLength += 14;
+    }
+    _owner->setProperty("AWDL_TX_DATA_PATH_FLAGS", (uint64_t)txDataPathFlags, 16);
+    _owner->setProperty("AWDL_TX_DATA_PATH_LENGTH", (uint64_t)txDataPathLength, 16);
+    _owner->setProperty("AWDL_TX_DATA_PATH_EXT_FLAGS", (uint64_t)0x0008, 16);
     _owner->setProperty("AWDL_MIF_PEERS_EVER", (uint64_t)_mifPeersObserved, 32);
     _owner->setProperty("AWDL_VERSION_PEERS_EVER", (uint64_t)_versionPeersObserved, 32);
     _owner->setProperty("AWDL_ACTION_RX", (uint64_t)_actionRx, 32);
