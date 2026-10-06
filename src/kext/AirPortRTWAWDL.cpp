@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.9 — Ventura IO80211 AWDL/P2P TX-pipeline bridge.
+ * AirPortRTW 2.0.0-beta.10 — Ventura IO80211 AWDL/P2P service-response bridge.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -18,22 +18,72 @@ static const char *rtw88VifRoleName(UInt role)
     return role == APPLE80211_VIF_AWDL ? "awdl" : "p2p";
 }
 
-static bool rtw88AWDLQueuedMdnsPacket(mbuf_t m, bool *ipv6)
+struct RTW88MdnsInfo {
+    bool ipv6 = false;
+    bool mdns = false;
+    bool response = false;
+    bool airDrop = false;
+    bool serviceIdValid = false;
+    uint8_t serviceId[12] = {};
+};
+
+static bool rtw88HexAscii(uint8_t c)
 {
-    if (ipv6) *ipv6 = false;
-    if (!m || mbuf_pkthdr_len(m) < 14) return false;
-    uint8_t h[62] = {};
+    return (c >= '0' && c <= '9') ||
+           (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
+}
+
+static RTW88MdnsInfo rtw88InspectAWDLMdnsPacket(mbuf_t m)
+{
+    RTW88MdnsInfo info;
+    if (!m || mbuf_pkthdr_len(m) < 62) return info;
+
+    uint8_t bytes[768] = {};
     const size_t total = mbuf_pkthdr_len(m);
-    const size_t copy = total < sizeof(h) ? total : sizeof(h);
-    if (mbuf_copydata(m, 0, copy, h) != 0) return false;
-    const uint16_t type = (uint16_t(h[12]) << 8) | h[13];
-    if (type != 0x86dd || copy < 54) return false;
-    if (ipv6) *ipv6 = true;
-    if (h[20] != 17 || copy < 62) return false;
-    const uint8_t *udp = h + 54;
-    const uint16_t sport = (uint16_t(udp[0]) << 8) | udp[1];
-    const uint16_t dport = (uint16_t(udp[2]) << 8) | udp[3];
-    return sport == 5353 || dport == 5353;
+    const size_t copy = total < sizeof(bytes) ? total : sizeof(bytes);
+    if (mbuf_copydata(m, 0, copy, bytes) != 0) return info;
+
+    const uint16_t type = (uint16_t(uint16_t(bytes[12]) << 8) | bytes[13]);
+    if (type != 0x86dd || copy < 54) return info;
+    info.ipv6 = true;
+    if (bytes[20] != 17 || copy < 62) return info; /* IPv6 next-header UDP */
+
+    const uint8_t *udp = bytes + 54;
+    const uint16_t sport = (uint16_t(uint16_t(udp[0]) << 8) | udp[1]);
+    const uint16_t dport = (uint16_t(uint16_t(udp[2]) << 8) | udp[3]);
+    if (sport != 5353 && dport != 5353) return info;
+    info.mdns = true;
+
+    const size_t dns = 62;
+    if (copy >= dns + 12)
+        info.response = (bytes[dns + 2] & 0x80U) != 0;
+
+    static const uint8_t needle[] = {'_','a','i','r','d','r','o','p'};
+    for (size_t i = dns; i + sizeof(needle) <= copy; ++i) {
+        if (!memcmp(bytes + i, needle, sizeof(needle))) {
+            info.airDrop = true;
+            break;
+        }
+    }
+
+    /* Apple/sharingd uses a 12-hex-character AirDrop service instance ID.
+     * Capture it only from a packet that explicitly contains "_airdrop", so
+     * unrelated Bonjour UUIDs cannot seed the native MIF Service Response. */
+    if (info.airDrop) {
+        for (size_t i = dns; i + 13 <= copy; ++i) {
+            if (bytes[i] != 12) continue;
+            bool hex = true;
+            for (unsigned j = 0; j < 12; ++j)
+                hex = hex && rtw88HexAscii(bytes[i + 1 + j]);
+            if (hex) {
+                memcpy(info.serviceId, bytes + i + 1, 12);
+                info.serviceIdValid = true;
+                break;
+            }
+        }
+    }
+    return info;
 }
 
 static uint16_t rtw88PreferredAWDLSocialChannel(RTW88IEEE80211 *backend)
@@ -731,15 +781,22 @@ void AirPortRTW::requestPacketTx(void *object, UInt options)
             mbuf_t next = mbuf_nextpkt(m);
             mbuf_setnextpkt(m, nullptr);
 
-            bool ipv6 = false;
-            const bool mdns = rtw88AWDLQueuedMdnsPacket(m, &ipv6);
-            if (ipv6) {
+            const RTW88MdnsInfo mdns = rtw88InspectAWDLMdnsPacket(m);
+            if (mdns.ipv6) {
                 ++_awdlIPv6Tx;
                 setProperty("AWDL_IPV6_TX", (uint64_t)_awdlIPv6Tx, 32);
             }
-            if (mdns) {
+            if (mdns.mdns) {
                 ++_awdlMdnsTx;
+                if (mdns.response) ++_awdlMdnsTxResponses;
+                else ++_awdlMdnsTxQueries;
+                if (mdns.airDrop) ++_awdlAirDropMdnsTx;
                 setProperty("AWDL_MDNS_TX", (uint64_t)_awdlMdnsTx, 32);
+                setProperty("AWDL_MDNS_TX_QUERIES", (uint64_t)_awdlMdnsTxQueries, 32);
+                setProperty("AWDL_MDNS_TX_RESPONSES", (uint64_t)_awdlMdnsTxResponses, 32);
+                setProperty("AWDL_AIRDROP_MDNS_TX", (uint64_t)_awdlAirDropMdnsTx, 32);
+                if (mdns.serviceIdValid)
+                    _awdlManager->noteLocalAirDropServiceId(mdns.serviceId, 12);
             }
 
             if (_awdlManager->enqueueData(m)) {
