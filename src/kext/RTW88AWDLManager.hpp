@@ -127,6 +127,7 @@ private:
     void bootstrapNative(); // caller holds workloop gate
     void flushActions();
     void drainActions(uint64_t now);
+    void refreshReceiverIntent(uint64_t now);
     bool _nativeSchedule = false;
     uint32_t _appleControlMask = 0;
     uint64_t _lastAppleControlUS = 0;
@@ -230,6 +231,10 @@ private:
     uint32_t _airDropRegistrationEvents = 0;
     uint32_t _receiverStateEntries = 0;
     uint32_t _peerTrafficLastNameLength = 0;
+    uint32_t _receiverMdnsActivations = 0;
+    uint32_t _receiverMdnsExpirations = 0;
+    uint64_t _receiverLastMdnsUS = 0;
+    uint8_t _receiverStateSource = 0; // 0=inactive, 1=peer-traffic, 2=local-mDNS
     bool _receiverIntent = false;
     uint32_t _presenceMode = 0;
     uint32_t _syncState = 0;

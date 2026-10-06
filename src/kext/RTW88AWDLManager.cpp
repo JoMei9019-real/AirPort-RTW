@@ -10,6 +10,7 @@
 
 namespace {
 constexpr uint64_t kAWDLPeerLifetimeUS = 5000000ULL;
+constexpr uint64_t kAirDropReceiverIntentLifetimeUS = 60000000ULL;
 template <typename R> struct AWDLResult {
     R value{};
     template <typename F> void call(F &f) { value = f(); }
@@ -71,6 +72,10 @@ bool RTW88AWDLManager::init(RTW88IEEE80211 *backend, IOWorkLoop *workLoop,
     _airDropRegistrationEvents = 0;
     _receiverStateEntries = 0;
     _peerTrafficLastNameLength = 0;
+    _receiverMdnsActivations = 0;
+    _receiverMdnsExpirations = 0;
+    _receiverLastMdnsUS = 0;
+    _receiverStateSource = 0;
     _receiverIntent = false;
     publishStats();
     return true;
@@ -452,9 +457,25 @@ static bool rtw88IsHex12(const char *s, uint32_t n)
     return true;
 }
 
+void RTW88AWDLManager::refreshReceiverIntent(uint64_t now)
+{
+    const bool mdnsFresh = _receiverLastMdnsUS && now >= _receiverLastMdnsUS &&
+        now - _receiverLastMdnsUS <= kAirDropReceiverIntentLifetimeUS;
+    const bool active = _airDropRegistrations != 0 || mdnsFresh;
+
+    if (_receiverIntent && !active) {
+        ++_receiverMdnsExpirations;
+    }
+
+    _receiverIntent = active;
+    _receiverStateSource = _airDropRegistrations ? 1 : (mdnsFresh ? 2 : 0);
+}
+
 void RTW88AWDLManager::notePeerTrafficRegistration(bool active, const char *name, uint32_t nameLength)
 {
     awdlGated<void>(_workLoop, _owner, [&]() -> void {
+        const uint64_t now = nowUS();
+        refreshReceiverIntent(now);
         ++_peerTrafficRegistrationEvents;
         _peerTrafficLastNameLength = nameLength;
 
@@ -465,10 +486,11 @@ void RTW88AWDLManager::notePeerTrafficRegistration(bool active, const char *name
         if (active) {
             ++_peerRegistrations;
             if (airDrop) {
-                if (!_airDropRegistrations) ++_receiverStateEntries;
+                if (!_receiverIntent) ++_receiverStateEntries;
                 ++_airDropRegistrations;
                 ++_airDropRegistrationEvents;
                 _receiverIntent = true;
+                _receiverStateSource = 1;
 
                 /* Some IO80211 builds register the concrete AirDrop instance
                  * name here before mDNS has emitted it on awdl0. If the name
@@ -483,7 +505,7 @@ void RTW88AWDLManager::notePeerTrafficRegistration(bool active, const char *name
         } else {
             if (_peerRegistrations) --_peerRegistrations;
             if (airDrop && _airDropRegistrations) --_airDropRegistrations;
-            if (!_airDropRegistrations) _receiverIntent = false;
+            refreshReceiverIntent(now);
         }
 
         publishStats();
@@ -616,14 +638,32 @@ void RTW88AWDLManager::noteLocalAirDropServiceId(const uint8_t *serviceId, uint8
     if (!serviceId || length != sizeof(_localAirDropServiceId))
         return;
     awdlGated<void>(_workLoop, _owner, [&]() -> void {
+        const uint64_t now = nowUS();
+        refreshReceiverIntent(now);
         bool same = _localAirDropServiceIdLength == length &&
                     !memcmp(_localAirDropServiceId, serviceId, length);
         if (!same) {
             memcpy(_localAirDropServiceId, serviceId, length);
             _localAirDropServiceIdLength = length;
         }
+
+        /* On Ventura sharingd emits the local _airdrop._tcp instance on awdl0
+         * without issuing APPLE80211_IOC_AWDL_PEER_TRAFFIC_REGISTRATION.
+         * Treat that concrete local service advertisement as receiver intent.
+         * The intent is leased so merely opening AirDrop once cannot leave the
+         * station permanently advertised as a receiver. */
+        if (!_receiverIntent) {
+            ++_receiverStateEntries;
+            ++_receiverMdnsActivations;
+        }
+        _receiverLastMdnsUS = now;
+        _receiverIntent = true;
+        if (!_airDropRegistrations)
+            _receiverStateSource = 2;
+
         ++_localAirDropServiceCaptures;
         publishStats();
+        arm(1);
     });
 }
 
@@ -1016,6 +1056,8 @@ void RTW88AWDLManager::drainData(uint64_t now, const RTW88AWDL::Window &window)
 void RTW88AWDLManager::publishStats()
 {
     if (!_owner) return;
+    const uint64_t receiverNow = nowUS();
+    refreshReceiverIntent(receiverNow);
     const char *plane = !_awdlInterface ? "no-interface" :
         !_syncEnabled ? "sync-disabled" :
         !_airTemplate ? "waiting-io80211" :
@@ -1023,7 +1065,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.12-receiver-state");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.13-receiver-mdns");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -1153,6 +1195,21 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_RECEIVER_STATE_ENTRIES", (uint64_t)_receiverStateEntries, 32);
     _owner->setProperty("AWDL_RECEIVER_STATE_ENTERED",
                         _receiverIntent ? kOSBooleanTrue : kOSBooleanFalse);
+    _owner->setProperty("AWDL_RECEIVER_STATE_SOURCE",
+                        _receiverStateSource == 1 ? "peer-traffic" :
+                        (_receiverStateSource == 2 ? "local-mdns" : "inactive"));
+    _owner->setProperty("AWDL_RECEIVER_MDNS_ACTIVATIONS", (uint64_t)_receiverMdnsActivations, 32);
+    _owner->setProperty("AWDL_RECEIVER_MDNS_EXPIRATIONS", (uint64_t)_receiverMdnsExpirations, 32);
+    uint64_t receiverAgeMS = 0;
+    uint64_t receiverRemainingMS = 0;
+    if (_receiverLastMdnsUS && receiverNow >= _receiverLastMdnsUS) {
+        const uint64_t ageUS = receiverNow - _receiverLastMdnsUS;
+        receiverAgeMS = ageUS / 1000ULL;
+        if (ageUS < kAirDropReceiverIntentLifetimeUS)
+            receiverRemainingMS = (kAirDropReceiverIntentLifetimeUS - ageUS) / 1000ULL;
+    }
+    _owner->setProperty("AWDL_RECEIVER_MDNS_LAST_ACTIVITY_MS", receiverAgeMS, 64);
+    _owner->setProperty("AWDL_RECEIVER_MDNS_EXPIRES_MS", receiverRemainingMS, 64);
     _owner->setProperty("AWDL_MIF_PEERS_EVER", (uint64_t)_mifPeersObserved, 32);
     _owner->setProperty("AWDL_VERSION_PEERS_EVER", (uint64_t)_versionPeersObserved, 32);
     _owner->setProperty("AWDL_ACTION_RX", (uint64_t)_actionRx, 32);
@@ -1198,6 +1255,7 @@ bool RTW88AWDLManager::tick()
     return awdlGated<bool>(_workLoop, _owner, [&]() -> bool {
     if (!_backend || !_syncEnabled || !_awdlInterface || !_txBuffer) return false;
     uint64_t now = nowUS();
+    refreshReceiverIntent(now);
     if (!_airTemplate) {
         if (!_fallbackDeadlineUS) _fallbackDeadlineUS = now + 1500000ULL;
         if (now >= _fallbackDeadlineUS) bootstrapNative();
