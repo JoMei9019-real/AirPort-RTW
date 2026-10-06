@@ -66,6 +66,12 @@ bool RTW88AWDLManager::init(RTW88IEEE80211 *backend, IOWorkLoop *workLoop,
     _deviceCapabilities = 0;
     memcpy(_bssid, RTW88AWDL::BSSID, sizeof(_bssid));
     _peerRegistrations = 0;
+    _airDropRegistrations = 0;
+    _peerTrafficRegistrationEvents = 0;
+    _airDropRegistrationEvents = 0;
+    _receiverStateEntries = 0;
+    _peerTrafficLastNameLength = 0;
+    _receiverIntent = false;
     publishStats();
     return true;
 }
@@ -417,12 +423,72 @@ IOReturn RTW88AWDLManager::copySyncFrameTemplate(void *payload, uint32_t *length
     });
 }
 
-void RTW88AWDLManager::notePeerTrafficRegistration(bool active)
+static bool rtw88AsciiContains(const char *s, uint32_t n, const char *needle)
 {
-    if (active)
-        ++_peerRegistrations;
-    else if (_peerRegistrations)
-        --_peerRegistrations;
+    if (!s || !needle) return false;
+    const uint32_t m = (uint32_t)strlen(needle);
+    if (!m || m > n) return false;
+    for (uint32_t i = 0; i + m <= n; ++i) {
+        bool match = true;
+        for (uint32_t j = 0; j < m; ++j) {
+            char a=s[i+j], b=needle[j];
+            if (a>='A' && a<='Z') a=(char)(a-'A'+'a');
+            if (b>='A' && b<='Z') b=(char)(b-'A'+'a');
+            if (a!=b) { match=false; break; }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+static bool rtw88IsHex12(const char *s, uint32_t n)
+{
+    if (!s || n < 12) return false;
+    for (uint32_t i=0;i<12;++i) {
+        const char c=s[i];
+        if (!((c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F')))
+            return false;
+    }
+    return true;
+}
+
+void RTW88AWDLManager::notePeerTrafficRegistration(bool active, const char *name, uint32_t nameLength)
+{
+    awdlGated<void>(_workLoop, _owner, [&]() -> void {
+        ++_peerTrafficRegistrationEvents;
+        _peerTrafficLastNameLength = nameLength;
+
+        const bool airDrop = name && nameLength &&
+            (rtw88AsciiContains(name,nameLength,"_airdrop") ||
+             rtw88AsciiContains(name,nameLength,"airdrop"));
+
+        if (active) {
+            ++_peerRegistrations;
+            if (airDrop) {
+                if (!_airDropRegistrations) ++_receiverStateEntries;
+                ++_airDropRegistrations;
+                ++_airDropRegistrationEvents;
+                _receiverIntent = true;
+
+                /* Some IO80211 builds register the concrete AirDrop instance
+                 * name here before mDNS has emitted it on awdl0. If the name
+                 * starts with Apple's 12-hex service ID, reuse that exact host
+                 * identity for native MIF Service Response generation. */
+                if (nameLength >= 12 && rtw88IsHex12(name,nameLength)) {
+                    memcpy(_localAirDropServiceId,name,12);
+                    _localAirDropServiceIdLength=12;
+                    ++_localAirDropServiceCaptures;
+                }
+            }
+        } else {
+            if (_peerRegistrations) --_peerRegistrations;
+            if (airDrop && _airDropRegistrations) --_airDropRegistrations;
+            if (!_airDropRegistrations) _receiverIntent = false;
+        }
+
+        publishStats();
+        arm(1);
+    });
 }
 
 uint64_t RTW88AWDLManager::nowUS()
@@ -957,7 +1023,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.11-datapath-service");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.12-receiver-state");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -1079,6 +1145,14 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_TX_DATA_PATH_FLAGS", (uint64_t)txDataPathFlags, 16);
     _owner->setProperty("AWDL_TX_DATA_PATH_LENGTH", (uint64_t)txDataPathLength, 16);
     _owner->setProperty("AWDL_TX_DATA_PATH_EXT_FLAGS", (uint64_t)0x0008, 16);
+    _owner->setProperty("AWDL_PEER_TRAFFIC_REGISTRATIONS", (uint64_t)_peerRegistrations, 32);
+    _owner->setProperty("AWDL_PEER_TRAFFIC_EVENTS", (uint64_t)_peerTrafficRegistrationEvents, 32);
+    _owner->setProperty("AWDL_PEER_TRAFFIC_LAST_NAME_LENGTH", (uint64_t)_peerTrafficLastNameLength, 32);
+    _owner->setProperty("AWDL_AIRDROP_REGISTRATIONS", (uint64_t)_airDropRegistrations, 32);
+    _owner->setProperty("AWDL_AIRDROP_REGISTRATION_EVENTS", (uint64_t)_airDropRegistrationEvents, 32);
+    _owner->setProperty("AWDL_RECEIVER_STATE_ENTRIES", (uint64_t)_receiverStateEntries, 32);
+    _owner->setProperty("AWDL_RECEIVER_STATE_ENTERED",
+                        _receiverIntent ? kOSBooleanTrue : kOSBooleanFalse);
     _owner->setProperty("AWDL_MIF_PEERS_EVER", (uint64_t)_mifPeersObserved, 32);
     _owner->setProperty("AWDL_VERSION_PEERS_EVER", (uint64_t)_versionPeersObserved, 32);
     _owner->setProperty("AWDL_ACTION_RX", (uint64_t)_actionRx, 32);
