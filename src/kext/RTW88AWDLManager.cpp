@@ -147,8 +147,14 @@ void RTW88AWDLManager::reset()
     _rxDataPathStateLength = 0; _rxArpaLength = 0; _rxBloomLength = 0;
     _rxServiceValueLength = 0; _rxServiceFragmentOffset = 0;
     _rxDataPathFlags = 0; _rxDataPathSocialChannels = 0; _rxDataPathExtFlags = 0;
+    _rxDataPathInfraChannel = 0; _rxDataPathUmi = 0; _rxDataPathUnicastOptionsLength = 0;
+    bzero(_rxDataPathInfraBSSID, sizeof(_rxDataPathInfraBSSID));
+    bzero(_rxDataPathInfraAddress, sizeof(_rxDataPathInfraAddress));
+    bzero(_rxDataPathAWDLAddress, sizeof(_rxDataPathAWDLAddress));
+    _rxDataPathLayoutValid = false;
     _rxServiceUpdateIndex = 0; _rxServiceBitmask = 0;
     _rxServiceKeyLength = 0; _rxServiceDnsType = 0; _rxServiceResponseCount = 0;
+    _rxServicePtrCount = 0; _rxServiceTxtCount = 0; _rxServiceSrvCount = 0; _rxServiceOtherCount = 0;
     _rxArpaFlags = 0; _rxArpaNameLength = 0;
     bzero(_localAirDropServiceId, sizeof(_localAirDropServiceId));
     _localAirDropServiceIdLength = 0; _localAirDropServiceCaptures = 0; _nativeServiceResponseTx = 0;
@@ -749,6 +755,10 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
         _rxServiceKeyLength = action.serviceResponseKeyLength;
         _rxServiceDnsType = action.serviceResponseDnsType;
         _rxServiceResponseCount = action.serviceResponseCount;
+        _rxServicePtrCount = action.servicePtrCount;
+        _rxServiceTxtCount = action.serviceTxtCount;
+        _rxServiceSrvCount = action.serviceSrvCount;
+        _rxServiceOtherCount = action.serviceOtherCount;
     }
     if (action.serviceParams) {
         ++_serviceParamsRx; peer->sawServiceParams = true;
@@ -762,6 +772,13 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
         _rxDataPathFlags = action.dataPathFlags;
         _rxDataPathSocialChannels = action.dataPathSocialChannels;
         _rxDataPathExtFlags = action.dataPathExtFlags;
+        _rxDataPathInfraChannel = action.dataPathInfraChannel;
+        _rxDataPathUmi = action.dataPathUmi;
+        _rxDataPathUnicastOptionsLength = action.dataPathUnicastOptionsLength;
+        memcpy(_rxDataPathInfraBSSID, action.dataPathInfraBSSID, 6);
+        memcpy(_rxDataPathInfraAddress, action.dataPathInfraAddress, 6);
+        memcpy(_rxDataPathAWDLAddress, action.dataPathAWDLAddress, 6);
+        _rxDataPathLayoutValid = action.dataPathLayoutValid;
     }
     if (action.arpa) {
         ++_arpaRx; peer->sawArpa = true;
@@ -876,7 +893,7 @@ void RTW88AWDLManager::drainData(uint64_t now, const RTW88AWDL::Window &window)
         _queueHead = (_queueHead + 1) % 128;
         --_queueCount;
         uint8_t destination[6] = {};
-        bool expired = now < entry.queuedUS || now - entry.queuedUS > 2000000;
+        bool expired = now < entry.queuedUS || now - entry.queuedUS > 5000000;
         if (expired || mbuf_copydata(entry.packet, 0, 6, destination) != 0) {
             mbuf_freem(entry.packet); ++_dataDropped;
             if (expired) ++_dataExpired;
@@ -927,7 +944,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.10-service-response");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.11-datapath-service");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -1001,6 +1018,10 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_RX_MIF_LENGTH", (uint64_t)_rxMifLength, 32);
     _owner->setProperty("AWDL_RX_SERVICE_RESPONSE_LENGTH", (uint64_t)_rxServiceResponseLength, 32);
     _owner->setProperty("AWDL_RX_SERVICE_RESPONSE_COUNT", (uint64_t)_rxServiceResponseCount, 8);
+    _owner->setProperty("AWDL_RX_SERVICE_PTR_COUNT", (uint64_t)_rxServicePtrCount, 8);
+    _owner->setProperty("AWDL_RX_SERVICE_TXT_COUNT", (uint64_t)_rxServiceTxtCount, 8);
+    _owner->setProperty("AWDL_RX_SERVICE_SRV_COUNT", (uint64_t)_rxServiceSrvCount, 8);
+    _owner->setProperty("AWDL_RX_SERVICE_OTHER_COUNT", (uint64_t)_rxServiceOtherCount, 8);
     _owner->setProperty("AWDL_RX_SERVICE_KEY_LENGTH", (uint64_t)_rxServiceKeyLength, 8);
     _owner->setProperty("AWDL_RX_SERVICE_DNS_TYPE", (uint64_t)_rxServiceDnsType, 8);
     _owner->setProperty("AWDL_RX_SERVICE_VALUE_LENGTH", (uint64_t)_rxServiceValueLength, 16);
@@ -1012,6 +1033,14 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_RX_DATA_PATH_FLAGS", (uint64_t)_rxDataPathFlags, 16);
     _owner->setProperty("AWDL_RX_SOCIAL_CHANNEL_MAP", (uint64_t)_rxDataPathSocialChannels, 16);
     _owner->setProperty("AWDL_RX_DATA_PATH_EXT_FLAGS", (uint64_t)_rxDataPathExtFlags, 16);
+    _owner->setProperty("AWDL_RX_DATA_PATH_LAYOUT_VALID",
+                        _rxDataPathLayoutValid ? kOSBooleanTrue : kOSBooleanFalse);
+    _owner->setProperty("AWDL_RX_INFRA_CHANNEL", (uint64_t)_rxDataPathInfraChannel, 16);
+    _owner->setProperty("AWDL_RX_DATA_PATH_UMI", (uint64_t)_rxDataPathUmi, 16);
+    _owner->setProperty("AWDL_RX_UNICAST_OPTIONS_LENGTH", (uint64_t)_rxDataPathUnicastOptionsLength, 16);
+    _owner->setProperty("AWDL_RX_INFRA_BSSID", _rxDataPathInfraBSSID, 6);
+    _owner->setProperty("AWDL_RX_INFRA_ADDRESS", _rxDataPathInfraAddress, 6);
+    _owner->setProperty("AWDL_RX_AWDL_ADDRESS", _rxDataPathAWDLAddress, 6);
     _owner->setProperty("AWDL_RX_ARPA_LENGTH", (uint64_t)_rxArpaLength, 16);
     _owner->setProperty("AWDL_RX_ARPA_FLAGS", (uint64_t)_rxArpaFlags, 8);
     _owner->setProperty("AWDL_RX_ARPA_NAME_LENGTH", (uint64_t)_rxArpaNameLength, 8);
@@ -1284,10 +1313,18 @@ bool RTW88AWDLManager::tick()
                 const bool mifDue = (!_lastMIFEAWValid || eaw != _lastMIFEAW) &&
                     controlWindow.elapsedUS >= commonCenterUS;
                 if (mifDue) {
+                    uint8_t infraAddress[6] = {}, infraBSSID[6] = {};
+                    uint16_t infraChannel = 0;
+                    if (_backend->staAssociatedForAWDL()) {
+                        _backend->copyInfrastructureAddress(infraAddress);
+                        _backend->copyInfrastructureBSSID(infraBSSID);
+                        infraChannel = _backend->infrastructureChannel();
+                    }
                     uint32_t frameLength=(uint32_t)RTW88AWDL::buildNativeAction(
                         _txBuffer,RTW88AWDL::MaxFrame,_localAddress,_action,3,
                         _localAirDropServiceId,
-                        _localAirDropServiceIdLength);
+                        _localAirDropServiceIdLength,
+                        infraAddress,infraBSSID,infraChannel);
                     RTW88AWDL::stamp(_txBuffer,_action,controlWindow,now,_actionSequence++);
                     if (frameLength && _backend->txRawManagementFrame(_txBuffer,frameLength)) {
                         ++_actionTx; ++_mifTx;
@@ -1328,7 +1365,7 @@ bool RTW88AWDLManager::tick()
         else ++_windowSkips;
         // Expire old packets even while STA owns the radio.
         for (auto &entry : _pending) {
-            if (entry.packet && now > entry.queuedUS + 2000000) {
+            if (entry.packet && now > entry.queuedUS + 5000000) {
                 // Keep queue invariants: drainData expires without transmitting
                 // with a zero channel and a non-multicast slot.
                 RTW88AWDL::Window unavailable; unavailable.slot = 1;
