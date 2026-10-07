@@ -510,7 +510,9 @@ OSDefineMetaClassAndStructors(RTW88IEEE80211, OSObject)
 void RTW88IEEE80211::compat_rx_frame(void *kext_hw, struct sk_buff *skb)
 {
     RTW88IEEE80211 *self = (RTW88IEEE80211 *)kext_hw;
-    if (self) self->rxFrame(skb);
+    if (!self) { kfree_skb(skb); return; }
+    if (self->_parent && self->_parent->deferRxFrame(skb)) return;
+    self->rxFrame(skb);
 }
 
 void RTW88IEEE80211::compat_tx_status(void *kext_hw, struct sk_buff *skb)
@@ -1169,8 +1171,24 @@ IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
 
 IOReturn RTW88IEEE80211::powerOn()
 {
+    IOWorkLoop *rxwl = _parent && _parent->rxProcessingDeferred() ? _parent->getRxWorkLoop() : nullptr;
+    if (!rxwl) return powerOnGated();
+    return rxwl->runAction(
+        [](OSObject *owner, void *, void *, void *, void *) -> IOReturn {
+            return static_cast<RTW88IEEE80211 *>(owner)->powerOnGated();
+        }, this);
+}
+
+IOReturn RTW88IEEE80211::powerOnGated()
+{
     IOLog("rtw88: IEEE80211 powerOn\n");
-    if (_powered) return kIOReturnSuccess;
+    if (_powered) {
+        if (_parent) {
+            _parent->setRxQueueEnabled(true);
+            _parent->radioPowerChanged(true);
+        }
+        return kIOReturnSuccess;
+    }
     if (!_hw || !_hw->ops || !_hw->ops->start) return kIOReturnNotReady;
     int ret = _hw->ops->start(_hw);
     if (ret) {
@@ -1186,12 +1204,31 @@ IOReturn RTW88IEEE80211::powerOn()
     }
     IOReturn filterResult = _awdlReceiveMode ? setAWDLReceiveMode(true) : setReceiveMulticast(_receiveMulticast);
     if (filterResult != kIOReturnSuccess) powerOff();
+    else if (_parent) {
+        _parent->setRxQueueEnabled(true);
+        _parent->radioPowerChanged(true);
+    }
     return filterResult;
 }
 
 void RTW88IEEE80211::powerOff()
 {
+    IOWorkLoop *rxwl = _parent && _parent->rxProcessingDeferred() ? _parent->getRxWorkLoop() : nullptr;
+    if (!rxwl) { powerOffGated(); return; }
+    (void)rxwl->runAction(
+        [](OSObject *owner, void *, void *, void *, void *) -> IOReturn {
+            static_cast<RTW88IEEE80211 *>(owner)->powerOffGated();
+            return kIOReturnSuccess;
+        }, this);
+}
+
+void RTW88IEEE80211::powerOffGated()
+{
     IOLog("rtw88: IEEE80211 powerOff\n");
+    if (_parent) {
+        _parent->radioPowerChanged(false);
+        _parent->setRxQueueEnabled(false);
+    }
     if (!_powered) return;
     if (_hw && _hw->ops && _hw->ops->stop)
         _hw->ops->stop(_hw, false);
@@ -3569,12 +3606,33 @@ IOReturn RTW88IEEE80211::cmdPowerOn()
 
 IOReturn RTW88IEEE80211::cmdPowerOff()
 {
+    IOWorkLoop *rxwl = _parent && _parent->rxProcessingDeferred() ? _parent->getRxWorkLoop() : nullptr;
+    if (!rxwl) return cmdPowerOffGated();
+    return rxwl->runAction(
+        [](OSObject *owner, void *, void *, void *, void *) -> IOReturn {
+            return static_cast<RTW88IEEE80211 *>(owner)->cmdPowerOffGated();
+        }, this);
+}
+
+IOReturn RTW88IEEE80211::cmdPowerOffGated()
+{
+    if (_parent) {
+        _parent->radioPowerChanged(false);
+        _parent->setRxQueueEnabled(false);
+    }
     /* abortActiveScan may synchronously deliver scanDone while still powered.
      * Remove its queued association before draining either worker. */
     clearDeferredJoin();
     cancelAuthentication();
-    if (_state == RTW88_STATE_SCANNING && !abortActiveScan(true))
+    if (_state == RTW88_STATE_SCANNING && !abortActiveScan(true)) {
+        // A rejected Wi-Fi-off request must not leave a powered radio's RX
+        // disabled. System PM keeps its separate transition fence asserted.
+        if (_parent && _powered) {
+            _parent->setRxQueueEnabled(true);
+            _parent->radioPowerChanged(true);
+        }
         return kIOReturnBusy;
+    }
 
     if (_state == RTW88_STATE_CONNECTED ||
         _state == RTW88_STATE_AUTHENTICATING ||

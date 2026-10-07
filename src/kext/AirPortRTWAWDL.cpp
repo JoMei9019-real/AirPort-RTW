@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.15 — Ventura IO80211 AWDL/P2P TX-handoff diagnostics.
+ * AirPortRTW 2.0.0-beta.16 — Ventura IO80211 AWDL/P2P TX-handoff diagnostics.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -125,6 +125,21 @@ void AirPortRTW::traceAWDLTxPacket(mbuf_t m, unsigned path)
     if (info.mdns) __atomic_fetch_add(&_awdlTxPathMdns[path], 1U, __ATOMIC_RELAXED);
     if (info.airDrop) __atomic_fetch_add(&_awdlTxPathAirDrop[path], 1U, __ATOMIC_RELAXED);
     if (info.serviceIdValid) __atomic_fetch_add(&_awdlTxPathServiceId[path], 1U, __ATOMIC_RELAXED);
+    if (info.mdns) {
+        __atomic_fetch_add(info.response ? &_awdlTxPathResponses[path] : &_awdlTxPathQueries[path],
+                           1U, __ATOMIC_RELAXED);
+        if (path == 1) {
+            uint64_t src = 0;
+            for (unsigned i = 6; i < 12; ++i) src = (src << 8) | header[i];
+            const uint64_t local = __atomic_load_n(&_awdlTxLocalMac, __ATOMIC_RELAXED);
+            const bool awdlSource = local && src == local;
+            __atomic_fetch_add(awdlSource ? &_awdlTxControllerAWDLSource : &_awdlTxControllerOtherSource,
+                               1U, __ATOMIC_RELAXED);
+            if (awdlSource && info.airDrop)
+                __atomic_fetch_add(&_awdlTxControllerAWDLAirDrop, 1U, __ATOMIC_RELAXED);
+            __atomic_store_n(&_awdlTxControllerLastSource, src, __ATOMIC_RELAXED);
+        }
+    }
 }
 
 void AirPortRTW::publishAWDLTxDiagnostics()
@@ -135,6 +150,30 @@ void AirPortRTW::publishAWDLTxDiagnostics()
     struct Counter { const char *name; const uint32_t *value; };
     const Counter counters[] = {
         {"AWDL_TX_DIAGNOSTIC_SAMPLES", &_awdlTxDiagnosticSamples},
+        {"AWDL_TX_REJECTED_POWER", &_awdlTxRejectedPower},
+        {"AWDL_VIF_ENABLE_CALLS", &_awdlVifEnableCalls},
+        {"AWDL_VIF_DISABLE_CALLS", &_awdlVifDisableCalls},
+        {"AWDL_VIF_ENABLE_RAW", &_awdlVifEnableResult},
+        {"AWDL_VIF_DISABLE_RAW", &_awdlVifDisableResult},
+        {"AWDL_VIF_ENABLED_OBSERVED", &_awdlVifEnabledObserved},
+        {"AWDL_VIF_FLOW_CONTROLLED_LAST", &_awdlVifFlowControlledLast},
+        {"AWDL_VIF_FLOW_CONTROLLED_SAMPLES", &_awdlVifFlowControlledSamples},
+        {"AWDL_VIF_FLOW_OPEN_SAMPLES", &_awdlVifFlowOpenSamples},
+        {"AWDL_TX_OUTPUT_START_STA", &_awdlTxOutputStartSTA},
+        {"AWDL_TX_OUTPUT_START_OTHER", &_awdlTxOutputStartOther},
+        {"AWDL_TX_PARAM_VIF_MATCH", &_awdlTxParamVifMatch},
+        {"AWDL_TX_PARAM_STA_MATCH", &_awdlTxParamStaMatch},
+        {"AWDL_TX_PARAM_NULL", &_awdlTxParamNull},
+        {"AWDL_TX_PARAM_OTHER", &_awdlTxParamOther},
+        {"AWDL_TX_CONTROLLER_MDNS_AWDL_SOURCE", &_awdlTxControllerAWDLSource},
+        {"AWDL_TX_CONTROLLER_MDNS_OTHER_SOURCE", &_awdlTxControllerOtherSource},
+        {"AWDL_TX_CONTROLLER_AIRDROP_AWDL_SOURCE", &_awdlTxControllerAWDLAirDrop},
+        {"AWDL_TX_DEQUEUE_MDNS_QUERIES", &_awdlTxPathQueries[0]},
+        {"AWDL_TX_DEQUEUE_MDNS_RESPONSES", &_awdlTxPathResponses[0]},
+        {"AWDL_TX_CONTROLLER_MDNS_QUERIES", &_awdlTxPathQueries[1]},
+        {"AWDL_TX_CONTROLLER_MDNS_RESPONSES", &_awdlTxPathResponses[1]},
+        {"AWDL_TX_BPF_MDNS_QUERIES", &_awdlTxPathQueries[2]},
+        {"AWDL_TX_BPF_MDNS_RESPONSES", &_awdlTxPathResponses[2]},
         {"AWDL_TX_SYSTEM_CALLBACKS", &_awdlTxSystemCallbacks},
         {"AWDL_TX_TIMER_POLLS", &_awdlTxTimerPolls},
         {"AWDL_TX_REJECTED_DMA", &_awdlTxRejectedDma},
@@ -167,6 +206,8 @@ void AirPortRTW::publishAWDLTxDiagnostics()
     };
     for (const auto &counter : counters)
         setProperty(counter.name, (uint64_t)__atomic_load_n(counter.value, __ATOMIC_RELAXED), 32);
+    setProperty("AWDL_TX_LOCAL_MAC_PACKED", __atomic_load_n(&_awdlTxLocalMac, __ATOMIC_RELAXED), 64);
+    setProperty("AWDL_TX_CONTROLLER_LAST_SOURCE_PACKED", __atomic_load_n(&_awdlTxControllerLastSource, __ATOMIC_RELAXED), 64);
 
     static const char *trueNames[] = {
         "AWDL_TX_CLASS_CTL_TRUE", "AWDL_TX_CLASS_VO_TRUE", "AWDL_TX_CLASS_VI_TRUE",
@@ -242,8 +283,12 @@ IO80211VirtualInterface *AirPortRTW::createVirtualInterface(ether_addr *addr, UI
     }
 
     IO80211VirtualInterface *interface = p2p;
-    if (role == APPLE80211_VIF_AWDL && _awdlManager && addr)
+    if (role == APPLE80211_VIF_AWDL && _awdlManager && addr) {
         _awdlManager->setLocalAddress(addr->octet);
+        uint64_t mac = 0;
+        for (unsigned i = 0; i < 6; ++i) mac = (mac << 8) | addr->octet[i];
+        __atomic_store_n(&_awdlTxLocalMac, mac, __ATOMIC_RELAXED);
+    }
     IOLog("AirPortRTW: P2P virtual interface created role=%u name=%s class=%s\n",
           role, rtw88VifRoleName(role), interface->getMetaClass()->getClassName());
     return interface;
@@ -253,12 +298,18 @@ SInt32 AirPortRTW::enableVirtualInterface(IO80211VirtualInterface *interface)
 {
     if (!interface)
         return kIOReturnBadArgument;
+    __atomic_fetch_add(&_awdlVifEnableCalls, 1U, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        _pmPowerState == kRTW88PowerStateOff)
+        return kIOReturnNotReady;
 
     UInt role = (UInt)interface->getInterfaceRole();
     IOLog("AirPortRTW: enableVirtualInterface role=%u bsd=%s\n",
           role, interface->getBSDName() ? interface->getBSDName() : "?");
 
     SInt32 ret = super::enableVirtualInterface(interface);
+    __atomic_store_n(&_awdlVifEnableResult, (uint32_t)ret, __ATOMIC_RELAXED);
     if (ret != kIOReturnSuccess)
         return ret;
 
@@ -281,6 +332,9 @@ SInt32 AirPortRTW::enableVirtualInterface(IO80211VirtualInterface *interface)
 #endif
     interface->setLinkState(kIO80211NetworkLinkUp, 0);
     interface->postMessage(APPLE80211_M_LINK_CHANGED);
+    __atomic_store_n(&_awdlVifEnabledObserved, 1U, __ATOMIC_RELAXED);
+    if (role == APPLE80211_VIF_AWDL && _awdlManager && _ieee80211 && _ieee80211->isPowered())
+        _awdlManager->resumeAfterPowerTransition();
     return kIOReturnSuccess;
 }
 
@@ -293,12 +347,15 @@ SInt32 AirPortRTW::disableVirtualInterface(IO80211VirtualInterface *interface)
     IOLog("AirPortRTW: disableVirtualInterface role=%u bsd=%s\n",
           role, interface->getBSDName() ? interface->getBSDName() : "?");
 
+    __atomic_fetch_add(&_awdlVifDisableCalls, 1U, __ATOMIC_RELAXED);
     /* Match the reference IO80211 driver: let IO80211 tear the VIF down first, then publish
      * link-down only after the superclass accepted the transition. */
     SInt32 ret = super::disableVirtualInterface(interface);
+    __atomic_store_n(&_awdlVifDisableResult, (uint32_t)ret, __ATOMIC_RELAXED);
     if (ret != kIOReturnSuccess)
         return ret;
 
+    __atomic_store_n(&_awdlVifEnabledObserved, 0U, __ATOMIC_RELAXED);
     interface->setLinkState(kIO80211NetworkLinkDown, 0);
     interface->postMessage(APPLE80211_M_LINK_CHANGED);
     if (role == APPLE80211_VIF_AWDL && _ieee80211)
@@ -779,7 +836,10 @@ static int rtw88SendActionFrame(RTW88IEEE80211 *backend, mbuf_t m)
 
 int AirPortRTW::outputActionFrame(IO80211Interface *interface, mbuf_t m)
 {
-    if (__atomic_load_n(&_dmaStopped,__ATOMIC_ACQUIRE)) {
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) {
         if (m) mbuf_freem(m);
         return kIOReturnNotReady;
     }
@@ -794,7 +854,10 @@ int AirPortRTW::bpfOutputPacket(OSObject *object, UInt dltType, mbuf_t m)
     __atomic_store_n(&_awdlTxBpfLastDlt, (uint32_t)dltType, __ATOMIC_RELAXED);
     if (dltType == DLT_EN10MB)
         traceAWDLTxPacket(m, 2);
-    if (__atomic_load_n(&_dmaStopped,__ATOMIC_ACQUIRE)) {
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) {
         if (m) mbuf_freem(m);
         return kIOReturnNotReady;
     }
@@ -845,6 +908,13 @@ void AirPortRTW::drainAWDLTxPackets(void *object, UInt options, bool timerPoll)
     __atomic_fetch_add(timerPoll ? &_awdlTxTimerPolls : &_awdlTxSystemCallbacks,
                        1U, __ATOMIC_RELAXED);
     __atomic_store_n(&_awdlTxLastOptions, (uint32_t)options, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended()) ||
+        !_ieee80211 || !_ieee80211->isPowered()) {
+        __atomic_fetch_add(&_awdlTxRejectedPower, 1U, __ATOMIC_RELAXED);
+        return;
+    }
     if (__atomic_load_n(&_dmaStopped,__ATOMIC_ACQUIRE)) {
         __atomic_fetch_add(&_awdlTxRejectedDma, 1U, __ATOMIC_RELAXED);
         return;
@@ -855,6 +925,12 @@ void AirPortRTW::drainAWDLTxPackets(void *object, UInt options, bool timerPoll)
         return;
     }
 
+    // Read-only observation on the existing callback; never clear flow
+    // control or start Apple's queues merely to make a diagnostic succeed.
+    const bool flow = vif->isOutputFlowControlled();
+    __atomic_store_n(&_awdlVifFlowControlledLast, flow ? 1U : 0U, __ATOMIC_RELAXED);
+    __atomic_fetch_add(flow ? &_awdlVifFlowControlledSamples : &_awdlVifFlowOpenSamples,
+                       1U, __ATOMIC_RELAXED);
     ++_awdlTxRequestCallbacks;
     setProperty("AWDL_TX_REQUEST_CALLBACKS", (uint64_t)_awdlTxRequestCallbacks, 32);
 
@@ -970,6 +1046,8 @@ void AirPortRTW::awdlTimerFired(OSObject *owner, IOTimerEventSource *)
 {
     auto *self = OSDynamicCast(AirPortRTW, owner);
     if (!self || !self->_awdlManager ||
+        __atomic_load_n(&self->_pmTransition, __ATOMIC_ACQUIRE) ||
+        self->_awdlManager->powerSuspended() ||
         __atomic_load_n(&self->_shutdown,__ATOMIC_ACQUIRE) ||
         __atomic_load_n(&self->_dmaStopped,__ATOMIC_ACQUIRE)) return;
     if (!self->_awdlManager->awdlInterface()) {

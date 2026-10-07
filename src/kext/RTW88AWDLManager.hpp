@@ -45,6 +45,7 @@ public:
     void reset();
     void scheduleDiscovery();
     void suspendForPowerTransition();
+    bool powerSuspended() const { return __atomic_load_n(&_powerSuspended, __ATOMIC_ACQUIRE); }
     void resumeAfterPowerTransition();
 
     void setVirtualInterface(UInt role, IO80211VirtualInterface *interface);
@@ -62,7 +63,7 @@ public:
     bool enqueueActionFrame(mbuf_t m); // consumes the mbuf on every path
     bool enqueueData(mbuf_t m); // consumes the mbuf on every path
     bool tick(); // true when the controller should pull more packets
-    bool scheduleReady() const { return _syncEnabled && _awdlInterface && _airTemplate; }
+    bool scheduleReady() const { return !powerSuspended() && _syncEnabled && _awdlInterface && _airTemplate; }
     void publishStats();
     void noteDataRX(uint32_t result);
     void noteLocalAirDropServiceId(const uint8_t *serviceId, uint8_t length);
@@ -141,6 +142,8 @@ private:
     static uint64_t nowUS();
     IOTimerEventSource *_timer = nullptr;
     bool _timerAttached = false;
+    bool _powerSuspended = false;
+    uint32_t _powerSuspends = 0, _powerResumes = 0;
     IOService *_owner = nullptr; // timer owner, non-retained
     uint8_t _localAddress[6] = {};
     uint8_t *_airTemplate = nullptr;

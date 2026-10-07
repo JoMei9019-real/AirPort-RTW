@@ -83,18 +83,23 @@ bool RTW88AWDLManager::init(RTW88IEEE80211 *backend, IOWorkLoop *workLoop,
 
 void RTW88AWDLManager::scheduleDiscovery()
 {
-    // Wake the control-plane state machine.  It first waits for IO80211 and
-    // only synthesizes the OpenAWDL-derived bootstrap after the grace period.
-    if (_timer && _timerAttached) _timer->setTimeoutMS(25);
+    // Discovery requests cannot reopen a suspended radio. Explicit power-on
+    // or VIF enable resumes the manager after hardware initialization.
+    return awdlGated<void>(_workLoop, _owner, [&]() -> void {
+        if (!powerSuspended() && _backend && _backend->isPowered() &&
+            _timer && _timerAttached) _timer->setTimeoutMS(25);
+    });
 }
 
 void RTW88AWDLManager::suspendForPowerTransition()
 {
     return awdlGated<void>(_workLoop, _owner, [&]() -> void {
-        if (_backend)
+        const bool alreadySuspended = __atomic_exchange_n(&_powerSuspended, true, __ATOMIC_ACQ_REL);
+        if (_timer) _timer->cancelTimeout();
+        if (alreadySuspended) return;
+        ++_powerSuspends;
+        if (_backend && _backend->isPowered())
             _backend->restoreSTAChannelAfterAWDL();
-        if (_timer)
-            _timer->cancelTimeout();
         flushData();
         flushActions();
         _nextActionUS = _nextPSFUS = 0;
@@ -108,8 +113,10 @@ void RTW88AWDLManager::suspendForPowerTransition()
 void RTW88AWDLManager::resumeAfterPowerTransition()
 {
     return awdlGated<void>(_workLoop, _owner, [&]() -> void {
-        if (!_syncEnabled)
-            return;
+        if (!_backend || !_backend->isPowered() || !powerSuspended()) return;
+        __atomic_store_n(&_powerSuspended, false, __ATOMIC_RELEASE);
+        ++_powerResumes;
+        if (!_syncEnabled) { publishStats(); return; }
         const uint64_t now = nowUS();
         if (!_airTemplate) _fallbackDeadlineUS = now + 1500000ULL;
         _nextActionUS = _nextPSFUS = 0;
@@ -124,6 +131,7 @@ void RTW88AWDLManager::resumeAfterPowerTransition()
 void RTW88AWDLManager::reset()
 {
     return awdlGated<void>(_workLoop, _owner, [&]() -> void {
+    __atomic_store_n(&_powerSuspended, true, __ATOMIC_RELEASE);
     /* Never release the backend while AWDL still owns the single PHY.  The
      * STA must be back on its AP channel before the AWDL manager disappears. */
     if (_backend) _backend->restoreSTAChannelAfterAWDL();
@@ -522,7 +530,8 @@ uint64_t RTW88AWDLManager::nowUS()
 
 void RTW88AWDLManager::arm(uint32_t milliseconds)
 {
-    if (_timer && _syncEnabled && _awdlInterface)
+    if (!powerSuspended() && _backend && _backend->isPowered() &&
+        _timer && _syncEnabled && _awdlInterface)
         _timer->setTimeoutMS(milliseconds);
 }
 
@@ -684,7 +693,8 @@ bool RTW88AWDLManager::enqueueActionFrame(mbuf_t m)
         uint8_t fc[2] = {};
         const bool management = len >= 24 && len <= RTW88AWDL::MaxFrame &&
             mbuf_copydata(m, 0, sizeof(fc), fc) == 0 && ((fc[0] & 0x0c) == 0);
-        if (!_syncEnabled || !_awdlInterface || !management || _actionQueueCount == 32) {
+        if (powerSuspended() || !_backend || !_backend->isPowered() ||
+            !_syncEnabled || !_awdlInterface || !management || _actionQueueCount == 32) {
             mbuf_freem(m); ++_appleActionDropped;
             publishStats();
             return false;
@@ -770,7 +780,8 @@ bool RTW88AWDLManager::enqueueData(mbuf_t m)
     return awdlGated<bool>(_workLoop, _owner, [&]() -> bool {
     if (!m) return false;
     const size_t len = mbuf_pkthdr_len(m);
-    if (!_syncEnabled || !_awdlInterface || _queueCount == 128 ||
+    if (powerSuspended() || !_backend || !_backend->isPowered() ||
+        !_syncEnabled || !_awdlInterface || _queueCount == 128 ||
         len < 14 || len > 4096) {
         mbuf_freem(m);
         ++_dataDropped;
@@ -801,7 +812,7 @@ bool RTW88AWDLManager::observeAction(const uint8_t *frame, uint32_t length, bool
     return awdlGated<bool>(_workLoop, _owner, [&]() -> bool {
     if (presenceDue) *presenceDue = false;
     if (!frame || length < 40) return false;
-    if (!_awdlInterface || !memcmp(frame + 10, _localAddress, 6)) return false;
+    if (powerSuspended() || !_awdlInterface || !memcmp(frame + 10, _localAddress, 6)) return false;
     ++_actionCandidates;
     const uint64_t now = nowUS();
     RTW88AWDL::Action action;
@@ -1065,7 +1076,7 @@ void RTW88AWDLManager::publishStats()
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
-    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.15-tx-handoff");
+    _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.16-tx-handoff");
     _owner->setProperty("AWDL_OPENAWDL_ALIGNMENT", "opclass-mif-ht-election-restamp");
     _owner->setProperty("AWDL_APPLE_CONTROL_MASK", (uint64_t)_appleControlMask, 32);
     _owner->setProperty("AWDL_IO80211_CONTROL_SEEN", (uint64_t)((_appleControlMask & ~kAppleCtlVIF) != 0), 8);
@@ -1129,6 +1140,9 @@ void RTW88AWDLManager::publishStats()
     _owner->setProperty("AWDL_MIF_PEERS", (uint64_t)mifPeers, 32);
     _owner->setProperty("AWDL_VERSION_PEERS", (uint64_t)versionPeers, 32);
     _owner->setProperty("AWDL_VALID_PEERS", (uint64_t)validPeers, 32);
+    _owner->setProperty("AWDL_POWER_SUSPENDED", powerSuspended() ? kOSBooleanTrue : kOSBooleanFalse);
+    _owner->setProperty("AWDL_POWER_SUSPENDS", (uint64_t)_powerSuspends, 32);
+    _owner->setProperty("AWDL_POWER_RESUMES", (uint64_t)_powerResumes, 32);
     _owner->setProperty("AWDL_MIF_RX", (uint64_t)_mifRx, 32);
     _owner->setProperty("AWDL_VERSION_RX", (uint64_t)_versionRx, 32);
     _owner->setProperty("AWDL_SERVICE_RESPONSE_RX", (uint64_t)_serviceResponseRx, 32);
@@ -1253,7 +1267,8 @@ void RTW88AWDLManager::publishStats()
 bool RTW88AWDLManager::tick()
 {
     return awdlGated<bool>(_workLoop, _owner, [&]() -> bool {
-    if (!_backend || !_syncEnabled || !_awdlInterface || !_txBuffer) return false;
+    if (powerSuspended() || !_backend || !_backend->isPowered() ||
+        !_syncEnabled || !_awdlInterface || !_txBuffer) return false;
     uint64_t now = nowUS();
     refreshReceiverIntent(now);
     if (!_airTemplate) {

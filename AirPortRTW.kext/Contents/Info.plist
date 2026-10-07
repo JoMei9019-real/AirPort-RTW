@@ -15,7 +15,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>AirPortRTW for RTL88xx</string>
 	<key>CFBundleGetInfoString</key>
-	<string>AirPortRTW 2.0.0-beta.15 — AWDL TX-handoff diagnostics</string>
+	<string>AirPortRTW 2.0.0-beta.16 — AWDL power fencing, deferred RX and TX diagnostics</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
@@ -33,7 +33,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>GPL-2.0 OR BSD-3-Clause</string>
 	<key>OSBundleCompatibleVersion</key>
-	<string>1.0.1</string>
+	<string>1.0.2</string>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>
 	<key>OSBundleLibraries</key>
