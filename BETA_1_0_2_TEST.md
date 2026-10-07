@@ -1,8 +1,10 @@
-# AirPortRTW 1.0.2-beta.1
+# AirPortRTW 1.0.2-beta.2
 
-Based on main (6dc25ba), including the 1.0.1 NAPI stop fix. No 2.0.0-beta
-changes are merged. Bundle and kmod versions are 1.0.2; the diagnostic identity
-is 1.0.2-beta.1-deferred-rx.
+Based on 1.0.2-beta.1 on branch 1.0.0-beta, descended from main (6dc25ba).
+This selectively ports the AWDL power fencing from 2.0.0-beta.16; AirDrop
+features and extensive TX diagnostics from that branch are not merged.
+Bundle and kmod versions remain 1.0.2; DriverBuild is
+1.0.2-beta.2-awdl-power-fence.
 
 ## Change
 
@@ -26,6 +28,19 @@ panic contains only the waiting thread, so hardware testing must establish
 whether this removes the observed failure. Queueing may affect latency or
 packet loss under load; this is a beta, not a confirmed stable sleep fix.
 
+## Beta 2 additions
+
+AWDL is persistently suspended before either system sleep or ordinary radio
+power-off: cancel its timer, return the PHY to the infrastructure channel and
+flush owned action/data packets. Late discovery, enqueue, RX/TX callbacks and
+output-queue wakeups cannot reopen the power fence. Resume only after explicit
+successful radio/VIF enable; retain deferred AWDL during system firmware wake.
+If a Wi-Fi OFF request fails because a scan is still busy, reopen RX for the
+still-powered device. No hard-coded forced shutdown or skipped NAPI drain.
+
+Power diagnostics: AWDL_POWER_SUSPENDED, AWDL_POWER_SUSPENDS and
+AWDL_POWER_RESUMES. A peer or RX count is not proof of successful AirDrop.
+
 ## Checks
 
 The host test extracts the production queue methods and checks FIFO and wrap,
@@ -33,7 +48,11 @@ overflow, bounded processing, packet ownership, concurrent close/reopen,
 shutdown, and a producer completing while a simulated controller gate is
 held. Run: python3 tests/check_deferred_rx.py. ASan/UBSan are enabled; host leak
 inspection is disabled. This is not an IOKit scheduling or hardware test.
-GitHub Actions builds the actual macOS x86_64 kext and checks its identity.
+The AWDL power test extracts production manager methods and tests timer cancel,
+packet ownership, late re-arm/enqueue rejection, powered-only resume and a
+concurrent discovery/suspend race. Run: python3 tests/check_awdl_power.py.
+GitHub Actions runs both tests, builds the macOS x86_64 kext and checks identity.
+These checks cannot establish real hardware sleep reliability.
 
 ## Hardware test
 
@@ -41,15 +60,16 @@ GitHub Actions builds the actual macOS x86_64 kext and checks its identity.
 2. Confirm the loaded build:
 
 ```sh
-ioreg -l -w0 | grep -E 'DriverBuild|RX_DEFER_|PM_(STATE|SLEEP_COUNT|WAKE_COUNT|LAST_SLEEP_RESULT|LAST_WAKE_RESULT)'
+ioreg -l -w0 | grep -E 'DriverBuild|RX_DEFER_|AWDL_POWER_|PM_(STATE|SLEEP_COUNT|WAKE_COUNT|LAST_SLEEP_RESULT|LAST_WAKE_RESULT)'
 ```
 
-DriverBuild must be 1.0.2-beta.1-deferred-rx. RX_DEFER_QUEUED and
+DriverBuild must be 1.0.2-beta.2-awdl-power-fence. RX_DEFER_QUEUED and
 RX_DEFER_PROCESSED should increase during Wi-Fi traffic. RX_DEFER_DROPPED
 also includes packets discarded during power transitions.
 
-3. Test normal browsing and download/upload, then several short sleep/wake
-cycles, followed by the longer sleep that previously failed. Save the above
+3. Test normal browsing and download/upload. Toggle Wi-Fi OFF and verify
+AWDL_POWER_SUSPENDED = Yes, then ON and verify connectivity returns. Test
+several short sleep/wake cycles, followed by the longer sleep that previously failed. Save the above
 output before and after, and report the sleep duration and power source.
 4. Record the current pmset configuration with pmset -g custom. If background
 wake/standby have been disabled, a passing test covers only that setup; repeat

@@ -1175,7 +1175,10 @@ IOReturn RTW88IEEE80211::powerOnGated()
 {
     IOLog("rtw88: IEEE80211 powerOn\n");
     if (_powered) {
-        if (_parent) _parent->setRxQueueEnabled(true);
+        if (_parent) {
+            _parent->setRxQueueEnabled(true);
+            _parent->radioPowerChanged(true);
+        }
         return kIOReturnSuccess;
     }
     if (!_hw || !_hw->ops || !_hw->ops->start) return kIOReturnNotReady;
@@ -1193,7 +1196,10 @@ IOReturn RTW88IEEE80211::powerOnGated()
     }
     IOReturn filterResult = _awdlReceiveMode ? setAWDLReceiveMode(true) : setReceiveMulticast(_receiveMulticast);
     if (filterResult != kIOReturnSuccess) powerOff();
-    else if (_parent) _parent->setRxQueueEnabled(true);
+    else if (_parent) {
+        _parent->setRxQueueEnabled(true);
+        _parent->radioPowerChanged(true);
+    }
     return filterResult;
 }
 
@@ -1211,7 +1217,10 @@ void RTW88IEEE80211::powerOff()
 void RTW88IEEE80211::powerOffGated()
 {
     IOLog("rtw88: IEEE80211 powerOff\n");
-    if (_parent) _parent->setRxQueueEnabled(false);
+    if (_parent) {
+        _parent->radioPowerChanged(false);
+        _parent->setRxQueueEnabled(false);
+    }
     if (!_powered) return;
     if (_hw && _hw->ops && _hw->ops->stop)
         _hw->ops->stop(_hw, false);
@@ -3599,13 +3608,23 @@ IOReturn RTW88IEEE80211::cmdPowerOff()
 
 IOReturn RTW88IEEE80211::cmdPowerOffGated()
 {
-    if (_parent) _parent->setRxQueueEnabled(false);
+    if (_parent) {
+        _parent->radioPowerChanged(false);
+        _parent->setRxQueueEnabled(false);
+    }
     /* abortActiveScan may synchronously deliver scanDone while still powered.
      * Remove its queued association before draining either worker. */
     clearDeferredJoin();
     cancelAuthentication();
-    if (_state == RTW88_STATE_SCANNING && !abortActiveScan(true))
+    if (_state == RTW88_STATE_SCANNING && !abortActiveScan(true)) {
+        // A rejected Wi-Fi-off request must not leave a powered radio's RX
+        // disabled. System PM keeps its separate transition fence asserted.
+        if (_parent && _powered) {
+            _parent->setRxQueueEnabled(true);
+            _parent->radioPowerChanged(true);
+        }
         return kIOReturnBusy;
+    }
 
     if (_state == RTW88_STATE_CONNECTED ||
         _state == RTW88_STATE_AUTHENTICATING ||

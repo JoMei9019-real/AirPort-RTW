@@ -101,6 +101,7 @@ public:
     virtual bool deferRxFrame(struct sk_buff *skb) { (void)skb; return false; }
     virtual bool rxProcessingDeferred() const { return false; }
     virtual void setRxQueueEnabled(bool enabled) { (void)enabled; }
+    virtual void radioPowerChanged(bool powered) { (void)powered; }
     /* Optional native 802.11 action-frame sink for AWDL/P2P controllers. */
     virtual void injectRxActionFrame(const uint8_t *frame, uint32_t len, int8_t rssi, uint16_t channel) {
         (void)frame; (void)len; (void)rssi; (void)channel;

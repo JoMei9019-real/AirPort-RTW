@@ -12,8 +12,10 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Check deferred RX ownership and concurrency
-        run: python3 tests/check_deferred_rx.py
+      - name: Check RX ownership and AWDL power fencing
+        run: |
+          python3 tests/check_deferred_rx.py
+          python3 tests/check_awdl_power.py
       - name: Bootstrap dependencies
         run: ./scripts/bootstrap-deps.sh
       - name: Build AirPortRTW
@@ -24,8 +26,10 @@ jobs:
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
-          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.0.2"; assert "1.0.2-beta.1" in p["CFBundleGetInfoString"]'
-          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.0.2-beta.1-deferred-rx"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.0.2"; assert "1.0.2-beta.2" in p["CFBundleGetInfoString"]'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.0.2-beta.2-awdl-power-fence"
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "AWDL_POWER_SUSPENDED"
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "RX_DEFER_MODE"
 
       - name: Package kext
         run: |
@@ -35,7 +39,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-1.0.2-beta.1
+          name: AirPortRTW-1.0.2-beta.2
           path: |
             build/out/AirPortRTW.kext.zip
             build/out/AirPortRTW.kext.zip.sha256

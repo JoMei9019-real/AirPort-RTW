@@ -98,6 +98,12 @@ static_assert(sizeof(RTW88MCSVHTData) == 20, "MCS/VHT ABI changed");
 static_assert(sizeof(RTW88StaRoamData) == 13, "STA roam ABI changed");
 static_assert(sizeof(RTW88IEData) == 2072, "IE ABI changed");
 
+enum : unsigned long {
+    kRTW88PowerStateOff = 0,
+    kRTW88PowerStateOn = 1,
+    kRTW88PowerStateCount = 2,
+};
+
 class AirPortRTWInterface;
 
 class AirPortRTW : public IO80211Controller, public RTW88EventDelegate, public RTW88RxDelegate, public RTW88HwOps {
@@ -110,6 +116,7 @@ public:
     bool deferRxFrame(struct sk_buff *skb) override;
     bool rxProcessingDeferred() const override { return true; }
     void setRxQueueEnabled(bool enabled) override;
+    void radioPowerChanged(bool powered) override;
     /* IOService */
     bool     init(OSDictionary *props) override;
     bool     start(IOService *provider) override;

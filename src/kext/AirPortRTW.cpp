@@ -46,12 +46,6 @@ static constexpr UInt32 kRTW88DataQueueDepth = 64;
 static constexpr UInt32 kRTW88TxQueueHigh    = 128;
 static constexpr UInt32 kRTW88TxQueueLow     = 64;
 
-enum : unsigned long {
-    kRTW88PowerStateOff = 0,
-    kRTW88PowerStateOn = 1,
-    kRTW88PowerStateCount = 2,
-};
-
 /* IONetworkController asks subclasses to register power states through
  * registerWithPolicyMaker().  State 0 intentionally advertises no device
  * capability; state 1 means the PCI function is usable. */
@@ -107,13 +101,12 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 
 bool AirPortRTW::start(IOService *provider)
 {
-    setProperty("DriverBuild", "1.0.0-rtl88wifi-r11-20261002");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.0.2-beta.1-deferred-rx");
+    setProperty("DriverBuild", "1.0.2-beta.2-awdl-power-fence");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -267,7 +260,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.0.2-beta.1 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
+    IOLog("AirPortRTW: 1.0.2-beta.2 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -522,6 +515,10 @@ void AirPortRTW::syncBounceForCpu(IOPhysicalAddress dma, size_t size)
 
 void AirPortRTW::resumeTxIfStalled()
 {
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) return;
     /* IRQ bottom-half/NAPI run on the ordered compat datapath worker. This is a
      * safe place to retire deferred DMA mappings and kick a deliberately
      * stalled IO80211 output queue after TX descriptors have been reclaimed. */
@@ -2133,7 +2130,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.0.2-beta.1)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.0.2-beta.2)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3215,6 +3212,10 @@ bool AirPortRTW::txGateWanted()
 
 void AirPortRTW::kickGatedOutput()
 {
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) return;
     if (!__atomic_load_n(&_txGated, __ATOMIC_SEQ_CST) || !_netif)
         return;
     if (__atomic_load_n(&_txStalled, __ATOMIC_SEQ_CST) ||
@@ -3354,7 +3355,10 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
 {
     IO80211VirtualInterface *awdl =
         _awdlManager ? _awdlManager->awdlInterface() : nullptr;
-    if (!awdl || !frame || len > 4096)
+    if (!awdl || !frame || len > 4096 ||
+        __atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended()))
         return;
 
     uint8_t subtype = 0xff;
@@ -3428,7 +3432,9 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
 {
     if (!m) return;
     IO80211VirtualInterface *awdl = _awdlManager ? _awdlManager->awdlInterface() : nullptr;
-    if (!awdl) {
+    if (!awdl || __atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) {
         mbuf_freem(m);
         return;
     }
@@ -3440,6 +3446,19 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
      * as bounded telemetry only; do not flood the shutdown console. */
     setProperty("AWDL_LAST_DATA_INPUT_RAW", (uint64_t)ret, 32);
     (void)packetLen;
+}
+
+void AirPortRTW::radioPowerChanged(bool powered)
+{
+    // Backend invokes this on the controller workloop before draining NAPI.
+    if (!_awdlManager) return;
+    if (!powered) {
+        _awdlManager->suspendForPowerTransition();
+    } else if (!__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE)) {
+        _awdlManager->resumeAfterPowerTransition();
+    }
 }
 
 /* This producer runs on NAPI. No IO80211 calls, Realtek mutex acquisition,

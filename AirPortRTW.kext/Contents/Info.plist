@@ -15,7 +15,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>AirPortRTW for RTL88xx</string>
 	<key>CFBundleGetInfoString</key>
-	<string>AirPortRTW 1.0.2-beta.1 — deferred RX sleep-deadlock fix</string>
+	<string>AirPortRTW 1.0.2-beta.2 — deferred RX and AWDL power fencing</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>

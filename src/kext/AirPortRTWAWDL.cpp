@@ -83,6 +83,10 @@ SInt32 AirPortRTW::enableVirtualInterface(IO80211VirtualInterface *interface)
     if (!interface)
         return kIOReturnBadArgument;
 
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        _pmPowerState == kRTW88PowerStateOff)
+        return kIOReturnNotReady;
     UInt role = (UInt)interface->getInterfaceRole();
     IOLog("AirPortRTW: enableVirtualInterface role=%u bsd=%s\n",
           role, interface->getBSDName() ? interface->getBSDName() : "?");
@@ -110,6 +114,8 @@ SInt32 AirPortRTW::enableVirtualInterface(IO80211VirtualInterface *interface)
 #endif
     interface->setLinkState(kIO80211NetworkLinkUp, 0);
     interface->postMessage(APPLE80211_M_LINK_CHANGED);
+    if (role == APPLE80211_VIF_AWDL && _awdlManager && _ieee80211 && _ieee80211->isPowered())
+        _awdlManager->resumeAfterPowerTransition();
     return kIOReturnSuccess;
 }
 
@@ -605,7 +611,10 @@ static int rtw88SendActionFrame(RTW88IEEE80211 *backend, mbuf_t m)
 
 int AirPortRTW::outputActionFrame(IO80211Interface *interface, mbuf_t m)
 {
-    if (__atomic_load_n(&_dmaStopped,__ATOMIC_ACQUIRE)) {
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) {
         if (m) mbuf_freem(m);
         return kIOReturnNotReady;
     }
@@ -616,7 +625,10 @@ int AirPortRTW::outputActionFrame(IO80211Interface *interface, mbuf_t m)
 
 int AirPortRTW::bpfOutputPacket(OSObject *object, UInt dltType, mbuf_t m)
 {
-    if (__atomic_load_n(&_dmaStopped,__ATOMIC_ACQUIRE)) {
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) {
         if (m) mbuf_freem(m);
         return kIOReturnNotReady;
     }
@@ -659,7 +671,11 @@ int AirPortRTW::bpfOutputPacket(OSObject *object, UInt dltType, mbuf_t m)
 
 void AirPortRTW::requestPacketTx(void *object, UInt options)
 {
-    if (__atomic_load_n(&_dmaStopped,__ATOMIC_ACQUIRE)) return;
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended()) ||
+        !_ieee80211 || !_ieee80211->isPowered()) return;
     IO80211VirtualInterface *vif = OSDynamicCast(IO80211VirtualInterface, (OSObject *)object);
     if (!vif || !_ieee80211 || vif->getInterfaceRole() != APPLE80211_VIF_AWDL)
         return;
@@ -709,6 +725,8 @@ void AirPortRTW::awdlTimerFired(OSObject *owner, IOTimerEventSource *)
 {
     auto *self = OSDynamicCast(AirPortRTW, owner);
     if (!self || !self->_awdlManager ||
+        __atomic_load_n(&self->_pmTransition, __ATOMIC_ACQUIRE) ||
+        self->_awdlManager->powerSuspended() ||
         __atomic_load_n(&self->_shutdown,__ATOMIC_ACQUIRE) ||
         __atomic_load_n(&self->_dmaStopped,__ATOMIC_ACQUIRE)) return;
     if (!self->_awdlManager->awdlInterface()) {
