@@ -113,6 +113,8 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
+    setProperty("DriverBuild", "1.0.2-beta.1-deferred-rx");
+    setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
         IOLog("AirPortRTW: provider is not IOPCIDevice\n");
@@ -172,6 +174,14 @@ bool AirPortRTW::start(IOService *provider)
      * parallel loop here. */
     if (!_workLoop)
         return failStart(provider, "IO80211 workloop unavailable after super::start");
+
+    _deferredRxLock = IOSimpleLockAlloc();
+    _deferredRxSource = IOInterruptEventSource::interruptEventSource(
+        this, &AirPortRTW::deferredRxReady);
+    if (!_deferredRxLock || !_deferredRxSource ||
+        _workLoop->addEventSource(_deferredRxSource) != kIOReturnSuccess)
+        return failStart(provider, "deferred RX initialization failed");
+    _deferredRxSource->enable();
 
     if (!setupInterrupt()) {
         return failStart(provider, "failed to set up interrupt");
@@ -257,7 +267,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.0.0 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
+    IOLog("AirPortRTW: 1.0.2-beta.1 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -267,6 +277,9 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     AirPortRTW *self = OSDynamicCast(AirPortRTW, owner);
     if (!self || self->_shutdown || !self->_diagnosticsBuffer) return;
     self->_diagnosticsSamples++;
+    self->setProperty("RX_DEFER_QUEUED", (uint64_t)__atomic_load_n(&self->_deferredRxQueued, __ATOMIC_RELAXED), 32);
+    self->setProperty("RX_DEFER_DROPPED", (uint64_t)__atomic_load_n(&self->_deferredRxDropped, __ATOMIC_RELAXED), 32);
+    self->setProperty("RX_DEFER_PROCESSED", (uint64_t)self->_deferredRxProcessed, 32);
     /* setPowerState runs on the PM thread, not this workloop. Publish the
      * register access before re-checking the transition flag; the PM path
      * sets the flag and then waits for this access to finish. */
@@ -569,6 +582,13 @@ void AirPortRTW::releaseDMAEntries()
 void AirPortRTW::teardown()
 {
     __atomic_store_n(&_shutdown, true, __ATOMIC_RELEASE);
+    setRxQueueEnabled(false);
+    /* Stop the consumer and wait for its workloop callback, but keep the
+     * source alive until NAPI producers have been joined below. */
+    if (_deferredRxSource) {
+        _deferredRxSource->disable();
+        if (_workLoop) _workLoop->removeEventSource(_deferredRxSource);
+    }
     if (_diagnosticsTimer) {
         /* A callback already running may re-arm after the first cancel;
          * removal waits for the workloop gate, then cancel any re-arm. */
@@ -597,6 +617,13 @@ void AirPortRTW::teardown()
         if (_ieeeStarted)
             _ieee80211->stop();
         _ieeeStarted = false;
+        /* NAPI has been joined. Remove the consumer before releasing its backend. */
+        if (_deferredRxSource) {
+            _deferredRxSource->disable();
+            if (_workLoop) _workLoop->removeEventSource(_deferredRxSource);
+            _deferredRxSource->release();
+            _deferredRxSource = nullptr;
+        }
         _ieee80211->release();
         _ieee80211 = nullptr;
     }
@@ -628,6 +655,12 @@ void AirPortRTW::teardown()
         _intrSrc->release();
         _intrSrc = nullptr;
     }
+    if (_deferredRxSource) {
+        _deferredRxSource->disable();
+        if (_workLoop) _workLoop->removeEventSource(_deferredRxSource);
+        _deferredRxSource->release();
+        _deferredRxSource = nullptr;
+    }
     if (_workLoop) {
         _workLoop->release();
         _workLoop = nullptr;
@@ -654,6 +687,10 @@ void AirPortRTW::teardown()
         _pciDev = nullptr;
     }
 
+    if (_deferredRxLock) {
+        IOSimpleLockFree(_deferredRxLock);
+        _deferredRxLock = nullptr;
+    }
     if (_pendingFreeLock) {
         IOSimpleLockFree(_pendingFreeLock);
         _pendingFreeLock = nullptr;
@@ -2096,7 +2133,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.0.0)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.0.2-beta.1)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3403,6 +3440,81 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
      * as bounded telemetry only; do not flood the shutdown console. */
     setProperty("AWDL_LAST_DATA_INPUT_RAW", (uint64_t)ret, 32);
     (void)packetLen;
+}
+
+/* This producer runs on NAPI. No IO80211 calls, Realtek mutex acquisition,
+ * waiting, or workloop-gate acquisition is allowed here. */
+bool AirPortRTW::deferRxFrame(struct sk_buff *skb)
+{
+    if (!skb) return true;
+    bool accepted = false;
+    if (_deferredRxLock) {
+        IOSimpleLockLock(_deferredRxLock);
+        if (_deferredRxEnabled && _deferredRxCount < 256 &&
+            !__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE)) {
+            const unsigned tail = (_deferredRxHead + _deferredRxCount) % 256;
+            _deferredRx[tail] = skb;
+            ++_deferredRxCount;
+            accepted = true;
+        }
+        IOSimpleLockUnlock(_deferredRxLock);
+    }
+    if (accepted) {
+        __atomic_fetch_add(&_deferredRxQueued, 1U, __ATOMIC_RELAXED);
+        _deferredRxSource->interruptOccurred(nullptr, nullptr, 0);
+    } else {
+        __atomic_fetch_add(&_deferredRxDropped, 1U, __ATOMIC_RELAXED);
+        kfree_skb(skb);
+    }
+    return true;
+}
+
+void AirPortRTW::setRxQueueEnabled(bool enabled)
+{
+    if (!_deferredRxLock) return;
+    struct sk_buff *discard[256];
+    unsigned count = 0;
+    IOSimpleLockLock(_deferredRxLock);
+    _deferredRxEnabled = enabled && !__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE);
+    if (!_deferredRxEnabled) {
+        while (_deferredRxCount) {
+            discard[count++] = _deferredRx[_deferredRxHead];
+            _deferredRx[_deferredRxHead] = nullptr;
+            _deferredRxHead = (_deferredRxHead + 1) % 256;
+            --_deferredRxCount;
+        }
+    }
+    IOSimpleLockUnlock(_deferredRxLock);
+    for (unsigned i = 0; i < count; ++i) kfree_skb(discard[i]);
+    __atomic_fetch_add(&_deferredRxDropped, count, __ATOMIC_RELAXED);
+}
+
+void AirPortRTW::deferredRxReady(OSObject *owner, IOInterruptEventSource *source, int)
+{
+    auto *self = static_cast<AirPortRTW *>(owner);
+    /* Bound each workloop turn so control requests and sleep can run. */
+    for (unsigned i = 0; i < 64; ++i) {
+        struct sk_buff *skb = nullptr;
+        IOSimpleLockLock(self->_deferredRxLock);
+        if (self->_deferredRxEnabled && self->_deferredRxCount) {
+            skb = self->_deferredRx[self->_deferredRxHead];
+            self->_deferredRx[self->_deferredRxHead] = nullptr;
+            self->_deferredRxHead = (self->_deferredRxHead + 1) % 256;
+            --self->_deferredRxCount;
+        }
+        IOSimpleLockUnlock(self->_deferredRxLock);
+        if (!skb) break;
+        if (!__atomic_load_n(&self->_shutdown, __ATOMIC_ACQUIRE) && self->_ieee80211) {
+            ++self->_deferredRxProcessed;
+            self->_ieee80211->rxFrame(skb);
+        } else {
+            kfree_skb(skb);
+        }
+    }
+    IOSimpleLockLock(self->_deferredRxLock);
+    const bool more = self->_deferredRxEnabled && self->_deferredRxCount;
+    IOSimpleLockUnlock(self->_deferredRxLock);
+    if (more) source->interruptOccurred(nullptr, nullptr, 0);
 }
 
 IOWorkLoop *AirPortRTW::getRxWorkLoop()

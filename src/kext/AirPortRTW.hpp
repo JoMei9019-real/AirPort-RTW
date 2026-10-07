@@ -106,6 +106,10 @@ class AirPortRTW : public IO80211Controller, public RTW88EventDelegate, public R
 public:
     static void diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *timer);
     static void awdlTimerFired(OSObject *owner, IOTimerEventSource *timer);
+    static void deferredRxReady(OSObject *owner, IOInterruptEventSource *source, int count);
+    bool deferRxFrame(struct sk_buff *skb) override;
+    bool rxProcessingDeferred() const override { return true; }
+    void setRxQueueEnabled(bool enabled) override;
     /* IOService */
     bool     init(OSDictionary *props) override;
     bool     start(IOService *provider) override;
@@ -325,6 +329,15 @@ private:
     volatile void           *_mmioBase     = nullptr;
     IOInterruptEventSource  *_intrSrc      = nullptr;
     struct pci_dev          *_compatPciDev = nullptr;
+
+    /* NAPI only enqueues; protocol callbacks execute on the controller loop. */
+    IOSimpleLock *_deferredRxLock = nullptr;
+    IOInterruptEventSource *_deferredRxSource = nullptr;
+    struct sk_buff *_deferredRx[256] = {};
+    unsigned _deferredRxHead = 0, _deferredRxCount = 0;
+    bool _deferredRxEnabled = false;
+    uint32_t _deferredRxQueued = 0, _deferredRxDropped = 0;
+    uint32_t _deferredRxProcessed = 0;
 
     bool setupInterrupt();
     bool failStart(IOService *provider, const char *reason);

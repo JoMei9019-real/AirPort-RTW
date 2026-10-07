@@ -97,6 +97,10 @@ class RTW88RxDelegate {
 public:
     virtual mbuf_t allocateInputPacket(uint32_t len) = 0;
     virtual void injectRxFrame(mbuf_t m) = 0;
+    /* true transfers skb ownership to a bounded asynchronous RX queue. */
+    virtual bool deferRxFrame(struct sk_buff *skb) { (void)skb; return false; }
+    virtual bool rxProcessingDeferred() const { return false; }
+    virtual void setRxQueueEnabled(bool enabled) { (void)enabled; }
     /* Optional native 802.11 action-frame sink for AWDL/P2P controllers. */
     virtual void injectRxActionFrame(const uint8_t *frame, uint32_t len, int8_t rssi, uint16_t channel) {
         (void)frame; (void)len; (void)rssi; (void)channel;
@@ -234,6 +238,9 @@ public:
     IOReturn  cmdGetRSSI(int *rssi);
 
 private:
+    IOReturn powerOnGated();
+    void powerOffGated();
+    IOReturn cmdPowerOffGated();
     /* State machine internals */
     void      processRxMgmt(struct sk_buff *skb);
     void      processRxData(struct sk_buff *skb);
