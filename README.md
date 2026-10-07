@@ -25,6 +25,10 @@ Initial PCIe IDs:
 
 RTL8812AE / RTL8814AE remain in the Feixiao lineage but are deliberately not enabled in this first native test build.
 
+## Known limitations
+
+**Deep sleep is not yet fully reliable.** Extended standby and hibernation should be considered experimental. A sleep transition timeout with a kernel panic has been observed during extended sleep/standby testing; the existing sleep/wake hooks do not guarantee reliable deep-sleep operation.
+
 ## Dependencies
 
 Run:
