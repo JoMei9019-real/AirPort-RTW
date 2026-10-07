@@ -224,6 +224,25 @@ public:
     uint8_t channelWidthMHz() const { return _connChanWidth; }
     bool txAggregationActive() const { return _txBaActive; }
     uint32_t receivedFrameCount() const { return _rxFrameCount; }
+
+    /* Beta 14: bounded AWDL RX-pipeline telemetry. These counters expose
+     * where direct AWDL data stops without logging packet contents. */
+    uint32_t awdlRx80211DataSeen() const { return _awdlRx80211DataSeen; }
+    uint32_t awdlRxNoDsSeen() const { return _awdlRxNoDsSeen; }
+    uint32_t awdlRxBssidMatch() const { return _awdlRxBssidMatch; }
+    uint32_t awdlRxRejectedDs() const { return _awdlRxRejectedDs; }
+    uint32_t awdlRxRejectedBssid() const { return _awdlRxRejectedBssid; }
+    uint32_t awdlRxRejectedProtectedFragment() const { return _awdlRxRejectedProtectedFragment; }
+    uint32_t awdlRxAggregateSeen() const { return _awdlRxAggregateSeen; }
+    uint32_t awdlRxAggregateParsed() const { return _awdlRxAggregateParsed; }
+    uint32_t awdlRxAggregateMalformed() const { return _awdlRxAggregateMalformed; }
+    uint32_t awdlRxDirectSnap() const { return _awdlRxDirectSnap; }
+    uint32_t awdlRxRejectedSnap() const { return _awdlRxRejectedSnap; }
+    uint32_t awdlRxRejectedMagic() const { return _awdlRxRejectedMagic; }
+    uint32_t awdlRxRejectedDestination() const { return _awdlRxRejectedDestination; }
+    uint32_t awdlRxEthernetDelivered() const { return _awdlRxEthernetDelivered; }
+    uint32_t awdlRxMulticastDelivered() const { return _awdlRxMulticastDelivered; }
+
     const char *scanEngine() const { return _scanEngine; }
     uint32_t scanChannelCount() const { return _lastScanChannelCount; }
     uint32_t scanVisited2GHz() const { return _scanVisited2GHz; }
@@ -464,4 +483,21 @@ private:
 
     /* Diagnostics: periodic logging of RX activity during scan */
     uint32_t _rxFrameCount = 0;
+
+    /* Beta 14 AWDL RX classifier/decapsulation diagnostics. */
+    uint32_t _awdlRx80211DataSeen = 0;
+    uint32_t _awdlRxNoDsSeen = 0;
+    uint32_t _awdlRxBssidMatch = 0;
+    uint32_t _awdlRxRejectedDs = 0;
+    uint32_t _awdlRxRejectedBssid = 0;
+    uint32_t _awdlRxRejectedProtectedFragment = 0;
+    uint32_t _awdlRxAggregateSeen = 0;
+    uint32_t _awdlRxAggregateParsed = 0;
+    uint32_t _awdlRxAggregateMalformed = 0;
+    uint32_t _awdlRxDirectSnap = 0;
+    uint32_t _awdlRxRejectedSnap = 0;
+    uint32_t _awdlRxRejectedMagic = 0;
+    uint32_t _awdlRxRejectedDestination = 0;
+    uint32_t _awdlRxEthernetDelivered = 0;
+    uint32_t _awdlRxMulticastDelivered = 0;
 };

@@ -107,13 +107,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 
 bool AirPortRTW::start(IOService *provider)
 {
-    setProperty("DriverBuild", "2.0.0-beta.13-awdl-receiver-mdns");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.13");
+    setProperty("DriverBuild", "2.0.0-beta.14-awdl-rx-pipeline");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.14");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
-    IOLog("AirPortRTW: 2.0.0-beta.13 start (AWDL local-mDNS receiver beta)\n");
+    IOLog("AirPortRTW: 2.0.0-beta.14 start (AWDL RX pipeline beta)\n");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
         IOLog("AirPortRTW: provider is not IOPCIDevice\n");
@@ -315,6 +315,24 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
                     self->_diagnosticsSamples, state, visible, agg,
                     self->_ieee80211->receivedFrameCount(), rtw88_be_tx_avail(), stalled);
         }
+        /* Beta 14: make the AWDL 802.11 -> A-MSDU/SNAP -> awdl0
+         * pipeline observable in ioreg without packet-content logging. */
+        self->setProperty("AWDL_RX_80211_DATA_SEEN", (uint64_t)self->_ieee80211->awdlRx80211DataSeen(), 32);
+        self->setProperty("AWDL_RX_NO_DS_SEEN", (uint64_t)self->_ieee80211->awdlRxNoDsSeen(), 32);
+        self->setProperty("AWDL_RX_BSSID_MATCH", (uint64_t)self->_ieee80211->awdlRxBssidMatch(), 32);
+        self->setProperty("AWDL_RX_REJECT_DS", (uint64_t)self->_ieee80211->awdlRxRejectedDs(), 32);
+        self->setProperty("AWDL_RX_REJECT_BSSID", (uint64_t)self->_ieee80211->awdlRxRejectedBssid(), 32);
+        self->setProperty("AWDL_RX_REJECT_PROTECTED_FRAGMENT", (uint64_t)self->_ieee80211->awdlRxRejectedProtectedFragment(), 32);
+        self->setProperty("AWDL_RX_AMSDU_SEEN", (uint64_t)self->_ieee80211->awdlRxAggregateSeen(), 32);
+        self->setProperty("AWDL_RX_AMSDU_PARSED", (uint64_t)self->_ieee80211->awdlRxAggregateParsed(), 32);
+        self->setProperty("AWDL_RX_AMSDU_MALFORMED", (uint64_t)self->_ieee80211->awdlRxAggregateMalformed(), 32);
+        self->setProperty("AWDL_RX_DIRECT_SNAP", (uint64_t)self->_ieee80211->awdlRxDirectSnap(), 32);
+        self->setProperty("AWDL_RX_REJECT_SNAP", (uint64_t)self->_ieee80211->awdlRxRejectedSnap(), 32);
+        self->setProperty("AWDL_RX_REJECT_MAGIC", (uint64_t)self->_ieee80211->awdlRxRejectedMagic(), 32);
+        self->setProperty("AWDL_RX_REJECT_DESTINATION", (uint64_t)self->_ieee80211->awdlRxRejectedDestination(), 32);
+        self->setProperty("AWDL_RX_ETHERNET_DELIVERED", (uint64_t)self->_ieee80211->awdlRxEthernetDelivered(), 32);
+        self->setProperty("AWDL_RX_MULTICAST_DELIVERED", (uint64_t)self->_ieee80211->awdlRxMulticastDelivered(), 32);
+
         self->_diagLastState = state;
         self->_diagLastVisible = visible;
         self->_diagLastAgg = agg;
@@ -2097,7 +2115,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.13)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.14)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));

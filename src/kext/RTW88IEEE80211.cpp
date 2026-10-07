@@ -4305,49 +4305,70 @@ bool RTW88IEEE80211::tryDeliverAWDLDataFrame(struct sk_buff *skb)
     if (!_awdlReceiveMode || !skb || skb->len < 24 + 8 + 8)
         return false;
 
+    ++_awdlRx80211DataSeen;
     struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
     uint16_t fc = le16_to_cpu(hdr->frame_control);
-    if ((fc & (IEEE80211_FCTL_TODS | IEEE80211_FCTL_FROMDS)) != 0)
+    if ((fc & (IEEE80211_FCTL_TODS | IEEE80211_FCTL_FROMDS)) != 0) {
+        ++_awdlRxRejectedDs;
         return false;
+    }
+    ++_awdlRxNoDsSeen;
 
     static const uint8_t awdlBssid[6] = {0x00,0x25,0x00,0xff,0x94,0x73};
-    if (memcmp(hdr->addr3, awdlBssid, sizeof(awdlBssid)) != 0)
+    if (memcmp(hdr->addr3, awdlBssid, sizeof(awdlBssid)) != 0) {
+        ++_awdlRxRejectedBssid;
         return false;
+    }
+    ++_awdlRxBssidMatch;
 
     uint16_t hdrlen = ieee80211_get_hdrlen_from_skb(skb);
     if (hdrlen < 24 || skb->len < (uint32_t)hdrlen + 16)
         return false;
 
     const uint8_t *p = skb->data + hdrlen;
-    // QoS A-MSDU starts with a subframe Ethernet header, not LLC/SNAP.
     // Reject encrypted/fragmented envelopes: this path has no reassembly or
-    // decryption contract. Consume recognized AWDL aggregates on all paths.
+    // decryption contract. Consume recognized AWDL envelopes on all paths.
     if (fc & (0x4000 | 0x0400) || (le16_to_cpu(hdr->seq_ctrl) & 15)) {
+        ++_awdlRxRejectedProtectedFragment;
         kfree_skb(skb);
         return true;
     }
+
     if ((fc & 0x0080) && (skb->data[24] & 0x80)) {
-        if (!(hdr->addr1[0] & 1) && memcmp(hdr->addr1, _awdlAddress, 6)) {
-            kfree_skb(skb);
-            return true;
-        }
-        RTW88AWDL::receiveAggregate(p, skb->len - hdrlen, _awdlAddress,
+        ++_awdlRxAggregateSeen;
+
+        /* Beta 14 fix: do not reject an A-MSDU solely from the outer RA.
+         * The A-MSDU subframes each carry their own DA, and receiveAggregate()
+         * already delivers only multicast or our local AWDL address. Some
+         * Apple peer traffic uses an outer receiver address that is not the
+         * final multicast subframe DA, so the old pre-filter could discard a
+         * valid Bonjour/AirDrop subframe before examining it. */
+        const bool parsed = RTW88AWDL::receiveAggregate(
+            p, skb->len - hdrlen, _awdlAddress,
             [&](const uint8_t *da, const uint8_t *sa, uint16_t type,
                 const uint8_t *payload, size_t length) {
                 deliverAWDLEthernet(da, sa, type, payload, (uint32_t)length);
             });
+        if (parsed) ++_awdlRxAggregateParsed;
+        else ++_awdlRxAggregateMalformed;
         kfree_skb(skb);
         return true;
     }
+
     /* SNAP AA AA 03 00 17 F2 08 00 */
     if (p[0] != 0xaa || p[1] != 0xaa || p[2] != 0x03 ||
         p[3] != 0x00 || p[4] != 0x17 || p[5] != 0xf2 ||
-        p[6] != 0x08 || p[7] != 0x00)
+        p[6] != 0x08 || p[7] != 0x00) {
+        ++_awdlRxRejectedSnap;
         return false;
+    }
+    ++_awdlRxDirectSnap;
     p += 8;
 
-    if (p[0] != 0x03 || p[1] != 0x04) /* LE 0x0403 */
+    if (p[0] != 0x03 || p[1] != 0x04) { /* LE 0x0403 */
+        ++_awdlRxRejectedMagic;
         return false;
+    }
     uint16_t ethertype = (uint16_t)((p[6] << 8) | p[7]);
     p += 8;
     uint32_t paylen = (uint32_t)(skb->data + skb->len - p);
@@ -4356,6 +4377,8 @@ bool RTW88IEEE80211::tryDeliverAWDLDataFrame(struct sk_buff *skb)
     // Consume that envelope without injecting it into this host's awdl0.
     if ((hdr->addr1[0] & 1) || memcmp(hdr->addr1, _awdlAddress, 6) == 0)
         deliverAWDLEthernet(hdr->addr1, hdr->addr2, ethertype, p, paylen);
+    else
+        ++_awdlRxRejectedDestination;
     kfree_skb(skb);
     return true;
 }
@@ -4366,6 +4389,8 @@ void RTW88IEEE80211::deliverAWDLEthernet(const uint8_t *da, const uint8_t *sa,
 {
     if (!_parent || !da || !sa || (!payload && paylen))
         return;
+    ++_awdlRxEthernetDelivered;
+    if (da[0] & 1) ++_awdlRxMulticastDelivered;
     mbuf_t m = _parent->allocateInputPacket(14 + paylen);
     if (!m)
         return;

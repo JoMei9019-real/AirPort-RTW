@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.13 — Ventura IO80211 AWDL/P2P local-mDNS receiver bridge.
+ * AirPortRTW 2.0.0-beta.14 — Ventura IO80211 AWDL/P2P RX-pipeline bridge.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
