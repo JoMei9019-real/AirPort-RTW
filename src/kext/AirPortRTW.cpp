@@ -107,13 +107,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 
 bool AirPortRTW::start(IOService *provider)
 {
-    setProperty("DriverBuild", "2.0.0-beta.14-awdl-rx-pipeline");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.14");
+    setProperty("DriverBuild", "2.0.0-beta.15-awdl-tx-handoff");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.15");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
-    IOLog("AirPortRTW: 2.0.0-beta.14 start (AWDL RX pipeline beta)\n");
+    IOLog("AirPortRTW: 2.0.0-beta.15 start (AWDL TX handoff diagnostics)\n");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
         IOLog("AirPortRTW: provider is not IOPCIDevice\n");
@@ -332,6 +332,7 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         self->setProperty("AWDL_RX_REJECT_DESTINATION", (uint64_t)self->_ieee80211->awdlRxRejectedDestination(), 32);
         self->setProperty("AWDL_RX_ETHERNET_DELIVERED", (uint64_t)self->_ieee80211->awdlRxEthernetDelivered(), 32);
         self->setProperty("AWDL_RX_MULTICAST_DELIVERED", (uint64_t)self->_ieee80211->awdlRxMulticastDelivered(), 32);
+        self->publishAWDLTxDiagnostics();
 
         self->_diagLastState = state;
         self->_diagLastVisible = visible;
@@ -1044,6 +1045,7 @@ UInt32 AirPortRTW::getFeatures() const
 
 UInt32 AirPortRTW::outputPacket(mbuf_t m, void *param)
 {
+    traceAWDLTxPacket(m, 1);
     (void)param;
     if (__atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
         _pmPowerState == kRTW88PowerStateOff) {
@@ -2115,7 +2117,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.14)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.15)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));

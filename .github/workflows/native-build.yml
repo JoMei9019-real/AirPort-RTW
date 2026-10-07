@@ -21,6 +21,10 @@ jobs:
           test -f build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
+          lipo -verify_arch x86_64 build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "2.0.0"; assert "2.0.0-beta.15" in p["CFBundleGetInfoString"]'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F '2.0.0-beta.15-awdl-tx-handoff'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F 'AWDL_TX_DEQUEUE_BOOL_TRUE'
 
       - name: Package kext
         run: |
@@ -30,7 +34,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-2.0.0-beta.14
+          name: AirPortRTW-2.0.0-beta.15
           path: |
             build/out/AirPortRTW.kext.zip
             build/out/AirPortRTW.kext.zip.sha256

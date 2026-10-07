@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.14 — Ventura IO80211 AWDL/P2P RX-pipeline bridge.
+ * AirPortRTW 2.0.0-beta.15 — Ventura IO80211 AWDL/P2P TX-handoff diagnostics.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -84,6 +84,109 @@ static RTW88MdnsInfo rtw88InspectAWDLMdnsPacket(mbuf_t m)
         }
     }
     return info;
+}
+
+void AirPortRTW::traceAWDLTxPacket(mbuf_t m, unsigned path)
+{
+    if (!m || path >= 3) return;
+    __atomic_fetch_add(&_awdlTxPathCalls[path], 1U, __ATOMIC_RELAXED);
+    const size_t length = mbuf_pkthdr_len(m);
+    if (path == 0)
+        __atomic_store_n(&_awdlTxLastPacketLength,
+                         (uint32_t)(length > UINT32_MAX ? UINT32_MAX : length),
+                         __ATOMIC_RELAXED);
+    if (length < 14) return;
+
+    /* Only Ethernet/IPv6/UDP metadata is retained. Normal controller traffic
+     * needs a 14-byte read; the bounded DNS scan runs only for mDNS. Calls on
+     * the controller path may include output-queue retries, not unique TX. */
+    uint8_t header[62] = {};
+    if (mbuf_copydata(m, 0, 14, header) != 0) {
+        __atomic_fetch_add(&_awdlTxTraceCopyErrors, 1U, __ATOMIC_RELAXED);
+        return;
+    }
+    const uint16_t type = (uint16_t(header[12]) << 8) | header[13];
+    if (path == 0) {
+        __atomic_store_n(&_awdlTxLastEtherType, (uint32_t)type, __ATOMIC_RELAXED);
+        __atomic_store_n(&_awdlTxLastIPv6NextHeader, 0U, __ATOMIC_RELAXED);
+    }
+    if (type != 0x86dd || length < sizeof(header)) return;
+    if (mbuf_copydata(m, 14, sizeof(header) - 14, header + 14) != 0) {
+        __atomic_fetch_add(&_awdlTxTraceCopyErrors, 1U, __ATOMIC_RELAXED);
+        return;
+    }
+    if (path == 0)
+        __atomic_store_n(&_awdlTxLastIPv6NextHeader, (uint32_t)header[20], __ATOMIC_RELAXED);
+    if (header[20] != 17) return;
+    const uint16_t sport = (uint16_t(header[54]) << 8) | header[55];
+    const uint16_t dport = (uint16_t(header[56]) << 8) | header[57];
+    if (sport != 5353 && dport != 5353) return;
+    const RTW88MdnsInfo info = rtw88InspectAWDLMdnsPacket(m);
+    if (info.mdns) __atomic_fetch_add(&_awdlTxPathMdns[path], 1U, __ATOMIC_RELAXED);
+    if (info.airDrop) __atomic_fetch_add(&_awdlTxPathAirDrop[path], 1U, __ATOMIC_RELAXED);
+    if (info.serviceIdValid) __atomic_fetch_add(&_awdlTxPathServiceId[path], 1U, __ATOMIC_RELAXED);
+}
+
+void AirPortRTW::publishAWDLTxDiagnostics()
+{
+    /* Called by the existing five-second diagnostics timer. No registry
+     * allocation or packet logging is added to the high-frequency hooks. */
+    __atomic_fetch_add(&_awdlTxDiagnosticSamples, 1U, __ATOMIC_RELAXED);
+    struct Counter { const char *name; const uint32_t *value; };
+    const Counter counters[] = {
+        {"AWDL_TX_DIAGNOSTIC_SAMPLES", &_awdlTxDiagnosticSamples},
+        {"AWDL_TX_SYSTEM_CALLBACKS", &_awdlTxSystemCallbacks},
+        {"AWDL_TX_TIMER_POLLS", &_awdlTxTimerPolls},
+        {"AWDL_TX_REJECTED_DMA", &_awdlTxRejectedDma},
+        {"AWDL_TX_REJECTED_OBJECT", &_awdlTxRejectedObject},
+        {"AWDL_TX_LAST_OPTIONS", &_awdlTxLastOptions},
+        {"AWDL_TX_DEQUEUE_BOOL_TRUE", &_awdlTxDequeueTrue},
+        {"AWDL_TX_DEQUEUE_BOOL_FALSE", &_awdlTxDequeueFalse},
+        {"AWDL_TX_DEQUEUE_TRUE_EMPTY", &_awdlTxDequeueTrueEmpty},
+        {"AWDL_TX_DEQUEUE_FALSE_WITH_HEAD", &_awdlTxDequeueFalseWithHead},
+        {"AWDL_TX_ACTUAL_DEQUEUED", &_awdlTxActualDequeued},
+        {"AWDL_TX_DEQUEUE_COUNT_MISMATCH", &_awdlTxDequeueCountMismatch},
+        {"AWDL_TX_DEQUEUE_PATH_CALLS", &_awdlTxPathCalls[0]},
+        {"AWDL_TX_DEQUEUE_PATH_MDNS", &_awdlTxPathMdns[0]},
+        {"AWDL_TX_DEQUEUE_PATH_AIRDROP", &_awdlTxPathAirDrop[0]},
+        {"AWDL_TX_DEQUEUE_PATH_SERVICE_ID", &_awdlTxPathServiceId[0]},
+        {"AWDL_TX_CONTROLLER_PATH_CALLS", &_awdlTxPathCalls[1]},
+        {"AWDL_TX_CONTROLLER_PATH_MDNS", &_awdlTxPathMdns[1]},
+        {"AWDL_TX_CONTROLLER_PATH_AIRDROP", &_awdlTxPathAirDrop[1]},
+        {"AWDL_TX_CONTROLLER_PATH_SERVICE_ID", &_awdlTxPathServiceId[1]},
+        {"AWDL_TX_BPF_ETHERNET_CALLS", &_awdlTxPathCalls[2]},
+        {"AWDL_TX_BPF_ETHERNET_MDNS", &_awdlTxPathMdns[2]},
+        {"AWDL_TX_BPF_ETHERNET_AIRDROP", &_awdlTxPathAirDrop[2]},
+        {"AWDL_TX_BPF_ETHERNET_SERVICE_ID", &_awdlTxPathServiceId[2]},
+        {"AWDL_TX_BPF_CALLS", &_awdlTxBpfCalls},
+        {"AWDL_TX_BPF_LAST_DLT", &_awdlTxBpfLastDlt},
+        {"AWDL_TX_TRACE_COPY_ERRORS", &_awdlTxTraceCopyErrors},
+        {"AWDL_TX_LAST_PACKET_LENGTH", &_awdlTxLastPacketLength},
+        {"AWDL_TX_LAST_ETHERTYPE", &_awdlTxLastEtherType},
+        {"AWDL_TX_LAST_IPV6_NEXT_HEADER", &_awdlTxLastIPv6NextHeader}
+    };
+    for (const auto &counter : counters)
+        setProperty(counter.name, (uint64_t)__atomic_load_n(counter.value, __ATOMIC_RELAXED), 32);
+
+    static const char *trueNames[] = {
+        "AWDL_TX_CLASS_CTL_TRUE", "AWDL_TX_CLASS_VO_TRUE", "AWDL_TX_CLASS_VI_TRUE",
+        "AWDL_TX_CLASS_RV_TRUE", "AWDL_TX_CLASS_AV_TRUE", "AWDL_TX_CLASS_OAM_TRUE",
+        "AWDL_TX_CLASS_RD_TRUE", "AWDL_TX_CLASS_BE_TRUE", "AWDL_TX_CLASS_BK_TRUE",
+        "AWDL_TX_CLASS_BKSYS_TRUE"
+    };
+    static const char *falseNames[] = {
+        "AWDL_TX_CLASS_CTL_FALSE", "AWDL_TX_CLASS_VO_FALSE", "AWDL_TX_CLASS_VI_FALSE",
+        "AWDL_TX_CLASS_RV_FALSE", "AWDL_TX_CLASS_AV_FALSE", "AWDL_TX_CLASS_OAM_FALSE",
+        "AWDL_TX_CLASS_RD_FALSE", "AWDL_TX_CLASS_BE_FALSE", "AWDL_TX_CLASS_BK_FALSE",
+        "AWDL_TX_CLASS_BKSYS_FALSE"
+    };
+    static_assert(sizeof(trueNames) / sizeof(trueNames[0]) == 10, "TX class diagnostics");
+    static_assert(sizeof(falseNames) == sizeof(trueNames), "TX class diagnostics");
+    for (unsigned i = 0; i < 10; ++i) {
+        setProperty(trueNames[i], (uint64_t)__atomic_load_n(&_awdlTxClassTrue[i], __ATOMIC_RELAXED), 32);
+        setProperty(falseNames[i], (uint64_t)__atomic_load_n(&_awdlTxClassFalse[i], __ATOMIC_RELAXED), 32);
+    }
+    setProperty("AWDL_TX_DIAGNOSTIC_MODE", "passive-handoff");
 }
 
 static uint16_t rtw88PreferredAWDLSocialChannel(RTW88IEEE80211 *backend)
@@ -687,6 +790,10 @@ int AirPortRTW::outputActionFrame(IO80211Interface *interface, mbuf_t m)
 
 int AirPortRTW::bpfOutputPacket(OSObject *object, UInt dltType, mbuf_t m)
 {
+    __atomic_fetch_add(&_awdlTxBpfCalls, 1U, __ATOMIC_RELAXED);
+    __atomic_store_n(&_awdlTxBpfLastDlt, (uint32_t)dltType, __ATOMIC_RELAXED);
+    if (dltType == DLT_EN10MB)
+        traceAWDLTxPacket(m, 2);
     if (__atomic_load_n(&_dmaStopped,__ATOMIC_ACQUIRE)) {
         if (m) mbuf_freem(m);
         return kIOReturnNotReady;
@@ -730,10 +837,23 @@ int AirPortRTW::bpfOutputPacket(OSObject *object, UInt dltType, mbuf_t m)
 
 void AirPortRTW::requestPacketTx(void *object, UInt options)
 {
-    if (__atomic_load_n(&_dmaStopped,__ATOMIC_ACQUIRE)) return;
-    IO80211VirtualInterface *vif = OSDynamicCast(IO80211VirtualInterface, (OSObject *)object);
-    if (!vif || !_ieee80211 || vif->getInterfaceRole() != APPLE80211_VIF_AWDL)
+    drainAWDLTxPackets(object, options, false);
+}
+
+void AirPortRTW::drainAWDLTxPackets(void *object, UInt options, bool timerPoll)
+{
+    __atomic_fetch_add(timerPoll ? &_awdlTxTimerPolls : &_awdlTxSystemCallbacks,
+                       1U, __ATOMIC_RELAXED);
+    __atomic_store_n(&_awdlTxLastOptions, (uint32_t)options, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&_dmaStopped,__ATOMIC_ACQUIRE)) {
+        __atomic_fetch_add(&_awdlTxRejectedDma, 1U, __ATOMIC_RELAXED);
         return;
+    }
+    IO80211VirtualInterface *vif = OSDynamicCast(IO80211VirtualInterface, (OSObject *)object);
+    if (!vif || !_ieee80211 || vif->getInterfaceRole() != APPLE80211_VIF_AWDL) {
+        __atomic_fetch_add(&_awdlTxRejectedObject, 1U, __ATOMIC_RELAXED);
+        return;
+    }
 
     ++_awdlTxRequestCallbacks;
     setProperty("AWDL_TX_REQUEST_CALLBACKS", (uint64_t)_awdlTxRequestCallbacks, 32);
@@ -767,9 +887,19 @@ void AirPortRTW::requestPacketTx(void *object, UInt options)
         unsigned long long bytes = 0;
 
         ++_awdlTxDequeueCalls;
-        (void)vif->dequeueOutputPacketsWithServiceClass(32, classes[cidx],
+        const bool dequeueResult = vif->dequeueOutputPacketsWithServiceClass(32, classes[cidx],
                                                         &head, &tail,
                                                         &count, &bytes);
+        /* The SDK declares a bool, not an IOReturn. Record true/false without
+         * assigning error semantics or changing the existing ownership path. */
+        __atomic_fetch_add(dequeueResult ? &_awdlTxDequeueTrue : &_awdlTxDequeueFalse,
+                           1U, __ATOMIC_RELAXED);
+        __atomic_fetch_add(dequeueResult ? &_awdlTxClassTrue[cidx] : &_awdlTxClassFalse[cidx],
+                           1U, __ATOMIC_RELAXED);
+        if (dequeueResult && !head)
+            __atomic_fetch_add(&_awdlTxDequeueTrueEmpty, 1U, __ATOMIC_RELAXED);
+        if (!dequeueResult && head)
+            __atomic_fetch_add(&_awdlTxDequeueFalseWithHead, 1U, __ATOMIC_RELAXED);
         if (!head) {
             ++_awdlTxEmptyDequeues;
         } else {
@@ -779,10 +909,15 @@ void AirPortRTW::requestPacketTx(void *object, UInt options)
             setProperty(classProps[cidx], (uint64_t)_awdlTxClassPackets[cidx], 32);
         }
 
+        UInt actual = 0;
         mbuf_t m = head;
         while (m) {
+            ++actual;
+            __atomic_fetch_add(&_awdlTxActualDequeued, 1U, __ATOMIC_RELAXED);
             mbuf_t next = mbuf_nextpkt(m);
             mbuf_setnextpkt(m, nullptr);
+
+            traceAWDLTxPacket(m, 0);
 
             const RTW88MdnsInfo mdns = rtw88InspectAWDLMdnsPacket(m);
             if (mdns.ipv6) {
@@ -816,6 +951,8 @@ void AirPortRTW::requestPacketTx(void *object, UInt options)
             }
             m = next;
         }
+        if (actual != count)
+            __atomic_fetch_add(&_awdlTxDequeueCountMismatch, 1U, __ATOMIC_RELAXED);
     }
 
     setProperty("AWDL_TX_DEQUEUE_CALLS", (uint64_t)_awdlTxDequeueCalls, 32);
@@ -842,7 +979,7 @@ void AirPortRTW::awdlTimerFired(OSObject *owner, IOTimerEventSource *)
     }
     if (self->_awdlManager->tick()) {
         auto *vif = self->_awdlManager->awdlInterface();
-        if (vif) self->requestPacketTx(vif, 0);
+        if (vif) self->drainAWDLTxPackets(vif, 0, true);
     }
 
     /* Retire peers from IO80211 when their AWDL advertisements have actually

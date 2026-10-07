@@ -182,6 +182,9 @@ public:
     virtual int outputActionFrame(IO80211Interface *interface, mbuf_t m) override;
     virtual int bpfOutputPacket(OSObject *object, UInt dltType, mbuf_t m) override;
     virtual void requestPacketTx(void *object, UInt options) override;
+    void drainAWDLTxPackets(void *object, UInt options, bool timerPoll);
+    void traceAWDLTxPacket(mbuf_t m, unsigned path);
+    void publishAWDLTxDiagnostics();
 
     /* Puros virtuales de IO80211Controller que hay que implementar si o si
      * para que la clase no quede abstracta (encontrados por el compilador,
@@ -318,6 +321,22 @@ private:
     uint64_t                _awdlTxDequeueBytes = 0;
     uint32_t                _awdlTxEnqueueSuccess = 0, _awdlTxEnqueueFailure = 0;
     uint32_t                _awdlTxClassPackets[10] = {};
+    /* Beta 15: passive TX handoff telemetry. Paths: dequeue, controller, BPF.
+     * Alternate paths can run outside the workloop; use atomic accesses for
+     * these new counters. Never retain, mutate or redirect traced packets. */
+    uint32_t _awdlTxSystemCallbacks = 0, _awdlTxTimerPolls = 0;
+    uint32_t _awdlTxRejectedDma = 0, _awdlTxRejectedObject = 0;
+    uint32_t _awdlTxLastOptions = 0, _awdlTxDiagnosticSamples = 0;
+    uint32_t _awdlTxDequeueTrue = 0, _awdlTxDequeueFalse = 0;
+    uint32_t _awdlTxDequeueTrueEmpty = 0, _awdlTxDequeueFalseWithHead = 0;
+    uint32_t _awdlTxActualDequeued = 0, _awdlTxDequeueCountMismatch = 0;
+    uint32_t _awdlTxClassTrue[10] = {}, _awdlTxClassFalse[10] = {};
+    uint32_t _awdlTxPathCalls[3] = {}, _awdlTxPathMdns[3] = {};
+    uint32_t _awdlTxPathAirDrop[3] = {}, _awdlTxPathServiceId[3] = {};
+    uint32_t _awdlTxTraceCopyErrors = 0;
+    uint32_t _awdlTxLastPacketLength = 0, _awdlTxLastEtherType = 0;
+    uint32_t _awdlTxLastIPv6NextHeader = 0;
+    uint32_t _awdlTxBpfCalls = 0, _awdlTxBpfLastDlt = 0;
     /* Sonoma + OCLP legacy IO80211 can service CoreWiFi scans entirely from
      * the family cache and issue only GET SCAN_RESULT calls.  Remember whether
      * we already performed the one demand-driven bootstrap scan for an empty
