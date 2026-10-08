@@ -5,6 +5,7 @@
 #include "AirPortRTW.hpp"
 #include "AirPortRTWInterface.hpp"
 #include "RTW88AssocWire.hpp"
+#include "RTW88LinkEventWire.hpp"
 #include "RTW88UserClient.hpp"
 
 extern "C" {
@@ -106,7 +107,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.0.2-beta.2-awdl-power-fence");
+    setProperty("DriverBuild", "1.0.2-beta.3-link-events-reconnect");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -260,7 +261,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.0.2-beta.2 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
+    IOLog("AirPortRTW: 1.0.2-beta.3 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -759,6 +760,7 @@ IOReturn AirPortRTW::restoreAfterSystemWake()
 
     ++_pmWakeCount;
     setProperty("PM_STATE", "waking");
+    setProperty("PM_WAKE_COREWIFI_READY", kOSBooleanFalse);
     setProperty("PM_WAKE_COUNT", (uint64_t)_pmWakeCount, 32);
 
     IOReturn ret = kIOReturnSuccess;
@@ -801,6 +803,12 @@ IOReturn AirPortRTW::restoreAfterSystemWake()
 
     _scanCacheBootstrapAttempted = false;
 
+    // The firmware has been restarted: do not coalesce a new CoreWiFi scan
+    // with an old frontend transaction or retain an association-done latch.
+    _scanInProgress = false;
+    _scanCursor = 0;
+    _assocDoneReported = false;
+
     /*
      * Wake policy: macOS/CoreWiFi owns infrastructure reconnection.
      *
@@ -841,6 +849,10 @@ out:
 
     if (ret == kIOReturnSuccess) {
         _txStalled = false;
+        // Advertise the restored, unassociated radio only after the PM fence
+        // is open. Never announce a reconnect opportunity for Wi-Fi left OFF.
+        if (_ieee80211->isPowered())
+            postSTALinkChanged(false, 8);
         if (_netif)
             _netif->postMessage(APPLE80211_M_POWER_CHANGED);
 
@@ -850,7 +862,8 @@ out:
         if (q) q->service(IOBasicOutputQueue::kServiceAsync);
         kickGatedOutput();
 
-        setProperty("PM_WAKE_COREWIFI_READY", kOSBooleanTrue);
+        setProperty("PM_WAKE_COREWIFI_READY", _ieee80211->isPowered() ? kOSBooleanTrue : kOSBooleanFalse);
+        setProperty("PM_WAKE_RADIO_POWERED", _ieee80211->isPowered() ? kOSBooleanTrue : kOSBooleanFalse);
         IOLog("AirPortRTW: wake complete; CoreWiFi owns reconnect\n");
     }
 
@@ -2012,20 +2025,15 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
 
     case APPLE80211_IOC_LINK_CHANGED_EVENT_DATA: {
         if (isSet) return kIOReturnUnsupported;
-        auto *d = static_cast<apple80211_link_changed_event_data *>(data);
-        bzero(d, sizeof(*d));
         RTW88StateResult st = {};
         const IOReturn ret = _ieee80211->cmdGetState(&st);
         if (ret != kIOReturnSuccess) return ret;
-        d->isLinkDown = st.state != RTW88_STATE_CONNECTED;
-        if (d->isLinkDown) {
-            d->voluntary = false;
-            d->reason = APPLE80211_LINK_DOWN_REASON_DEAUTH;
-        } else {
-            d->rssi = (uint32_t)st.rssi;
-            d->nf = (uint16_t)(int16_t)-95;
-            d->snr = (uint16_t)((st.rssi > -95) ? (st.rssi + 95) : 0);
-        }
+        const RTW88LinkEventData d = rtw88LinkQuery(
+            _ieee80211->associatedVisible(), _ieee80211->disconnectIsVoluntary(),
+            st.rssi, APPLE80211_LINK_DOWN_REASON_DEAUTH);
+        memcpy(data, &d, sizeof(d));
+        setProperty("STA_LINK_QUERY_BYTES", (uint64_t)sizeof(d), 32);
+        setProperty("STA_LINK_QUERY_VOLUNTARY", d.flag ? kOSBooleanTrue : kOSBooleanFalse);
         return kIOReturnSuccess;
     }
 
@@ -2130,7 +2138,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.0.2-beta.2)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.0.2-beta.3)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3593,6 +3601,17 @@ void AirPortRTW::setLinkStatus(UInt32 status)
     (void)setLinkStatus(status, nullptr, 0, nullptr);
 }
 
+void AirPortRTW::postSTALinkChanged(bool up, uint32_t reason)
+{
+    if (!_netif || __atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE)) return;
+    RTW88LinkEventTLV event = rtw88LinkNotification(up, reason);
+    _netif->postMessage(APPLE80211_M_LINK_CHANGED, &event, sizeof(event));
+    setProperty("STA_LINK_EVENT_TLV_BYTES", (uint64_t)sizeof(event), 32);
+    setProperty("STA_LINK_EVENT_DATA_BYTES", (uint64_t)sizeof(event.data), 32);
+    setProperty("STA_LINK_EVENT_REASON", (uint64_t)event.data.reason, 32);
+    setProperty("STA_LINK_EVENT_POSTS", (uint64_t)__atomic_add_fetch(&_staLinkEventPosts, 1U, __ATOMIC_RELAXED), 32);
+}
+
 void AirPortRTW::rtw88Event(RTW88Event ev, void *data)
 {
     if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) || !_netif) return;
@@ -3624,7 +3643,7 @@ void AirPortRTW::rtw88Event(RTW88Event ev, void *data)
         break;
     case kRTW88EventDisconnected:
         setProperty("STA_DISCONNECTED_EVENT", kOSBooleanTrue);
-        _netif->postMessage(APPLE80211_M_LINK_CHANGED);
+        postSTALinkChanged(false, _ieee80211 ? _ieee80211->deauthReason() : 0);
         break;
     case kRTW88EventRSSIChanged:   _netif->postMessage(APPLE80211_M_LINK_QUALITY); break;
     default: break;

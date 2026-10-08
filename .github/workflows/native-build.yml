@@ -16,6 +16,7 @@ jobs:
         run: |
           python3 tests/check_deferred_rx.py
           python3 tests/check_awdl_power.py
+          python3 tests/check_link_events.py
       - name: Bootstrap dependencies
         run: ./scripts/bootstrap-deps.sh
       - name: Build AirPortRTW
@@ -26,10 +27,11 @@ jobs:
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
-          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.0.2"; assert "1.0.2-beta.2" in p["CFBundleGetInfoString"]'
-          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.0.2-beta.2-awdl-power-fence"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.0.2"; assert "1.0.2-beta.3" in p["CFBundleGetInfoString"]'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.0.2-beta.3-link-events-reconnect"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "AWDL_POWER_SUSPENDED"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "RX_DEFER_MODE"
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "STA_LINK_EVENT_TLV_BYTES"
 
       - name: Package kext
         run: |
@@ -39,7 +41,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-1.0.2-beta.2
+          name: AirPortRTW-1.0.2-beta.3
           path: |
             build/out/AirPortRTW.kext.zip
             build/out/AirPortRTW.kext.zip.sha256

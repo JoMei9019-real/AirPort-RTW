@@ -327,6 +327,8 @@ private:
      * on observed transport behavior, never on the host Darwin version. */
     bool                    _linkUp = false;
     bool                    _assocDoneReported = false;
+    uint32_t                _staLinkEventPosts = 0;
+    void postSTALinkChanged(bool up, uint32_t reason);
     bool                    _rsnHandshakeReported = false;
 
     /* Acceso real a hardware -- antes esto se pasaba como nullptr a

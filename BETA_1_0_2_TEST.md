@@ -1,10 +1,10 @@
-# AirPortRTW 1.0.2-beta.2
+# AirPortRTW 1.0.2-beta.3
 
-Based on 1.0.2-beta.1 on branch 1.0.0-beta, descended from main (6dc25ba).
+Based on 1.0.2-beta.2 (ec84afc) on branch 1.0.0-beta, descended from main (6dc25ba).
 This selectively ports the AWDL power fencing from 2.0.0-beta.16; AirDrop
 features and extensive TX diagnostics from that branch are not merged.
 Bundle and kmod versions remain 1.0.2; DriverBuild is
-1.0.2-beta.2-awdl-power-fence.
+1.0.2-beta.3-link-events-reconnect.
 
 ## Change
 
@@ -43,6 +43,10 @@ AWDL_POWER_RESUMES. A peer or RX count is not proof of successful AirDrop.
 
 ## Checks
 
+Beta 3 fixes the STA link-event ABI and attempts to improve CoreWiFi auto-join
+after wake. See [BETA_1_0_2_3_LINK_EVENTS.md](BETA_1_0_2_3_LINK_EVENTS.md) for
+binary evidence, scope, regression checks and the reconnect test commands.
+
 The host test extracts the production queue methods and checks FIFO and wrap,
 overflow, bounded processing, packet ownership, concurrent close/reopen,
 shutdown, and a producer completing while a simulated controller gate is
@@ -63,7 +67,7 @@ These checks cannot establish real hardware sleep reliability.
 ioreg -l -w0 | grep -E 'DriverBuild|RX_DEFER_|AWDL_POWER_|PM_(STATE|SLEEP_COUNT|WAKE_COUNT|LAST_SLEEP_RESULT|LAST_WAKE_RESULT)'
 ```
 
-DriverBuild must be 1.0.2-beta.2-awdl-power-fence. RX_DEFER_QUEUED and
+DriverBuild must be 1.0.2-beta.3-link-events-reconnect. RX_DEFER_QUEUED and
 RX_DEFER_PROCESSED should increase during Wi-Fi traffic. RX_DEFER_DROPPED
 also includes packets discarded during power transitions.
 

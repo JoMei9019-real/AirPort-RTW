@@ -199,6 +199,7 @@ public:
 
     /* Control interface — called from RTW88UserClient */
     uint32_t deauthReason() const { return _deauthReason; }
+    bool disconnectIsVoluntary() const { return __atomic_load_n(&_disconnectVoluntary, __ATOMIC_ACQUIRE); }
     RTW88State rawState() const { return _state; }
     bool associatedVisible() const { return _associatedVisible; }
     IOReturn  cmdScan();
@@ -350,6 +351,7 @@ private:
     bool                _associatedVisible = false;
     bool                _connectCancelled = true;
     uint32_t            _deauthReason = 0;
+    bool                _disconnectVoluntary = false;
     RTW88State          _scanReturnState = RTW88_STATE_IDLE;
     bool                _powered      = false;
     bool                _pmkProvided = false;

@@ -1397,6 +1397,7 @@ void RTW88IEEE80211::processRxMgmt(struct sk_buff *skb)
                 uint16_t reason = (skb->len >= sizeof(*h3) + 2) ?
                                   (uint16_t)(rb[0] | (rb[1] << 8)) : 0;
                 _deauthReason = reason;
+                __atomic_store_n(&_disconnectVoluntary, false, __ATOMIC_RELEASE);
                 IOLog("rtw88: %s from AP, reason=%u — disconnecting\n",
                       (stype == 0x00C0) ? "deauth" : "disassoc", reason);
             }
@@ -2704,6 +2705,7 @@ bool RTW88IEEE80211::matchesPendingJoin(const char *ssid, const uint8_t *bssid,
  * never touch RF registers when scan firmware failed to become idle. */
 void RTW88IEEE80211::failJoin(const char *stage)
 {
+    __atomic_store_n(&_disconnectVoluntary, false, __ATOMIC_RELEASE);
     IOLog("rtw88: join failed stage=%s attempts=%u\n", stage, _authAttempts);
     __atomic_store_n(&_connectCancelled, true, __ATOMIC_RELEASE);
     if (_timer) _timer->cancelTimeout();
@@ -2818,6 +2820,7 @@ IOReturn RTW88IEEE80211::cmdConnect(const char *ssid, const char *password, cons
     strlcpy(_password, password ? password : "", sizeof(_password));
     _wpa2 = externalSupplicant || (_targetBSS.cipher == WLAN_CIPHER_SUITE_CCMP);
     _deauthReason = 0;
+    __atomic_store_n(&_disconnectVoluntary, false, __ATOMIC_RELEASE);
     __atomic_store_n(&_connectCancelled, false, __ATOMIC_RELEASE);
     _state = RTW88_STATE_AUTHENTICATING;
 
@@ -3551,6 +3554,7 @@ IOReturn RTW88IEEE80211::cmdDisconnect()
      * "Unexpected link down" and start auto-join, which then tore down the
      * user's new join.  cmdConnect resets the reason to 0. */
     _deauthReason = 8;
+    __atomic_store_n(&_disconnectVoluntary, true, __ATOMIC_RELEASE);
     /* Explicit disassociation ends the IO80211 RUN latch immediately. */
     _associatedVisible = false;
     if (_state == RTW88_STATE_IDLE) return kIOReturnSuccess;
@@ -3608,6 +3612,7 @@ IOReturn RTW88IEEE80211::cmdPowerOff()
 
 IOReturn RTW88IEEE80211::cmdPowerOffGated()
 {
+    __atomic_store_n(&_disconnectVoluntary, true, __ATOMIC_RELEASE);
     if (_parent) {
         _parent->radioPowerChanged(false);
         _parent->setRxQueueEnabled(false);
