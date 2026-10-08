@@ -351,7 +351,8 @@ private:
     uint32_t _awdlTxRejectedPower = 0;
     uint32_t _awdlVifEnableCalls = 0, _awdlVifDisableCalls = 0;
     uint32_t _awdlVifEnableResult = 0, _awdlVifDisableResult = 0, _awdlVifEnabledObserved = 0;
-    uint32_t _awdlVifFlowControlledLast = 0, _awdlVifFlowControlledSamples = 0, _awdlVifFlowOpenSamples = 0;
+    bool _awdlTxDrainActive = false;
+    uint32_t _awdlTxReentrantSkipped = 0;
     uint32_t _awdlTxOutputStartSTA = 0, _awdlTxOutputStartOther = 0;
     uint32_t _awdlTxParamVifMatch = 0, _awdlTxParamStaMatch = 0, _awdlTxParamNull = 0, _awdlTxParamOther = 0;
     uint32_t _awdlTxControllerAWDLSource = 0, _awdlTxControllerOtherSource = 0, _awdlTxControllerAWDLAirDrop = 0;

@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.16 — Ventura IO80211 AWDL/P2P TX-handoff diagnostics.
+ * AirPortRTW 2.0.0-beta.17 — Ventura IO80211 AWDL/P2P TX-handoff diagnostics.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -8,6 +8,7 @@
  */
 #include "AirPortRTW.hpp"
 #include "AirPortRTWInterface.hpp"
+#include "RTW88TxDrainGuard.hpp"
 #include <net/bpf.h>
 #include <sys/kpi_mbuf.h>
 
@@ -156,9 +157,7 @@ void AirPortRTW::publishAWDLTxDiagnostics()
         {"AWDL_VIF_ENABLE_RAW", &_awdlVifEnableResult},
         {"AWDL_VIF_DISABLE_RAW", &_awdlVifDisableResult},
         {"AWDL_VIF_ENABLED_OBSERVED", &_awdlVifEnabledObserved},
-        {"AWDL_VIF_FLOW_CONTROLLED_LAST", &_awdlVifFlowControlledLast},
-        {"AWDL_VIF_FLOW_CONTROLLED_SAMPLES", &_awdlVifFlowControlledSamples},
-        {"AWDL_VIF_FLOW_OPEN_SAMPLES", &_awdlVifFlowOpenSamples},
+        {"AWDL_TX_REENTRANT_SKIPPED", &_awdlTxReentrantSkipped},
         {"AWDL_TX_OUTPUT_START_STA", &_awdlTxOutputStartSTA},
         {"AWDL_TX_OUTPUT_START_OTHER", &_awdlTxOutputStartOther},
         {"AWDL_TX_PARAM_VIF_MATCH", &_awdlTxParamVifMatch},
@@ -919,18 +918,20 @@ void AirPortRTW::drainAWDLTxPackets(void *object, UInt options, bool timerPoll)
         __atomic_fetch_add(&_awdlTxRejectedDma, 1U, __ATOMIC_RELAXED);
         return;
     }
+    RTW88TxDrainGuard drainGuard(&_awdlTxDrainActive);
+    if (!drainGuard.acquired()) {
+        __atomic_fetch_add(&_awdlTxReentrantSkipped, 1U, __ATOMIC_RELAXED);
+        return;
+    }
     IO80211VirtualInterface *vif = OSDynamicCast(IO80211VirtualInterface, (OSObject *)object);
     if (!vif || !_ieee80211 || vif->getInterfaceRole() != APPLE80211_VIF_AWDL) {
         __atomic_fetch_add(&_awdlTxRejectedObject, 1U, __ATOMIC_RELAXED);
         return;
     }
 
-    // Read-only observation on the existing callback; never clear flow
-    // control or start Apple's queues merely to make a diagnostic succeed.
-    const bool flow = vif->isOutputFlowControlled();
-    __atomic_store_n(&_awdlVifFlowControlledLast, flow ? 1U : 0U, __ATOMIC_RELAXED);
-    __atomic_fetch_add(flow ? &_awdlVifFlowControlledSamples : &_awdlVifFlowOpenSamples,
-                       1U, __ATOMIC_RELAXED);
+    // Do not query isOutputFlowControlled through this private SDK vtable.
+    // Beta 16's slot dispatched _outputStartGated on Darwin 25 and recursively
+    // called requestPacketTx, exhausting the kernel stack (drain + 0x1c1).
     ++_awdlTxRequestCallbacks;
     setProperty("AWDL_TX_REQUEST_CALLBACKS", (uint64_t)_awdlTxRequestCallbacks, 32);
 
