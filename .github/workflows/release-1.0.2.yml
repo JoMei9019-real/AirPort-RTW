@@ -1,0 +1,59 @@
+name: Publish AirPort-RTW 1.0.2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-airport-rtw-1.0.2
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Publish AirPort-RTW 1.0.2 release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reuse the successful native macOS release build without changing bytes.
+      - uses: actions/download-artifact@v4
+        with:
+          name: AirPortRTW-1.0.2
+          run-id: 37976887904
+          github-token: ${{ github.token }}
+          path: release-assets
+
+      - name: Verify release package
+        working-directory: release-assets
+        run: |
+          sha256sum -c AirPortRTW.kext.zip.sha256
+          echo 'b26650986b56f508bde4b183bb60ffcbd78d8939e673a8a1fa2a4d793a533a35  AirPortRTW.kext.zip' | sha256sum -c -
+          python3 - <<'PY'
+          import plistlib, struct, zipfile
+          with zipfile.ZipFile("AirPortRTW.kext.zip") as z:
+              p = plistlib.loads(z.read("AirPortRTW.kext/Contents/Info.plist"))
+              b = z.read("AirPortRTW.kext/Contents/MacOS/AirPortRTW")
+          assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.0.2"
+          assert "beta" not in p["CFBundleGetInfoString"].lower()
+          assert b"1.0.2-release" in b
+          assert struct.unpack_from("<II", b) == (0xfeedfacf, 0x1000007)
+          print("Verified native x86_64 AirPortRTW 1.0.2 release")
+          PY
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v1.0.2 \
+            release-assets/AirPortRTW.kext.zip \
+            release-assets/AirPortRTW.kext.zip.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "AirPort-RTW 1.0.2" \
+            --notes-file RELEASE_1_0_2.md \
+            --draft
+          gh release edit v1.0.2 --draft=false --latest
