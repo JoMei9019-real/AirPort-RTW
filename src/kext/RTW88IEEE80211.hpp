@@ -97,6 +97,11 @@ class RTW88RxDelegate {
 public:
     virtual mbuf_t allocateInputPacket(uint32_t len) = 0;
     virtual void injectRxFrame(mbuf_t m) = 0;
+    /* true transfers skb ownership to a bounded asynchronous RX queue. */
+    virtual bool deferRxFrame(struct sk_buff *skb) { (void)skb; return false; }
+    virtual bool rxProcessingDeferred() const { return false; }
+    virtual void setRxQueueEnabled(bool enabled) { (void)enabled; }
+    virtual void radioPowerChanged(bool powered) { (void)powered; }
     /* Optional native 802.11 action-frame sink for AWDL/P2P controllers. */
     virtual void injectRxActionFrame(const uint8_t *frame, uint32_t len, int8_t rssi, uint16_t channel) {
         (void)frame; (void)len; (void)rssi; (void)channel;
@@ -194,6 +199,7 @@ public:
 
     /* Control interface — called from RTW88UserClient */
     uint32_t deauthReason() const { return _deauthReason; }
+    bool disconnectIsVoluntary() const { return __atomic_load_n(&_disconnectVoluntary, __ATOMIC_ACQUIRE); }
     RTW88State rawState() const { return _state; }
     bool associatedVisible() const { return _associatedVisible; }
     IOReturn  cmdScan();
@@ -234,6 +240,9 @@ public:
     IOReturn  cmdGetRSSI(int *rssi);
 
 private:
+    IOReturn powerOnGated();
+    void powerOffGated();
+    IOReturn cmdPowerOffGated();
     /* State machine internals */
     void      processRxMgmt(struct sk_buff *skb);
     void      processRxData(struct sk_buff *skb);
@@ -342,6 +351,7 @@ private:
     bool                _associatedVisible = false;
     bool                _connectCancelled = true;
     uint32_t            _deauthReason = 0;
+    bool                _disconnectVoluntary = false;
     RTW88State          _scanReturnState = RTW88_STATE_IDLE;
     bool                _powered      = false;
     bool                _pmkProvided = false;

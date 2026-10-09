@@ -2,7 +2,7 @@ name: Native AirPort build
 
 on:
   push:
-    branches: [native-airport-integration]
+    branches: [main, native-airport-integration, 1.0.0-beta]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -12,6 +12,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Check RX ownership and AWDL power fencing
+        run: |
+          python3 tests/check_deferred_rx.py
+          python3 tests/check_awdl_power.py
+          python3 tests/check_link_events.py
       - name: Bootstrap dependencies
         run: ./scripts/bootstrap-deps.sh
       - name: Build AirPortRTW
@@ -21,6 +26,15 @@ jobs:
           test -f build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
+          lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.0.2"; assert "1.0.2" in p["CFBundleGetInfoString"] and "beta" not in p["CFBundleGetInfoString"].lower()'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.0.2-release"
+          nm build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -E ' [SD] _rtw8814a_hw_spec$'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "rtw8814a_fw.bin"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["IOKitPersonalities"]["AirPortRTW_8814AE"]["IOPCIMatch"] == "0x881310EC"'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "AWDL_POWER_SUSPENDED"
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "RX_DEFER_MODE"
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "STA_LINK_EVENT_TLV_BYTES"
 
       - name: Package kext
         run: |
@@ -30,7 +44,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-kext
+          name: AirPortRTW-1.0.2
           path: |
             build/out/AirPortRTW.kext.zip
             build/out/AirPortRTW.kext.zip.sha256

@@ -98,6 +98,12 @@ static_assert(sizeof(RTW88MCSVHTData) == 20, "MCS/VHT ABI changed");
 static_assert(sizeof(RTW88StaRoamData) == 13, "STA roam ABI changed");
 static_assert(sizeof(RTW88IEData) == 2072, "IE ABI changed");
 
+enum : unsigned long {
+    kRTW88PowerStateOff = 0,
+    kRTW88PowerStateOn = 1,
+    kRTW88PowerStateCount = 2,
+};
+
 class AirPortRTWInterface;
 
 class AirPortRTW : public IO80211Controller, public RTW88EventDelegate, public RTW88RxDelegate, public RTW88HwOps {
@@ -106,6 +112,11 @@ class AirPortRTW : public IO80211Controller, public RTW88EventDelegate, public R
 public:
     static void diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *timer);
     static void awdlTimerFired(OSObject *owner, IOTimerEventSource *timer);
+    static void deferredRxReady(OSObject *owner, IOInterruptEventSource *source, int count);
+    bool deferRxFrame(struct sk_buff *skb) override;
+    bool rxProcessingDeferred() const override { return true; }
+    void setRxQueueEnabled(bool enabled) override;
+    void radioPowerChanged(bool powered) override;
     /* IOService */
     bool     init(OSDictionary *props) override;
     bool     start(IOService *provider) override;
@@ -316,6 +327,8 @@ private:
      * on observed transport behavior, never on the host Darwin version. */
     bool                    _linkUp = false;
     bool                    _assocDoneReported = false;
+    uint32_t                _staLinkEventPosts = 0;
+    void postSTALinkChanged(bool up, uint32_t reason);
     bool                    _rsnHandshakeReported = false;
 
     /* Acceso real a hardware -- antes esto se pasaba como nullptr a
@@ -325,6 +338,15 @@ private:
     volatile void           *_mmioBase     = nullptr;
     IOInterruptEventSource  *_intrSrc      = nullptr;
     struct pci_dev          *_compatPciDev = nullptr;
+
+    /* NAPI only enqueues; protocol callbacks execute on the controller loop. */
+    IOSimpleLock *_deferredRxLock = nullptr;
+    IOInterruptEventSource *_deferredRxSource = nullptr;
+    struct sk_buff *_deferredRx[256] = {};
+    unsigned _deferredRxHead = 0, _deferredRxCount = 0;
+    bool _deferredRxEnabled = false;
+    uint32_t _deferredRxQueued = 0, _deferredRxDropped = 0;
+    uint32_t _deferredRxProcessed = 0;
 
     bool setupInterrupt();
     bool failStart(IOService *provider, const char *reason);

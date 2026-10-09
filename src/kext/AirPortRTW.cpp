@@ -5,6 +5,7 @@
 #include "AirPortRTW.hpp"
 #include "AirPortRTWInterface.hpp"
 #include "RTW88AssocWire.hpp"
+#include "RTW88LinkEventWire.hpp"
 #include "RTW88UserClient.hpp"
 
 extern "C" {
@@ -46,12 +47,6 @@ static constexpr UInt32 kRTW88DataQueueDepth = 64;
 static constexpr UInt32 kRTW88TxQueueHigh    = 128;
 static constexpr UInt32 kRTW88TxQueueLow     = 64;
 
-enum : unsigned long {
-    kRTW88PowerStateOff = 0,
-    kRTW88PowerStateOn = 1,
-    kRTW88PowerStateCount = 2,
-};
-
 /* IONetworkController asks subclasses to register power states through
  * registerWithPolicyMaker().  State 0 intentionally advertises no device
  * capability; state 1 means the PCI function is usable. */
@@ -65,6 +60,7 @@ static const char *rtw88AirportChipName(const struct pci_dev *pdev)
 {
     if (!pdev) return "Realtek Wireless";
     switch (pdev->device) {
+    case 0x8813: return "RTL8814AE";
     case 0xB822: return "RTL8822BE";
     case 0xC822:
     case 0xC82F: return "RTL8822CE";
@@ -107,12 +103,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 
 bool AirPortRTW::start(IOService *provider)
 {
-    setProperty("DriverBuild", "1.0.0-rtl88wifi-r11-20261002");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
+    setProperty("DriverBuild", "1.0.2-release");
+    setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
         IOLog("AirPortRTW: provider is not IOPCIDevice\n");
@@ -172,6 +169,14 @@ bool AirPortRTW::start(IOService *provider)
      * parallel loop here. */
     if (!_workLoop)
         return failStart(provider, "IO80211 workloop unavailable after super::start");
+
+    _deferredRxLock = IOSimpleLockAlloc();
+    _deferredRxSource = IOInterruptEventSource::interruptEventSource(
+        this, &AirPortRTW::deferredRxReady);
+    if (!_deferredRxLock || !_deferredRxSource ||
+        _workLoop->addEventSource(_deferredRxSource) != kIOReturnSuccess)
+        return failStart(provider, "deferred RX initialization failed");
+    _deferredRxSource->enable();
 
     if (!setupInterrupt()) {
         return failStart(provider, "failed to set up interrupt");
@@ -257,7 +262,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.0.0 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
+    IOLog("AirPortRTW: 1.0.2 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -267,6 +272,9 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     AirPortRTW *self = OSDynamicCast(AirPortRTW, owner);
     if (!self || self->_shutdown || !self->_diagnosticsBuffer) return;
     self->_diagnosticsSamples++;
+    self->setProperty("RX_DEFER_QUEUED", (uint64_t)__atomic_load_n(&self->_deferredRxQueued, __ATOMIC_RELAXED), 32);
+    self->setProperty("RX_DEFER_DROPPED", (uint64_t)__atomic_load_n(&self->_deferredRxDropped, __ATOMIC_RELAXED), 32);
+    self->setProperty("RX_DEFER_PROCESSED", (uint64_t)self->_deferredRxProcessed, 32);
     /* setPowerState runs on the PM thread, not this workloop. Publish the
      * register access before re-checking the transition flag; the PM path
      * sets the flag and then waits for this access to finish. */
@@ -509,6 +517,10 @@ void AirPortRTW::syncBounceForCpu(IOPhysicalAddress dma, size_t size)
 
 void AirPortRTW::resumeTxIfStalled()
 {
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) return;
     /* IRQ bottom-half/NAPI run on the ordered compat datapath worker. This is a
      * safe place to retire deferred DMA mappings and kick a deliberately
      * stalled IO80211 output queue after TX descriptors have been reclaimed. */
@@ -569,6 +581,13 @@ void AirPortRTW::releaseDMAEntries()
 void AirPortRTW::teardown()
 {
     __atomic_store_n(&_shutdown, true, __ATOMIC_RELEASE);
+    setRxQueueEnabled(false);
+    /* Stop the consumer and wait for its workloop callback, but keep the
+     * source alive until NAPI producers have been joined below. */
+    if (_deferredRxSource) {
+        _deferredRxSource->disable();
+        if (_workLoop) _workLoop->removeEventSource(_deferredRxSource);
+    }
     if (_diagnosticsTimer) {
         /* A callback already running may re-arm after the first cancel;
          * removal waits for the workloop gate, then cancel any re-arm. */
@@ -597,6 +616,13 @@ void AirPortRTW::teardown()
         if (_ieeeStarted)
             _ieee80211->stop();
         _ieeeStarted = false;
+        /* NAPI has been joined. Remove the consumer before releasing its backend. */
+        if (_deferredRxSource) {
+            _deferredRxSource->disable();
+            if (_workLoop) _workLoop->removeEventSource(_deferredRxSource);
+            _deferredRxSource->release();
+            _deferredRxSource = nullptr;
+        }
         _ieee80211->release();
         _ieee80211 = nullptr;
     }
@@ -628,6 +654,12 @@ void AirPortRTW::teardown()
         _intrSrc->release();
         _intrSrc = nullptr;
     }
+    if (_deferredRxSource) {
+        _deferredRxSource->disable();
+        if (_workLoop) _workLoop->removeEventSource(_deferredRxSource);
+        _deferredRxSource->release();
+        _deferredRxSource = nullptr;
+    }
     if (_workLoop) {
         _workLoop->release();
         _workLoop = nullptr;
@@ -654,6 +686,10 @@ void AirPortRTW::teardown()
         _pciDev = nullptr;
     }
 
+    if (_deferredRxLock) {
+        IOSimpleLockFree(_deferredRxLock);
+        _deferredRxLock = nullptr;
+    }
     if (_pendingFreeLock) {
         IOSimpleLockFree(_pendingFreeLock);
         _pendingFreeLock = nullptr;
@@ -725,6 +761,7 @@ IOReturn AirPortRTW::restoreAfterSystemWake()
 
     ++_pmWakeCount;
     setProperty("PM_STATE", "waking");
+    setProperty("PM_WAKE_COREWIFI_READY", kOSBooleanFalse);
     setProperty("PM_WAKE_COUNT", (uint64_t)_pmWakeCount, 32);
 
     IOReturn ret = kIOReturnSuccess;
@@ -767,6 +804,12 @@ IOReturn AirPortRTW::restoreAfterSystemWake()
 
     _scanCacheBootstrapAttempted = false;
 
+    // The firmware has been restarted: do not coalesce a new CoreWiFi scan
+    // with an old frontend transaction or retain an association-done latch.
+    _scanInProgress = false;
+    _scanCursor = 0;
+    _assocDoneReported = false;
+
     /*
      * Wake policy: macOS/CoreWiFi owns infrastructure reconnection.
      *
@@ -807,6 +850,10 @@ out:
 
     if (ret == kIOReturnSuccess) {
         _txStalled = false;
+        // Advertise the restored, unassociated radio only after the PM fence
+        // is open. Never announce a reconnect opportunity for Wi-Fi left OFF.
+        if (_ieee80211->isPowered())
+            postSTALinkChanged(false, 8);
         if (_netif)
             _netif->postMessage(APPLE80211_M_POWER_CHANGED);
 
@@ -816,7 +863,8 @@ out:
         if (q) q->service(IOBasicOutputQueue::kServiceAsync);
         kickGatedOutput();
 
-        setProperty("PM_WAKE_COREWIFI_READY", kOSBooleanTrue);
+        setProperty("PM_WAKE_COREWIFI_READY", _ieee80211->isPowered() ? kOSBooleanTrue : kOSBooleanFalse);
+        setProperty("PM_WAKE_RADIO_POWERED", _ieee80211->isPowered() ? kOSBooleanTrue : kOSBooleanFalse);
         IOLog("AirPortRTW: wake complete; CoreWiFi owns reconnect\n");
     }
 
@@ -1978,20 +2026,15 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
 
     case APPLE80211_IOC_LINK_CHANGED_EVENT_DATA: {
         if (isSet) return kIOReturnUnsupported;
-        auto *d = static_cast<apple80211_link_changed_event_data *>(data);
-        bzero(d, sizeof(*d));
         RTW88StateResult st = {};
         const IOReturn ret = _ieee80211->cmdGetState(&st);
         if (ret != kIOReturnSuccess) return ret;
-        d->isLinkDown = st.state != RTW88_STATE_CONNECTED;
-        if (d->isLinkDown) {
-            d->voluntary = false;
-            d->reason = APPLE80211_LINK_DOWN_REASON_DEAUTH;
-        } else {
-            d->rssi = (uint32_t)st.rssi;
-            d->nf = (uint16_t)(int16_t)-95;
-            d->snr = (uint16_t)((st.rssi > -95) ? (st.rssi + 95) : 0);
-        }
+        const RTW88LinkEventData d = rtw88LinkQuery(
+            _ieee80211->associatedVisible(), _ieee80211->disconnectIsVoluntary(),
+            st.rssi, APPLE80211_LINK_DOWN_REASON_DEAUTH);
+        memcpy(data, &d, sizeof(d));
+        setProperty("STA_LINK_QUERY_BYTES", (uint64_t)sizeof(d), 32);
+        setProperty("STA_LINK_QUERY_VOLUNTARY", d.flag ? kOSBooleanTrue : kOSBooleanFalse);
         return kIOReturnSuccess;
     }
 
@@ -2096,7 +2139,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.0.0)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.0.2)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3178,6 +3221,10 @@ bool AirPortRTW::txGateWanted()
 
 void AirPortRTW::kickGatedOutput()
 {
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) return;
     if (!__atomic_load_n(&_txGated, __ATOMIC_SEQ_CST) || !_netif)
         return;
     if (__atomic_load_n(&_txStalled, __ATOMIC_SEQ_CST) ||
@@ -3317,7 +3364,10 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
 {
     IO80211VirtualInterface *awdl =
         _awdlManager ? _awdlManager->awdlInterface() : nullptr;
-    if (!awdl || !frame || len > 4096)
+    if (!awdl || !frame || len > 4096 ||
+        __atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended()))
         return;
 
     uint8_t subtype = 0xff;
@@ -3391,7 +3441,9 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
 {
     if (!m) return;
     IO80211VirtualInterface *awdl = _awdlManager ? _awdlManager->awdlInterface() : nullptr;
-    if (!awdl) {
+    if (!awdl || __atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        (_awdlManager && _awdlManager->powerSuspended())) {
         mbuf_freem(m);
         return;
     }
@@ -3403,6 +3455,94 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
      * as bounded telemetry only; do not flood the shutdown console. */
     setProperty("AWDL_LAST_DATA_INPUT_RAW", (uint64_t)ret, 32);
     (void)packetLen;
+}
+
+void AirPortRTW::radioPowerChanged(bool powered)
+{
+    // Backend invokes this on the controller workloop before draining NAPI.
+    if (!_awdlManager) return;
+    if (!powered) {
+        _awdlManager->suspendForPowerTransition();
+    } else if (!__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE)) {
+        _awdlManager->resumeAfterPowerTransition();
+    }
+}
+
+/* This producer runs on NAPI. No IO80211 calls, Realtek mutex acquisition,
+ * waiting, or workloop-gate acquisition is allowed here. */
+bool AirPortRTW::deferRxFrame(struct sk_buff *skb)
+{
+    if (!skb) return true;
+    bool accepted = false;
+    if (_deferredRxLock) {
+        IOSimpleLockLock(_deferredRxLock);
+        if (_deferredRxEnabled && _deferredRxCount < 256 &&
+            !__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE)) {
+            const unsigned tail = (_deferredRxHead + _deferredRxCount) % 256;
+            _deferredRx[tail] = skb;
+            ++_deferredRxCount;
+            accepted = true;
+        }
+        IOSimpleLockUnlock(_deferredRxLock);
+    }
+    if (accepted) {
+        __atomic_fetch_add(&_deferredRxQueued, 1U, __ATOMIC_RELAXED);
+        _deferredRxSource->interruptOccurred(nullptr, nullptr, 0);
+    } else {
+        __atomic_fetch_add(&_deferredRxDropped, 1U, __ATOMIC_RELAXED);
+        kfree_skb(skb);
+    }
+    return true;
+}
+
+void AirPortRTW::setRxQueueEnabled(bool enabled)
+{
+    if (!_deferredRxLock) return;
+    struct sk_buff *discard[256];
+    unsigned count = 0;
+    IOSimpleLockLock(_deferredRxLock);
+    _deferredRxEnabled = enabled && !__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE);
+    if (!_deferredRxEnabled) {
+        while (_deferredRxCount) {
+            discard[count++] = _deferredRx[_deferredRxHead];
+            _deferredRx[_deferredRxHead] = nullptr;
+            _deferredRxHead = (_deferredRxHead + 1) % 256;
+            --_deferredRxCount;
+        }
+    }
+    IOSimpleLockUnlock(_deferredRxLock);
+    for (unsigned i = 0; i < count; ++i) kfree_skb(discard[i]);
+    __atomic_fetch_add(&_deferredRxDropped, count, __ATOMIC_RELAXED);
+}
+
+void AirPortRTW::deferredRxReady(OSObject *owner, IOInterruptEventSource *source, int)
+{
+    auto *self = static_cast<AirPortRTW *>(owner);
+    /* Bound each workloop turn so control requests and sleep can run. */
+    for (unsigned i = 0; i < 64; ++i) {
+        struct sk_buff *skb = nullptr;
+        IOSimpleLockLock(self->_deferredRxLock);
+        if (self->_deferredRxEnabled && self->_deferredRxCount) {
+            skb = self->_deferredRx[self->_deferredRxHead];
+            self->_deferredRx[self->_deferredRxHead] = nullptr;
+            self->_deferredRxHead = (self->_deferredRxHead + 1) % 256;
+            --self->_deferredRxCount;
+        }
+        IOSimpleLockUnlock(self->_deferredRxLock);
+        if (!skb) break;
+        if (!__atomic_load_n(&self->_shutdown, __ATOMIC_ACQUIRE) && self->_ieee80211) {
+            ++self->_deferredRxProcessed;
+            self->_ieee80211->rxFrame(skb);
+        } else {
+            kfree_skb(skb);
+        }
+    }
+    IOSimpleLockLock(self->_deferredRxLock);
+    const bool more = self->_deferredRxEnabled && self->_deferredRxCount;
+    IOSimpleLockUnlock(self->_deferredRxLock);
+    if (more) source->interruptOccurred(nullptr, nullptr, 0);
 }
 
 IOWorkLoop *AirPortRTW::getRxWorkLoop()
@@ -3462,6 +3602,17 @@ void AirPortRTW::setLinkStatus(UInt32 status)
     (void)setLinkStatus(status, nullptr, 0, nullptr);
 }
 
+void AirPortRTW::postSTALinkChanged(bool up, uint32_t reason)
+{
+    if (!_netif || __atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE)) return;
+    RTW88LinkEventTLV event = rtw88LinkNotification(up, reason);
+    _netif->postMessage(APPLE80211_M_LINK_CHANGED, &event, sizeof(event));
+    setProperty("STA_LINK_EVENT_TLV_BYTES", (uint64_t)sizeof(event), 32);
+    setProperty("STA_LINK_EVENT_DATA_BYTES", (uint64_t)sizeof(event.data), 32);
+    setProperty("STA_LINK_EVENT_REASON", (uint64_t)event.data.reason, 32);
+    setProperty("STA_LINK_EVENT_POSTS", (uint64_t)__atomic_add_fetch(&_staLinkEventPosts, 1U, __ATOMIC_RELAXED), 32);
+}
+
 void AirPortRTW::rtw88Event(RTW88Event ev, void *data)
 {
     if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) || !_netif) return;
@@ -3493,7 +3644,7 @@ void AirPortRTW::rtw88Event(RTW88Event ev, void *data)
         break;
     case kRTW88EventDisconnected:
         setProperty("STA_DISCONNECTED_EVENT", kOSBooleanTrue);
-        _netif->postMessage(APPLE80211_M_LINK_CHANGED);
+        postSTALinkChanged(false, _ieee80211 ? _ieee80211->deauthReason() : 0);
         break;
     case kRTW88EventRSSIChanged:   _netif->postMessage(APPLE80211_M_LINK_QUALITY); break;
     default: break;

@@ -1,33 +1,40 @@
 # AirPort-RTW
 
-AirPort-RTW is a native macOS IO80211 Wi-Fi driver project derived from the Feixiao rtw88 macOS port.
+AirPort-RTW is a native macOS IO80211 Wi-Fi driver for Realtek PCIe cards, derived from the Feixiao rtw88 macOS port. It uses the Linux rtw88 hardware core with an AirPort frontend based on IO80211FamilyLegacy and IOSkywalkFamily.
 
-The goal is to keep Feixiao's Realtek/Linux rtw88 hardware core while replacing the user-controlled network frontend with a native macOS AirPort-style frontend based on IO80211FamilyLegacy and IOSkywalkFamily.
+## Version 1.0.2
 
-## First integrated target
+Version 1.0.2 incorporates the changes tested through 1.0.2 Beta 4. It provides native Wi-Fi menu integration, scanning, association, WPA/WPA2, 2.4/5 GHz operation and sleep/wake handling.
 
-This branch intentionally delivers the native stack as one larger test unit rather than many reboot-heavy intermediate builds:
+### Changes since 1.0.1
 
-- native macOS Wi-Fi interface / menu integration
-- scanning
-- association
-- WPA/WPA2 path
-- 2.4 / 5 GHz support
-- link state and RX/TX integration
-- power-management / sleep-wake hooks
-- diagnostics and rtw88 control path retained where useful
+- Deferred RX processing through a bounded queue to address the sleep shutdown deadlock observed in `flush_work` / `napi_stop`.
+- AWDL timer and queue fencing during power transitions to prevent late RX/TX work and re-arming while suspended.
+- Wake-state cleanup and corrected power/link notifications to improve automatic reconnect while preserving a user-disabled radio.
+- Correct native `LINK_CHANGED` notification and link-status query layouts.
+- Experimental RTL8814AE PCIe support, including the hardware core, tables and embedded firmware.
+- Automated RX ownership, AWDL power and link/wake regression checks; firmware checksum and bundle checks.
 
-Initial PCIe IDs:
+See [1.0.2 release notes and testing](RELEASE_1_0_2.md).
 
-- RTL8821CE: 10ec:c821, 10ec:b821
-- RTL8822BE: 10ec:b822
-- RTL8822CE: 10ec:c822, 10ec:c82f
+## Supported PCIe IDs
 
-RTL8812AE / RTL8814AE remain in the Feixiao lineage but are deliberately not enabled in this first native test build.
+| Chip | Vendor:device IDs | Status |
+| --- | --- | --- |
+| RTL8821CE | `10ec:c821`, `10ec:b821` | Existing support |
+| RTL8822BE | `10ec:b822` | Existing support |
+| RTL8822CE | `10ec:c822`, `10ec:c82f` | Existing support |
+| RTL8814AE | `10ec:8813` | Experimental; physical hardware validation pending |
+
+Some PCI tools identify RTL8814AE as RTL8813AE. RTL8812AE is not enabled; it requires a separate PCIe transport integration. USB and SDIO adapters are not supported by this project.
 
 ## Known limitations
 
-**Deep sleep is not yet fully reliable.** Extended standby and hibernation should be considered experimental. A sleep transition timeout with a kernel panic has been observed during extended sleep/standby testing; the existing sleep/wake hooks do not guarantee reliable deep-sleep operation.
+- **Deep sleep is not guaranteed to work reliably on every system.** Version 1.0.2 addresses the observed driver shutdown deadlock, but uninterrupted long sleep, standby and hibernation still need hardware validation.
+- In the reported comparison test, frequent DarkWakes persisted with AirPortRTW unloaded. No speculative driver fix for that pattern is included.
+- The CoreWiFi `BSSID_CHANGED` length warning is not claimed fixed by this release.
+- RTL8814AE support is experimental. A successful build does not establish hardware compatibility.
+- AirDrop/AWDL feature development on `beta-2.0.0` is separate and has not been merged into this release. AWDL power fencing does not imply working AirDrop support.
 
 ## Dependencies
 
@@ -40,9 +47,9 @@ Run:
 This checks out:
 
 - AcidAnthera MacKernelSDK
-- thegwchr rtw88-stable
+- thegwchr rtw88-stable at `d029a677c49266fad86750714eb5612becd134d3`
 
-The bootstrap script fetches the three required firmware blobs into `firmware/` reproducibly before building.
+The bootstrap script fetches four required firmware blobs into `firmware/`. The RTL8814A download is pinned to a commit and checked against its SHA-256 hash.
 
 ## Build
 
@@ -109,7 +116,7 @@ Monterey and earlier releases are **not currently validated targets** for AirPor
 
 ## Test plan
 
-For the first real hardware test, use one reboot and validate the whole path:
+After replacing the kext and rebooting, validate the following:
 
 1. confirm AirPortRTW attaches to the Realtek PCI device;
 2. verify Wi-Fi appears in macOS;
@@ -119,7 +126,7 @@ For the first real hardware test, use one reboot and validate the whole path:
 6. switch networks once;
 7. collect the diagnostic log if any step fails.
 
-This branch is experimental kernel code. Keep a bootable fallback EFI.
+Keep a bootable fallback EFI when testing a new build, especially on experimental RTL8814AE hardware.
 
 
 ## Lineage and licensing

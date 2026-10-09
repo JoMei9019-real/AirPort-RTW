@@ -573,7 +573,7 @@ void rtw88_synchronize_irq(void)
 static void rtw88_napi_work_fn(struct work_struct *work)
 {
     struct napi_struct *napi = container_of(work, struct napi_struct, work);
-    if (!napi || !napi->enabled || !napi->poll)
+    if (!napi || !__atomic_load_n(&napi->enabled, __ATOMIC_ACQUIRE) || !napi->poll)
         return;
 
     /* RX status lookup (rtw_rx_addr_match) dereferences the registered peer
@@ -587,7 +587,7 @@ static void rtw88_napi_work_fn(struct work_struct *work)
 
     /* A full budget means Linux would leave NAPI scheduled. Requeue the same
      * work item; the ordered queue guarantees the polls never overlap. */
-    if (napi->enabled && done >= napi->weight && g_datapath_wq)
+    if (__atomic_load_n(&napi->enabled, __ATOMIC_ACQUIRE) && done >= napi->weight && g_datapath_wq)
         queue_work(g_datapath_wq, &napi->work);
 }
 
@@ -598,13 +598,13 @@ void rtw88_netif_napi_add(struct net_device *dev, struct napi_struct *napi,
     napi->dev = dev;
     napi->poll = poll_fn;
     napi->weight = 64;
-    napi->enabled = false;
+    __atomic_store_n(&napi->enabled, false, __ATOMIC_RELEASE);
     INIT_WORK(&napi->work, rtw88_napi_work_fn);
 }
 
 void rtw88_napi_enable(struct napi_struct *napi)
 {
-    if (napi) napi->enabled = true;
+    if (napi) __atomic_store_n(&napi->enabled, true, __ATOMIC_RELEASE);
 }
 
 void rtw88_napi_synchronize(struct napi_struct *napi)
@@ -629,14 +629,14 @@ void rtw88_napi_synchronize(struct napi_struct *napi)
      * exits without touching the hardware.  The following napi_disable() is
      * consequently idempotent.
      */
-    napi->enabled = false;
+    __atomic_store_n(&napi->enabled, false, __ATOMIC_RELEASE);
     flush_work(&napi->work);
 }
 
 void rtw88_napi_disable(struct napi_struct *napi)
 {
     if (!napi) return;
-    napi->enabled = false;
+    __atomic_store_n(&napi->enabled, false, __ATOMIC_RELEASE);
     cancel_work_sync(&napi->work);
 }
 
@@ -650,7 +650,7 @@ void rtw88_netif_napi_del(struct napi_struct *napi)
 
 void rtw88_napi_schedule(struct napi_struct *napi)
 {
-    if (napi && napi->enabled && napi->poll && g_datapath_wq)
+    if (napi && __atomic_load_n(&napi->enabled, __ATOMIC_ACQUIRE) && napi->poll && g_datapath_wq)
         queue_work(g_datapath_wq, &napi->work);
 }
 
