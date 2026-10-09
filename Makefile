@@ -85,6 +85,8 @@ DRIVER_CFLAGS := \
     -DCONFIG_RTW88_8822CE=1 \
     -DCONFIG_RTW88_8821C=1 \
     -DCONFIG_RTW88_8821CE=1 \
+    -DCONFIG_RTW88_8814A=1 \
+    -DCONFIG_RTW88_8814AE=1 \
     -Werror=implicit-function-declaration \
     -Werror=int-conversion \
     -Werror=incompatible-pointer-types \
@@ -134,7 +136,10 @@ CHIP_SRCS := \
     $(LINUX_SRC)/rtw8822ce.c \
     $(LINUX_SRC)/rtw8821c.c \
     $(LINUX_SRC)/rtw8821c_table.c \
-    $(LINUX_SRC)/rtw8821ce.c
+    $(LINUX_SRC)/rtw8821ce.c \
+    $(LINUX_SRC)/rtw8814a.c \
+    $(LINUX_SRC)/rtw8814a_table.c \
+    $(LINUX_SRC)/rtw8814ae.c
 
 # Compat C implementation
 COMPAT_SRCS := \

@@ -11,5 +11,9 @@ Files needed (copy all that apply to your chip):
   rtw8814a_fw.bin   — RTL8814AE / RTL8814AU
   rtw8821a_fw.bin   — RTL8821AU
 
-The Makefile copies them into build/out/rtw88.kext/Contents/Resources/
-during the kext assembly step.
+The build embeds firmware/*.bin as compressed blobs in the kext binary.
+Beta 4 bootstrap downloads RTL8814A firmware from lwfinger/rtw88 commit
+a56bcd26e770257612a0803249cbd4095fc6feca and verifies SHA-256:
+aa6bf9d62b2d2d8a37254fd6d917ba2839888cdedc21850d4481874cb1d3d7cb.
+Only the enabled PCIe chips are advertised by AirPortRTW; the other firmware
+names above are reference information, not a claim of macOS support.

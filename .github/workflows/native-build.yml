@@ -27,8 +27,11 @@ jobs:
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
-          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.0.2"; assert "1.0.2-beta.3" in p["CFBundleGetInfoString"]'
-          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.0.2-beta.3-link-events-reconnect"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.0.2"; assert "1.0.2-beta.4" in p["CFBundleGetInfoString"]'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.0.2-beta.4-rtl8814ae"
+          nm build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -E ' [SD] _rtw8814a_hw_spec$'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "rtw8814a_fw.bin"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["IOKitPersonalities"]["AirPortRTW_8814AE"]["IOPCIMatch"] == "0x881310EC"'
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "AWDL_POWER_SUSPENDED"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "RX_DEFER_MODE"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "STA_LINK_EVENT_TLV_BYTES"
@@ -41,7 +44,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-1.0.2-beta.3
+          name: AirPortRTW-1.0.2-beta.4
           path: |
             build/out/AirPortRTW.kext.zip
             build/out/AirPortRTW.kext.zip.sha256

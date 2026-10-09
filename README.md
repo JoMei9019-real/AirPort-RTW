@@ -23,7 +23,9 @@ Initial PCIe IDs:
 - RTL8822BE: 10ec:b822
 - RTL8822CE: 10ec:c822, 10ec:c82f
 
-RTL8812AE / RTL8814AE remain in the Feixiao lineage but are deliberately not enabled in this first native test build.
+1.0.2 Beta 4 additionally enables **experimental RTL8814AE** support for `10ec:8813` (some PCI tools call this RTL8813AE). The RTL8814A core, hardware tables and firmware are included, but this macOS integration has not yet been validated on physical RTL8814AE hardware. RTL8812AE remains deferred because it needs a different PCIe transport integration.
+
+See [Beta 4 notes and test plan](BETA_1_0_2_4_RTL8814AE.md). Long sleep/deep sleep is still not guaranteed to work reliably on all systems.
 
 ## Dependencies
 
@@ -36,9 +38,9 @@ Run:
 This checks out:
 
 - AcidAnthera MacKernelSDK
-- thegwchr rtw88-stable
+- thegwchr rtw88-stable at `d029a677c49266fad86750714eb5612becd134d3`
 
-The bootstrap script fetches the three required firmware blobs into `firmware/` reproducibly before building.
+The bootstrap script fetches the four required firmware blobs into `firmware/` reproducibly before building.
 
 ## Build
 
