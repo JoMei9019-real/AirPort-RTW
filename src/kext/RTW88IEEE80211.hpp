@@ -36,6 +36,7 @@ enum RTW88Event {
     kRTW88EventDeauth,
     kRTW88EventDisconnected,
     kRTW88EventRSSIChanged,
+    kRTW88EventHandshakeDone,
 };
 
 class RTW88EventDelegate {
@@ -207,10 +208,13 @@ public:
                          const uint8_t *bssid = nullptr, bool externalSupplicant = false);
     IOReturn  cmdInstallExternalKey(bool pairwise, uint8_t keyidx, uint32_t cipher,
                                     const uint8_t *key, uint8_t key_len);
-    bool      externalKeysReady() const { return _externalPTKInstalled && _externalGTKInstalled; }
+    bool      externalKeysReady() const { return _enterprise ? _enterpriseAuthorized :
+                                                  (_externalPTKInstalled && _externalGTKInstalled); }
+    IOReturn  cmdInstallEnterprisePMK(const uint8_t *key, uint32_t len, const uint8_t *bssid);
+    IOReturn  installEnterprisePMKGated(const uint8_t *key, uint32_t len, const uint8_t *bssid);
     IOReturn  cmdSetAssocRsnIE(const uint8_t *ie, uint16_t len);
     void      clearAssocRsnIE();
-    bool      matchesPendingJoin(const char *ssid, const uint8_t *bssid, const uint8_t *pmk) const;
+    bool      matchesPendingJoin(const char *ssid, const uint8_t *bssid, const uint8_t *pmk, bool enterprise = false) const;
     void      failJoin(const char *stage);
     IOReturn  copyTargetIEs(uint8_t *out, uint32_t capacity, uint32_t *len) const;
     IOReturn  copyTargetRsnIE(uint8_t *out, uint16_t capacity, uint16_t *len) const;
@@ -356,6 +360,9 @@ private:
     bool                _powered      = false;
     bool                _pmkProvided = false;
     bool                _externalSupplicant = false;
+    bool                _enterprise = false;
+    bool                _enterpriseAuthorized = false;
+    bool                _internalEapolTx = false;
     bool                _externalPTKInstalled = false;
     bool                _externalGTKInstalled = false;
     bool                _receiveMulticast = true;

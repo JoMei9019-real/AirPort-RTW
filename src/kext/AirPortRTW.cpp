@@ -6,6 +6,7 @@
 #include "AirPortRTWInterface.hpp"
 #include "RTW88AssocWire.hpp"
 #include "RTW88LinkEventWire.hpp"
+#include "RTW88Enterprise.hpp"
 #include "RTW88UserClient.hpp"
 
 extern "C" {
@@ -108,7 +109,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.0.2-beta.4-rtl8814ae");
+    setProperty("DriverBuild", "1.1.0-beta.1-enterprise");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -262,7 +263,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.0.2-beta.4 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
+    IOLog("AirPortRTW: 1.1.0-beta.1 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -1522,18 +1523,10 @@ static bool rtw88AssocPayloadLooksValid(const apple80211_assoc_data *d)
     }
     if (!nonzero) return false;
 
-    const uint32_t personal = APPLE80211_AUTHTYPE_WPA_PSK |
-                              APPLE80211_AUTHTYPE_WPA2_PSK |
-                              APPLE80211_AUTHTYPE_SHA256_PSK;
-    const bool secure = (d->ad_auth_upper & personal) != 0;
-    if (d->ad_auth_lower != APPLE80211_AUTHTYPE_OPEN)
-        return false;
-    if (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure)
-        return false;
-    if (secure && d->ad_key.key_len != 32)
-        return false;
-    if (!secure && d->ad_key.key_len != 0)
-        return false;
+    const auto auth = RTW88Enterprise::auth(d->ad_auth_lower, d->ad_auth_upper,
+                         d->ad_key.key_len, d->ad_rsn_ie, sizeof(d->ad_rsn_ie));
+    if (auth == RTW88Enterprise::Auth::Invalid) return false;
+    const bool secure = auth != RTW88Enterprise::Auth::Open;
 
     if (secure && d->ad_rsn_ie[0] != 0) {
         if (d->ad_rsn_ie[0] != 48)
@@ -2139,7 +2132,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.0.2-beta.4)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.1.0-beta.1)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -2636,8 +2629,7 @@ IOReturn AirPortRTW::handleAUTH_TYPE(bool set, struct apple80211_authtype_data *
 
 IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
 {
-    setProperty("STA_INTERNAL_RSN_MODE", kOSBooleanTrue);
-    kprintf("AirPortRTW: handleASSOCIATE ENTER data=%p (internal RSN)\n", d);
+    IOLog("AirPortRTW: handleASSOCIATE ENTER\n");
     // Metadata only: never publish SSID, BSSID, PMK or password bytes.
     if (d) {
         setProperty("STA_ASSOC_INPUT_VERSION", (uint64_t)d->version, 32);
@@ -2661,33 +2653,14 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
     const uint8_t *bssid = memcmp(d->ad_bssid.octet, emptyBssid,
                                   APPLE80211_ADDR_LEN) ? d->ad_bssid.octet : nullptr;
 
-    const uint32_t personalMask =
-        APPLE80211_AUTHTYPE_WPA_PSK |
-        APPLE80211_AUTHTYPE_WPA2_PSK |
-        APPLE80211_AUTHTYPE_SHA256_PSK;
-    const bool secure = (d->ad_auth_upper & personalMask) != 0;
-
-    if (d->ad_auth_lower != APPLE80211_AUTHTYPE_OPEN ||
-        (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure))
-        return kIOReturnUnsupported;
-
-    /* Proven Ventura path (0.4.0 -> 1.0.0): IO80211 supplies the 32-byte
-     * association PMK in ad_key.  Keep the 4-way handshake inside rtw88.
-     * Do not enable Apple RSN here: that experimental path changed the join
-     * transport and was never the known-good RTL8822BE path. */
-    const uint8_t *pmk = nullptr;
-    if (secure) {
-        if (d->ad_key.key_len != 32) {
-            setProperty("STA_ASSOCIATE_BAD_PMK_LEN", (uint64_t)d->ad_key.key_len, 32);
-            return kIOReturnUnsupported;
-        }
-        pmk = d->ad_key.key;
-
-    }
-
-    // Validate the open-network key before tearing down an existing link.
-    if (!secure && d->ad_key.key_len != 0)
-        return kIOReturnUnsupported;
+    const auto auth = RTW88Enterprise::auth(d->ad_auth_lower, d->ad_auth_upper,
+                         d->ad_key.key_len, d->ad_rsn_ie, sizeof(d->ad_rsn_ie));
+    if (auth == RTW88Enterprise::Auth::Invalid) return kIOReturnUnsupported;
+    const bool enterprise = auth == RTW88Enterprise::Auth::Enterprise;
+    const bool secure = auth != RTW88Enterprise::Auth::Open;
+    const uint8_t *pmk = auth == RTW88Enterprise::Auth::Personal ? d->ad_key.key : nullptr;
+    setProperty("STA_ENTERPRISE_EXPERIMENTAL", enterprise ? kOSBooleanTrue : kOSBooleanFalse);
+    setProperty("STA_INTERNAL_RSN_MODE", enterprise ? kOSBooleanFalse : kOSBooleanTrue);
 
     RTW88StateResult current = {};
     if (_ieee80211->cmdGetState(&current) == kIOReturnSuccess &&
@@ -2695,7 +2668,7 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
          current.state == RTW88_STATE_ASSOCIATING ||
          current.state == RTW88_STATE_HANDSHAKING ||
          current.state == RTW88_STATE_CONNECTED)) {
-        bool same = _ieee80211->matchesPendingJoin(ssid, bssid, pmk);
+        bool same = _ieee80211->matchesPendingJoin(ssid, bssid, pmk, enterprise);
         setProperty("ASSOCIATE_COALESCED", same ? kOSBooleanTrue : kOSBooleanFalse);
         if (same) return kIOReturnSuccess;
         // A valid new ASSOCIATE supersedes the old attempt/link. Drain its
@@ -2728,14 +2701,14 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
     _assocDoneReported = false;
     _rsnHandshakeReported = false;
     setProperty("STA_ASSOCIATE_BEFORE_RAW_STATE", (uint64_t)_ieee80211->rawState(), 32);
-    IOReturn ret = _ieee80211->cmdConnect(ssid, nullptr, pmk, bssid, false);
+    IOReturn ret = _ieee80211->cmdConnect(ssid, nullptr, pmk, bssid, enterprise);
     setProperty("STA_ASSOCIATE_CMD_RET", (uint64_t)(uint32_t)ret, 32);
     setProperty("STA_ASSOCIATE_AFTER_RAW_STATE", (uint64_t)_ieee80211->rawState(), 32);
     if (ret == kIOReturnSuccess)
         setProperty("STA_ASSOCIATE_ACCEPTED", kOSBooleanTrue);
 
-    IOLog("AirPortRTW: ASSOCIATE internal-RSN ssid=%s secure=%d keylen=%u ret=0x%x\n",
-          ssid, secure, d->ad_key.key_len, ret);
+    IOLog("AirPortRTW: ASSOCIATE enterprise=%d secure=%d keylen=%u ret=0x%x\n",
+          enterprise, secure, d->ad_key.key_len, ret);
     return ret;
 }
 
@@ -2787,6 +2760,15 @@ IOReturn AirPortRTW::handleCIPHER_KEY(struct apple80211_key *key)
 
     if (key->key_cipher_type == APPLE80211_CIPHER_NONE)
         return kIOReturnSuccess;
+
+    if (key->key_cipher_type == RTW88Enterprise::AppleMsk ||
+        key->key_cipher_type == APPLE80211_CIPHER_PMK) {
+        // No cache/preauthentication in beta 1. Bind material to the current STA.
+        IOReturn ret = _ieee80211->cmdInstallEnterprisePMK(key->key, key->key_len,
+                                                         key->key_ea.octet);
+        setProperty("STA_ENTERPRISE_PMK_RET", (uint64_t)(uint32_t)ret, 32);
+        return ret;
+    }
 
     uint32_t cipher = 0;
     switch (key->key_cipher_type) {
@@ -3645,6 +3627,12 @@ void AirPortRTW::rtw88Event(RTW88Event ev, void *data)
     case kRTW88EventDisconnected:
         setProperty("STA_DISCONNECTED_EVENT", kOSBooleanTrue);
         postSTALinkChanged(false, _ieee80211 ? _ieee80211->deauthReason() : 0);
+        break;
+    case kRTW88EventHandshakeDone:
+        if (!_rsnHandshakeReported && _ieee80211 && _ieee80211->externalKeysReady()) {
+            _rsnHandshakeReported = true;
+            _netif->postMessage(APPLE80211_M_RSN_HANDSHAKE_DONE);
+        }
         break;
     case kRTW88EventRSSIChanged:   _netif->postMessage(APPLE80211_M_LINK_QUALITY); break;
     default: break;

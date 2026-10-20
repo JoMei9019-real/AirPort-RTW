@@ -22,3 +22,8 @@ Base: `1.0.0-beta` at c64dc5a1dd6a1f01c8f548a040a80b0ce94e2c5e.
 ## Status
 
 Static audit complete. No functional driver changes, build, hardware tests, or claims of Enterprise compatibility yet. Production branch and existing Personal implementation intentionally untouched.
+
+
+## Beta 1 implementation follow-up
+
+The experimental implementation is documented in BETA_1_1_0_1.md. Static/host checks do not establish runtime Enterprise compatibility. macOS owns EAP methods; MSK/PMK material feeds the existing internal four-way handshake, rather than two competing key handlers. The original findings above describe the pre-implementation base.

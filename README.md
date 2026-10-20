@@ -1,5 +1,12 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 1: experimental WPA2-Enterprise
+
+This `1.0.0-beta` build adds an **unverified experimental** WPA2-Enterprise / 802.1X path on top of 1.0.2 Beta 4. It is not a production release. WPA2-Personal retains its existing internal handshake. See [Beta 1 scope and test instructions](BETA_1_1_0_1.md).
+
+Supported Enterprise scope: CCMP pairwise/group cipher, AKM 00:0f:ac:1, macOS EAP client and an MSK/PMK callback into the existing WPA2 four-way handshake. PMF, WPA3/192-bit/SHA256 Enterprise, PMKSA caching/fast roaming and runtime PEAP/EAP-TLS compatibility are not validated or advertised.
+
+
 AirPort-RTW is a native macOS IO80211 Wi-Fi driver project derived from the Feixiao rtw88 macOS port.
 
 The goal is to keep Feixiao's Realtek/Linux rtw88 hardware core while replacing the user-controlled network frontend with a native macOS AirPort-style frontend based on IO80211FamilyLegacy and IOSkywalkFamily.
