@@ -1,5 +1,14 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 3: stability regression checks
+
+Beta 3 retains Beta 2's runtime behavior and adds executable workqueue/scan/RX
+regression tests plus a compiled x86_64 IOCTL stack-budget gate in CI.
+This is test/build hardening, not a new sleep fix or WPA3 implementation.
+See [Beta 3 scope and hardware test plan](BETA_1_1_0_3.md).
+Deep sleep and live Enterprise interoperability remain unverified;
+`main` is unchanged.
+
 ## 1.1.0 Beta 2: experimental TX batching
 
 Beta 2 retains Beta 1's unverified WPA2-Enterprise path and adds bounded,

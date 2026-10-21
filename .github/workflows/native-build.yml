@@ -12,25 +12,30 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Check RX ownership and AWDL power fencing
+      - name: Check ownership, power fencing and stability regressions
         run: |
           python3 tests/check_deferred_rx.py
           python3 tests/check_awdl_power.py
           python3 tests/check_link_events.py
           python3 tests/check_enterprise.py
           python3 tests/check_tx_batch.py
+          python3 tests/check_workqueue.py
+          python3 tests/check_scan_rx.py
+          python3 tests/check_stack_budget.py --self-test
       - name: Bootstrap dependencies
         run: ./scripts/bootstrap-deps.sh
       - name: Build AirPortRTW
         run: make airport
+      - name: Enforce compiled IOCTL stack budgets
+        run: python3 tests/check_stack_budget.py build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
       - name: Inspect bundle
         run: |
           test -f build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
-          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.2" in p["CFBundleGetInfoString"]'
-          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.2-tx-batching"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.3" in p["CFBundleGetInfoString"]'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.3-stability-checks"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "TX_BATCH_DEFERRED_FRAMES"
           nm build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -E ' [SD] _rtw8814a_hw_spec$'
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "rtw8814a_fw.bin"
@@ -47,7 +52,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-1.1.0-beta.2
+          name: AirPortRTW-1.1.0-beta.3
           path: |
             build/out/AirPortRTW.kext.zip
             build/out/AirPortRTW.kext.zip.sha256
