@@ -1161,6 +1161,38 @@ void rtw88_compat_exit(void)
 #include "main.h"
 #include "fw.h"
 #include "reg.h"
+#include "tx.h"
+#include "hci.h"
+
+uintptr_t rtw88_tx_thread_id(void) { return (uintptr_t)current_thread(); }
+
+/* Same preparation/ownership as rtw_tx(), with an explicit doorbell decision.
+ * The pinned upstream core remains unmodified. */
+int rtw88_tx_batch_write(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
+                         struct sk_buff *skb, bool kick)
+{
+    struct rtw_dev *dev = hw ? hw->priv : NULL;
+    struct rtw_tx_pkt_info info = {0};
+    if (!skb) return -EINVAL;
+    if (!dev || !test_bit(RTW_FLAG_RUNNING, dev->flags)) {
+        ieee80211_free_txskb(hw, skb);
+        return -ESHUTDOWN;
+    }
+    rtw_tx_pkt_info_update(dev, &info, sta, skb);
+    int ret = rtw_hci_tx_write(dev, &info, skb);
+    if (ret) ieee80211_free_txskb(hw, skb);
+    /* A rejected frame must not strand earlier accepted descriptors. */
+    if (kick || ret) rtw_hci_tx_kick_off(dev);
+    return ret;
+}
+
+bool rtw88_tx_batch_flush(struct ieee80211_hw *hw)
+{
+    struct rtw_dev *dev = hw ? hw->priv : NULL;
+    if (!dev || !test_bit(RTW_FLAG_RUNNING, dev->flags)) return false;
+    rtw_hci_tx_kick_off(dev);
+    return true;
+}
 
 /* We can't include rtw88's pci.h here because the compat tree's
  * linux/pci.h shadows it on the include path.  Just hardcode the few

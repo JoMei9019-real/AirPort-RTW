@@ -187,6 +187,13 @@ public:
     void      powerOff();    /* disable: rtw_core_stop */
     void      handleInterrupt();
     UInt32    outputPacket(mbuf_t m);
+    bool      beginTxBatch();
+    void      endTxBatch();
+    void      flushTxBatch();
+    uint32_t  txBatchFrames() const { return __atomic_load_n(&_txBatchFrames, __ATOMIC_RELAXED); }
+    uint32_t  txBatchFlushes() const { return __atomic_load_n(&_txBatchFlushes, __ATOMIC_RELAXED); }
+    uint32_t  txBatchPending() const { return __atomic_load_n(&_txBatchPending, __ATOMIC_RELAXED); }
+    void      setTxBatchEnabled(bool enabled) { _txBatchEnabled = enabled; }
     bool      txRawManagementFrame(const uint8_t *frame, uint32_t len);
     /* Native AWDL Ethernet -> 802.11 direct data encapsulation. Consumes m. */
     bool      txAWDLDataFrame(mbuf_t m);
@@ -361,6 +368,11 @@ private:
     bool                _pmkProvided = false;
     bool                _externalSupplicant = false;
     bool                _enterprise = false;
+    bool                _txBatchEnabled = true;
+    uintptr_t           _txBatchOwner = 0;
+    uint32_t            _txBatchPending = 0;
+    uint32_t            _txBatchFrames = 0;
+    uint32_t            _txBatchFlushes = 0;
     bool                _enterpriseAuthorized = false;
     bool                _internalEapolTx = false;
     bool                _externalPTKInstalled = false;

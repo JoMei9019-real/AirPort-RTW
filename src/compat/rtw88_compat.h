@@ -161,6 +161,10 @@ void rtw88_get_stats(struct rtw_dev *rtwdev, uint32_t *tx_bytes, uint32_t *rx_by
  * need the Linux driver's private layout live in rtw88_compat.c, after main.h
  * has provided the complete definition. */
 uint8_t rtw88_get_tx_nss(struct rtw_dev *rtwdev);
+uintptr_t rtw88_tx_thread_id(void);
+int rtw88_tx_batch_write(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
+                         struct sk_buff *skb, bool kick);
+bool rtw88_tx_batch_flush(struct ieee80211_hw *hw);
 uint32_t rtw88_read_log(char *out_buf, uint32_t max_len);
 void rtw88_candidate_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 uint32_t rtw88_copy_log(char *out_buf, uint32_t max_len, uint64_t *total_bytes);

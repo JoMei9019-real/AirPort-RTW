@@ -1,5 +1,11 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 2: experimental TX batching
+
+Beta 2 retains Beta 1's unverified WPA2-Enterprise path and adds bounded,
+synchronous TX doorbell batching. See [Beta 2 notes and A/B test](BETA_1_1_0_2.md).
+No measured throughput improvement is claimed. `main` remains the stable release.
+
 ## 1.1.0 Beta 1: experimental WPA2-Enterprise
 
 This `1.0.0-beta` build adds an **unverified experimental** WPA2-Enterprise / 802.1X path on top of 1.0.2 Beta 4. It is not a production release. WPA2-Personal retains its existing internal handshake. See [Beta 1 scope and test instructions](BETA_1_1_0_1.md).

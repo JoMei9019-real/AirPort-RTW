@@ -7,6 +7,7 @@
 #include "RTW88AssocWire.hpp"
 #include "RTW88LinkEventWire.hpp"
 #include "RTW88Enterprise.hpp"
+#include "RTW88TxBatchScope.hpp"
 #include "RTW88UserClient.hpp"
 
 extern "C" {
@@ -109,7 +110,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.1-enterprise");
+    setProperty("DriverBuild", "1.1.0-beta.2-tx-batching");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -193,6 +194,11 @@ bool AirPortRTW::start(IOService *provider)
     }
     _ieee80211->setEventDelegate(this);
     _ieee80211->setRxDelegate(this);
+    OSBoolean *batch = OSDynamicCast(OSBoolean, getProperty("TxBatchingEnabled"));
+    const bool batchEnabled = !batch || batch->isTrue();
+    _ieee80211->setTxBatchEnabled(batchEnabled);
+    setProperty("TX_BATCH_ENABLED", batchEnabled ? kOSBooleanTrue : kOSBooleanFalse);
+    setProperty("TX_BATCH_LIMIT", (uint64_t)32, 32);
 
     rtw88_force_wifi_only();
 
@@ -263,7 +269,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.1.0-beta.1 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
+    IOLog("AirPortRTW: 1.1.0-beta.2 diagnostics enabled; bounded synchronous TX batching\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -273,6 +279,11 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     AirPortRTW *self = OSDynamicCast(AirPortRTW, owner);
     if (!self || self->_shutdown || !self->_diagnosticsBuffer) return;
     self->_diagnosticsSamples++;
+    if (self->_ieee80211) {
+        self->setProperty("TX_BATCH_DEFERRED_FRAMES", (uint64_t)self->_ieee80211->txBatchFrames(), 32);
+        self->setProperty("TX_BATCH_FLUSHES", (uint64_t)self->_ieee80211->txBatchFlushes(), 32);
+        self->setProperty("TX_BATCH_PENDING", (uint64_t)self->_ieee80211->txBatchPending(), 32);
+    }
     self->setProperty("RX_DEFER_QUEUED", (uint64_t)__atomic_load_n(&self->_deferredRxQueued, __ATOMIC_RELAXED), 32);
     self->setProperty("RX_DEFER_DROPPED", (uint64_t)__atomic_load_n(&self->_deferredRxDropped, __ATOMIC_RELAXED), 32);
     self->setProperty("RX_DEFER_PROCESSED", (uint64_t)self->_deferredRxProcessed, 32);
@@ -2132,7 +2143,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.1.0-beta.1)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.1.0-beta.2)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3137,6 +3148,7 @@ IOReturn AirPortRTW::handlePOWER(bool set, struct apple80211_power_data *d)
 
 SInt32 AirPortRTW::stopDMA()
 {
+    if (_ieee80211 && !_dmaStopped) _ieee80211->flushTxBatch();
     /* This callback can run with the IO80211 command gate held. Do not join
      * workers or recursively disable the interface here: they may need that
      * same gate. Fence device DMA before acknowledging the request. Rings stay
@@ -3176,6 +3188,20 @@ UInt32 AirPortRTW::getDataQueueDepth(OSObject *)
 
 IOReturn AirPortRTW::outputStart(IONetworkInterface *interface, IOOptionBits options)
 {
+    if (interface != _netif || !getCommandGate())
+        return super::outputStart(interface, options);
+    return getCommandGate()->runAction(
+        [](OSObject *owner, void *iface, void *opts, void *, void *) -> IOReturn {
+            return static_cast<AirPortRTW *>(owner)->outputStartBatched(
+                static_cast<IONetworkInterface *>(iface), (IOOptionBits)(uintptr_t)opts);
+        }, interface, (void *)(uintptr_t)options);
+}
+
+IOReturn AirPortRTW::outputStartBatched(IONetworkInterface *interface, IOOptionBits options)
+{
+    if (_shutdown || _pmTransition || _dmaStopped || !_ieee80211 || !_ieee80211->isPowered())
+        return kIOReturnNotReady;
+    RTW88TxBatchScope<RTW88IEEE80211> batch(_ieee80211);
     if (interface && interface == _netif && txGateWanted()) {
         __atomic_store_n(&_txGated, true, __ATOMIC_SEQ_CST);
         _txGateCount++;

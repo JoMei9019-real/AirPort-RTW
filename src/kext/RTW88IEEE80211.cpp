@@ -1222,6 +1222,7 @@ void RTW88IEEE80211::powerOff()
 
 void RTW88IEEE80211::powerOffGated()
 {
+    flushTxBatch();
     IOLog("rtw88: IEEE80211 powerOff\n");
     if (_parent) {
         _parent->radioPowerChanged(false);
@@ -1251,6 +1252,28 @@ void RTW88IEEE80211::handleInterrupt()
 /* ------------------------------------------------------------------ */
 /*  TX path: Ethernet → 802.11 data frame                              */
 /* ------------------------------------------------------------------ */
+
+bool RTW88IEEE80211::beginTxBatch()
+{
+    if (!_txBatchEnabled || !_powered || !_hw) return false;
+    uintptr_t empty = 0;
+    return __atomic_compare_exchange_n(&_txBatchOwner, &empty, rtw88_tx_thread_id(),
+                                       false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+void RTW88IEEE80211::flushTxBatch()
+{
+    if (!__atomic_exchange_n(&_txBatchPending, 0U, __ATOMIC_ACQ_REL)) return;
+    if (_powered && _hw && rtw88_tx_batch_flush(_hw))
+        __atomic_add_fetch(&_txBatchFlushes, 1U, __ATOMIC_RELAXED);
+}
+
+void RTW88IEEE80211::endTxBatch()
+{
+    if (__atomic_load_n(&_txBatchOwner, __ATOMIC_ACQUIRE) != rtw88_tx_thread_id()) return;
+    flushTxBatch();
+    __atomic_store_n(&_txBatchOwner, (uintptr_t)0, __ATOMIC_RELEASE);
+}
 
 UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)
 {
@@ -4645,9 +4668,25 @@ bool RTW88IEEE80211::txDataFrame(mbuf_t m)
         info->control.hw_key = _ptkConf;
 
     struct ieee80211_tx_control ctrl = { .sta = _sta };
-    _hw->ops->tx(_hw, &ctrl, skb);
+    bool submitted = true;
+    if (__atomic_load_n(&_txBatchOwner, __ATOMIC_ACQUIRE) == rtw88_tx_thread_id()) {
+        /* Only aggregation-ready STA data defers the doorbell. EAPOL always
+         * kicks, including any earlier descriptors prepared in this scope. */
+        const bool defer = _txBaActive && qos && ethertype != ETH_P_PAE &&
+            __atomic_load_n(&_txBatchPending, __ATOMIC_RELAXED) < 31U;
+        submitted = rtw88_tx_batch_write(_hw, _sta, skb, !defer) == 0;
+        if (submitted && defer) {
+            __atomic_add_fetch(&_txBatchPending, 1U, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&_txBatchFrames, 1U, __ATOMIC_RELAXED);
+        } else {
+            __atomic_store_n(&_txBatchPending, 0U, __ATOMIC_RELEASE);
+            __atomic_add_fetch(&_txBatchFlushes, 1U, __ATOMIC_RELAXED);
+        }
+    } else {
+        _hw->ops->tx(_hw, &ctrl, skb);
+    }
     mbuf_freem(m);
-    return true;
+    return submitted;
 }
 
 /* ------------------------------------------------------------------ */

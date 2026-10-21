@@ -15,7 +15,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>AirPortRTW for RTL88xx</string>
 	<key>CFBundleGetInfoString</key>
-	<string>AirPortRTW 1.1.0-beta.1 — experimental WPA2-Enterprise / 802.1X</string>
+	<string>AirPortRTW 1.1.0-beta.2 — experimental WPA2-Enterprise and bounded TX batching</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>

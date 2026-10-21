@@ -201,6 +201,7 @@ public:
     virtual UInt32 hardwareOutputQueueDepth(IO80211Interface*) override;
     virtual UInt32 getDataQueueDepth(OSObject *) override;
     virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options) override;
+    IOReturn outputStartBatched(IONetworkInterface *interface, IOOptionBits options);
     void kickGatedOutput();
     virtual SInt32 performCountryCodeOperation(IO80211Interface*, IO80211CountryCodeOp) override;
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
