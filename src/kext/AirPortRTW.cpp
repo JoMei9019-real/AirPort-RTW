@@ -24,6 +24,8 @@ extern "C" void rtw88_trigger_interrupt(void);  /* esta si es la unica con exter
 #include <sys/errno.h>                    /* EINVAL/EFAULT/ENOMEM */
 #include <libkern/version.h>              /* scan-cache bootstrap compatibility only */
 #include <net/kpi_interface.h>            /* ifnet_stat_increment_in/out */
+#include <kern/clock.h>
+#include <mach/mach_time.h>
 
 #define IOLog rtw88_candidate_log
 
@@ -110,7 +112,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.3-stability-checks");
+    setProperty("DriverBuild", "1.1.0-beta.4-roaming-foundations");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -199,6 +201,12 @@ bool AirPortRTW::start(IOService *provider)
     _ieee80211->setTxBatchEnabled(batchEnabled);
     setProperty("TX_BATCH_ENABLED", batchEnabled ? kOSBooleanTrue : kOSBooleanFalse);
     setProperty("TX_BATCH_LIMIT", (uint64_t)32, 32);
+    OSBoolean *roaming = OSDynamicCast(OSBoolean, getProperty("RoamingAssistEnabled"));
+    const bool roamingEnabled = roaming && roaming->isTrue();
+    _ieee80211->setRoamingAssistEnabled(roamingEnabled);
+    setProperty("ROAM_ASSIST_ENABLED", roamingEnabled ? kOSBooleanTrue : kOSBooleanFalse);
+    setProperty("ROAM_V_MODE", "reject-only");
+    setProperty("ROAM_R_FT_ENABLED", kOSBooleanFalse);
 
     rtw88_force_wifi_only();
 
@@ -269,7 +277,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.1.0-beta.3 diagnostics enabled; stability regression checks\n");
+    IOLog("AirPortRTW: 1.1.0-beta.4 diagnostics enabled; opt-in k/v and passive FT metadata\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -294,6 +302,20 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     if (!__atomic_load_n(&self->_pmTransition, __ATOMIC_SEQ_CST) &&
         !__atomic_load_n(&self->_dmaStopped, __ATOMIC_SEQ_CST) && self->_ieee80211 &&
         self->_ieee80211->isPowered()) {
+        uint64_t nowNs = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time(), &nowNs);
+        self->_ieee80211->roamingTick(nowNs / 1000000ULL);
+        static const char *const names[RTW88Roaming::Count] = {
+            "ROAM_AP_NEIGHBOR_REPORT", "ROAM_AP_BTM", "ROAM_AP_MOBILITY_DOMAIN",
+            "ROAM_AP_MDID", "ROAM_AP_FT_POLICY", "ROAM_AP_FT_AKMS",
+            "ROAM_K_REQUEST_SUBMITTED", "ROAM_K_REQUEST_FAILED", "ROAM_K_RESPONSE_RX",
+            "ROAM_K_RESPONSE_INVALID", "ROAM_K_RESPONSE_TIMEOUT", "ROAM_K_NEIGHBOR_COUNT",
+            "ROAM_K_NEIGHBOR_TRUNCATED", "ROAM_V_REQUEST_RX", "ROAM_V_REJECT_SUBMITTED",
+            "ROAM_V_RESPONSE_FAILED", "ROAM_V_REQUEST_INVALID", "ROAM_V_RATE_LIMITED",
+            "ROAM_V_CANDIDATE_COUNT", "ROAM_V_LAST_MODE", "ROAM_V_DISASSOC_TIMER_TBTT"
+        };
+        for (unsigned i = 0; i < RTW88Roaming::Count; ++i)
+            self->setProperty(names[i], (uint64_t)self->_ieee80211->roamingStat(i), 32);
         unsigned state = self->_ieee80211->rawState();
         bool visible = self->_ieee80211->associatedVisible();
         bool agg = self->_ieee80211->txAggregationActive();
@@ -2143,7 +2165,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.1.0-beta.3)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.1.0-beta.4)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));

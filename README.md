@@ -1,5 +1,15 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 4: experimental 802.11k/v/r foundations
+
+Beta 4 adds opt-in 802.11k Neighbor Report requests and a bounded response cache,
+reject-only 802.11v BSS Transition Management handling, and passive 802.11r
+Mobility Domain / FT-AKM metadata. It does **not** add automatic AP switching,
+802.11r Fast Transition, PMF or WPA3. Active k/v operations default to **off**;
+the initial active scope is internal WPA2-Personal/CCMP only.
+See [Beta 4 scope, enable switch and test plan](BETA_1_1_0_4.md).
+Previous Enterprise, TX batching and stability checks remain; `main` is unchanged.
+
 ## 1.1.0 Beta 3: stability regression checks
 
 Beta 3 retains Beta 2's runtime behavior and adds executable workqueue/scan/RX

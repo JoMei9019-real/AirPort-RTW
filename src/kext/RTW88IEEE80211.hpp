@@ -18,6 +18,7 @@
 #include <sys/mbuf.h>
 #include <net/ethernet.h>
 #include <kern/thread_call.h>
+#include "RTW88Roaming.hpp"
 
 /* Opaque C driver handle */
 struct rtw_dev;
@@ -101,6 +102,7 @@ public:
     /* true transfers skb ownership to a bounded asynchronous RX queue. */
     virtual bool deferRxFrame(struct sk_buff *skb) { (void)skb; return false; }
     virtual bool rxProcessingDeferred() const { return false; }
+    virtual bool roamingActionsAllowed() const { return false; }
     virtual void setRxQueueEnabled(bool enabled) { (void)enabled; }
     virtual void radioPowerChanged(bool powered) { (void)powered; }
     /* Optional native 802.11 action-frame sink for AWDL/P2P controllers. */
@@ -244,6 +246,12 @@ public:
     uint32_t scanVisited5GHz() const { return _scanVisited5GHz; }
     uint32_t scanCacheCount() const { return _lastScanCacheCount; }
     uint32_t scanGeneration() const { return _scanGeneration; }
+    void setRoamingAssistEnabled(bool enabled) { _roamingAssistEnabled = enabled; }
+    void roamingTick(uint64_t nowMs);
+    uint32_t roamingStat(unsigned slot) const {
+        return slot < RTW88Roaming::Count ?
+            __atomic_load_n(&_roamingStats[slot], __ATOMIC_RELAXED) : 0;
+    }
 
     void setEventDelegate(RTW88EventDelegate *d) { _delegate = d; }
     void setRxDelegate(RTW88RxDelegate *d) { _parent = d; }
@@ -259,6 +267,10 @@ private:
     void      processRxData(struct sk_buff *skb);
     void      processScanResult(struct sk_buff *skb);
     void      processAssocResponse(struct sk_buff *skb);
+    void resetRoamingState();
+    bool roamingActionsReady() const;
+    bool sendRoamingAction(const uint8_t *body, uint32_t length);
+    void handleRoamingAction(const uint8_t *frame, uint32_t length, uint64_t nowMs);
 
     void      doAuthenticate();
     void      cancelAuthentication();
@@ -486,6 +498,10 @@ private:
     bool _reorderTimerArmed = false; // accessed only on the RX workloop
 
     /* RSSI tracking */
+    // Session/cache accessed on the controller RX workloop. No new worker/timer.
+    RTW88Roaming::Session _roaming;
+    bool _roamingAssistEnabled = false, _roamingCapsValid = false;
+    uint32_t _roamingStats[RTW88Roaming::Count] = {};
     int      _rssi     = -100;
 
     /* Diagnostics: periodic logging of RX activity during scan */

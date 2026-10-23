@@ -21,6 +21,7 @@ jobs:
           python3 tests/check_tx_batch.py
           python3 tests/check_workqueue.py
           python3 tests/check_scan_rx.py
+          python3 tests/check_roaming.py
           python3 tests/check_stack_budget.py --self-test
       - name: Bootstrap dependencies
         run: ./scripts/bootstrap-deps.sh
@@ -34,8 +35,10 @@ jobs:
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
-          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.3" in p["CFBundleGetInfoString"]'
-          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.3-stability-checks"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.4" in p["CFBundleGetInfoString"]'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.4-roaming-foundations"
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_K_REQUEST_SUBMITTED"
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_R_FT_ENABLED"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "TX_BATCH_DEFERRED_FRAMES"
           nm build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -E ' [SD] _rtw8814a_hw_spec$'
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "rtw8814a_fw.bin"
@@ -52,7 +55,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-1.1.0-beta.3
+          name: AirPortRTW-1.1.0-beta.4
           path: |
             build/out/AirPortRTW.kext.zip
             build/out/AirPortRTW.kext.zip.sha256

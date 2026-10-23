@@ -115,6 +115,11 @@ public:
     static void deferredRxReady(OSObject *owner, IOInterruptEventSource *source, int count);
     bool deferRxFrame(struct sk_buff *skb) override;
     bool rxProcessingDeferred() const override { return true; }
+    bool roamingActionsAllowed() const override {
+        return !__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE);
+    }
     void setRxQueueEnabled(bool enabled) override;
     void radioPowerChanged(bool powered) override;
     /* IOService */

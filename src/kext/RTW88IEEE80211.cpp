@@ -14,6 +14,8 @@
 #include <sys/mbuf.h>
 #include <string.h>
 #include <sys/random.h>
+#include <kern/clock.h>
+#include <mach/mach_time.h>
 
 /* Debug stage checkpoint — logs message only (no sleep). */
 #define RTW88_STAGE(fmt, ...) IOLog("rtw88: ---- STAGE: " fmt " ----\n", ##__VA_ARGS__)
@@ -695,6 +697,7 @@ void RTW88IEEE80211::free()
 
 void RTW88IEEE80211::clearKeys()
 {
+    resetRoamingState();
     if (_powered && _hw && _hw->ops && _hw->ops->set_key) {
         if (_ptkConf)
             _hw->ops->set_key(_hw, DISABLE_KEY, _vif, _sta, _ptkConf);
@@ -1448,6 +1451,11 @@ void RTW88IEEE80211::processRxMgmt(struct sk_buff *skb)
         break;
 
     case 0x00D0: /* action */
+        {
+            uint64_t ns = 0;
+            absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+            handleRoamingAction(skb->data, skb->len, ns / 1000000ULL);
+        }
         /* AWDL/P2P action frames are meaningful even while the infrastructure
          * STA is not associated. Give the native virtual interface a copy
          * before handling infrastructure BlockAck actions locally. */
@@ -3324,6 +3332,13 @@ bool RTW88IEEE80211::buildAssocReq(uint8_t *buf, uint32_t *len)
     uint8_t *body = buf + sizeof(*hdr);
     /* Capability: ESS, Short Preamble, and Privacy for encrypted APs. */
     uint16_t cap = 0x0431;
+    RTW88Roaming::Capabilities roamCaps;
+    const bool requestRrm = _roamingAssistEnabled && _wpa2 &&
+        !_externalSupplicant && !_enterprise &&
+        _targetBSS.cipher == WLAN_CIPHER_SUITE_CCMP &&
+        RTW88Roaming::capabilities(_targetBSS.ies, _targetBSS.ies_len, roamCaps) &&
+        roamCaps.neighborReport && !roamCaps.pmfRequired;
+    if (requestRrm) cap |= 0x1000; // Radio Measurement capability
     if (_wpa2)
         cap |= 0x0010;
     body[0] = (uint8_t)(cap & 0xff);
@@ -3444,6 +3459,13 @@ bool RTW88IEEE80211::buildAssocReq(uint8_t *buf, uint32_t *len)
     };
     memcpy(body, wme_info, sizeof(wme_info));
     body += sizeof(wme_info);
+    if (requestRrm) {
+        // Only Neighbor Report, no beacon/link measurement capabilities.
+        static const uint8_t rrm[] = {70, 5, 2, 0, 0, 0, 0};
+        memcpy(body, rrm, sizeof(rrm)); body += sizeof(rrm);
+    }
+    // Do not add BTM Extended Capabilities, MDIE, FTIE or FT AKMs: an
+    // always-reject BTM handler and passive FT metadata are not active roaming.
 
     /* Advertise the cipher choice we actually implement: pairwise CCMP/AES
      * with the AP's selected group cipher.  Mixed TKIP+AES APs often list
@@ -4123,6 +4145,132 @@ bool RTW88IEEE80211::txMgmtFrame(const uint8_t *frame, uint32_t len)
 /*      then auto-generates the RX BlockAck and de-aggregates for us     */
 /*      (rtw88's ampdu_action is a no-op for RX_START/STOP).             */
 /* ------------------------------------------------------------------ */
+
+void RTW88IEEE80211::resetRoamingState()
+{
+    _roaming.reset();
+    _roamingCapsValid = false;
+    for (unsigned i = RTW88Roaming::APNeighbor; i <= RTW88Roaming::APFtAkms; ++i)
+        __atomic_store_n(&_roamingStats[i], 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&_roamingStats[RTW88Roaming::NeighborCount], 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&_roamingStats[RTW88Roaming::NeighborTruncated], 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&_roamingStats[RTW88Roaming::BtmCandidates], 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&_roamingStats[RTW88Roaming::BtmMode], 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&_roamingStats[RTW88Roaming::BtmDisassocTimer], 0U, __ATOMIC_RELAXED);
+}
+
+bool RTW88IEEE80211::roamingActionsReady() const
+{
+    return _roamingAssistEnabled && _roamingCapsValid &&
+        _parent && _parent->roamingActionsAllowed() && _powered &&
+        _associatedVisible && _state == RTW88_STATE_CONNECTED && !_awdlOffChannel &&
+        !authenticationCancelled() && _wpa2 && !_enterprise && !_externalSupplicant &&
+        _targetBSS.cipher == WLAN_CIPHER_SUITE_CCMP &&
+        _ptkConf && _gtkConf && !_roaming.ap.pmfRequired;
+}
+
+bool RTW88IEEE80211::sendRoamingAction(const uint8_t *body, uint32_t length)
+{
+    if (!roamingActionsReady() || !body || !length || length > 64) return false;
+    uint8_t frame[24 + 64] = {};
+    frame[0] = 0xd0;
+    memcpy(frame + 4, _targetBSS.bssid, 6);
+    memcpy(frame + 10, _macAddr, 6);
+    memcpy(frame + 16, _targetBSS.bssid, 6);
+    uint16_t seq = uint16_t((_txSeq++ & 4095) << 4);
+    frame[22] = uint8_t(seq); frame[23] = uint8_t(seq >> 8);
+    memcpy(frame + 24, body, length);
+    return txMgmtFrame(frame, 24 + length);
+}
+
+void RTW88IEEE80211::roamingTick(uint64_t nowMs)
+{
+    // Called by the existing diagnostic timer while its PM hardware fence is
+    // held, on the controller/RX workloop. Never create another timer/worker.
+    if (!_powered || !_associatedVisible || _state != RTW88_STATE_CONNECTED)
+        return;
+    _roamingCapsValid = RTW88Roaming::capabilities(
+        _targetBSS.ies, _targetBSS.ies_len, _roaming.ap);
+    const uint32_t values[] = {uint32_t(_roaming.ap.neighborReport),
+        uint32_t(_roaming.ap.btm), uint32_t(_roaming.ap.mobilityDomain),
+        _roaming.ap.mdid, _roaming.ap.ftPolicy, _roaming.ap.ftAkms};
+    for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i)
+        __atomic_store_n(&_roamingStats[i], values[i], __ATOMIC_RELAXED);
+    const bool pending = _roaming.pending;
+    _roaming.expire(nowMs);
+    if (pending && !_roaming.pending)
+        __atomic_add_fetch(&_roamingStats[RTW88Roaming::ResponseTimeout], 1U, __ATOMIC_RELAXED);
+    __atomic_store_n(&_roamingStats[RTW88Roaming::NeighborCount],
+                     uint32_t(_roaming.neighbors.count), __ATOMIC_RELAXED);
+    if (!_roaming.neighbors.count)
+        __atomic_store_n(&_roamingStats[RTW88Roaming::NeighborTruncated], 0U, __ATOMIC_RELAXED);
+    if (!roamingActionsReady() || !_roaming.ap.neighborReport || _roaming.requested)
+        return;
+    _roaming.requested = true; // Bounded: one attempt per association, no retries.
+    if (++_roaming.tokenCounter == 0) ++_roaming.tokenCounter;
+    uint8_t body[37] = {};
+    const size_t length = RTW88Roaming::neighborRequest(body, sizeof(body),
+        _roaming.tokenCounter, reinterpret_cast<const uint8_t *>(_targetBSS.ssid),
+        _targetBSS.ssid_len);
+    if (length && sendRoamingAction(body, uint32_t(length))) {
+        _roaming.pending = true;
+        _roaming.pendingToken = _roaming.tokenCounter;
+        _roaming.requestMs = nowMs;
+        __atomic_add_fetch(&_roamingStats[RTW88Roaming::RequestTx], 1U, __ATOMIC_RELAXED);
+    } else {
+        __atomic_add_fetch(&_roamingStats[RTW88Roaming::RequestTxFail], 1U, __ATOMIC_RELAXED);
+    }
+}
+
+void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
+                                       uint64_t nowMs)
+{
+    if (!roamingActionsReady() || !RTW88Roaming::actionFromAP(
+            frame, length, _macAddr, _targetBSS.bssid)) return;
+    const uint8_t *body = frame + 24;
+    const size_t size = length - 24;
+    if (body[0] == 5 && body[1] == 5) {
+        RTW88Roaming::Candidates candidates;
+        const bool timely = _roaming.pending && nowMs >= _roaming.requestMs &&
+            nowMs - _roaming.requestMs < RTW88Roaming::ResponseTimeoutMs;
+        if (!_roaming.ap.neighborReport || !timely ||
+            !RTW88Roaming::neighborResponse(body, size, _roaming.pendingToken, candidates)) {
+            __atomic_add_fetch(&_roamingStats[RTW88Roaming::ResponseInvalid], 1U, __ATOMIC_RELAXED);
+            return;
+        }
+        _roaming.pending = false;
+        _roaming.neighbors = candidates; _roaming.neighborsMs = nowMs;
+        __atomic_add_fetch(&_roamingStats[RTW88Roaming::ResponseRx], 1U, __ATOMIC_RELAXED);
+        __atomic_store_n(&_roamingStats[RTW88Roaming::NeighborCount],
+                         uint32_t(candidates.count), __ATOMIC_RELAXED);
+        __atomic_store_n(&_roamingStats[RTW88Roaming::NeighborTruncated],
+                         uint32_t(candidates.truncated), __ATOMIC_RELAXED);
+    } else if (body[0] == 10 && body[1] == 7) {
+        RTW88Roaming::BtmRequest request;
+        if (!_roaming.ap.btm || !RTW88Roaming::btmRequest(body, size, request)) {
+            __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmInvalid], 1U, __ATOMIC_RELAXED);
+            return;
+        }
+        __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmRx], 1U, __ATOMIC_RELAXED);
+        __atomic_store_n(&_roamingStats[RTW88Roaming::BtmCandidates],
+                         uint32_t(request.candidates.count), __ATOMIC_RELAXED);
+        __atomic_store_n(&_roamingStats[RTW88Roaming::BtmMode], uint32_t(request.mode), __ATOMIC_RELAXED);
+        __atomic_store_n(&_roamingStats[RTW88Roaming::BtmDisassocTimer],
+                         uint32_t(request.disassociationTimer), __ATOMIC_RELAXED);
+        if (_roaming.btmReplied && (nowMs < _roaming.lastBtmMs ||
+                                   nowMs - _roaming.lastBtmMs < 1000)) {
+            __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmRateLimited], 1U, __ATOMIC_RELAXED);
+            return;
+        }
+        _roaming.btmReplied = true; _roaming.lastBtmMs = nowMs;
+        uint8_t response[5] = {};
+        const size_t size = RTW88Roaming::btmReject(response, sizeof(response), request.token);
+        const bool sent = sendRoamingAction(response, uint32_t(size));
+        __atomic_add_fetch(&_roamingStats[sent ? RTW88Roaming::BtmRejectTx :
+                                                RTW88Roaming::BtmTxFail], 1U, __ATOMIC_RELAXED);
+        // Never accept, disconnect, channel-hop, rekey, or obey a remote URL.
+    }
+}
 
 void RTW88IEEE80211::sendAddbaRequest(uint8_t tid)
 {

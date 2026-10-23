@@ -98,6 +98,7 @@ struct RTW88IEEE80211 {
  bool sendEAPOLKey(int step,const uint8_t*,bool,bool,bool){return step!=4 || m4Submit;}
  void handleEAPOL(const uint8_t*,uint32_t);
  void startTxAggregation(){}
+ void resetRoamingState(){}
  bool txDataFrame(mbuf_t p){++tx;delete p;return true;}
  IOReturn installEnterprisePMKGated(const uint8_t*,uint32_t,const uint8_t*);
  IOReturn cmdInstallExternalKey(bool,uint8_t,uint32_t,const uint8_t*,uint8_t);
