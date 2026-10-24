@@ -18,7 +18,7 @@ uint64_t ticks=1000000000;uint64_t mach_absolute_time(){return ticks;}
 void absolutetime_to_nanoseconds(uint64_t t,uint64_t *n){*n=t;}
 ''')
 pre=pre.replace('int hw_value=6,center_freq=2437,flags=0;', 'int hw_value=6,center_freq=2437,flags=0,band=0;')
-pre=pre.replace('int n_channels=1;Channel channels[1];','int n_channels=2,band=0;Channel channels[2]={{6,2437,0,0},{11,2462,0,0}};')
+pre=pre.replace('int n_channels=1;Channel channels[1];','int n_channels=4,band=0;Channel channels[4]={{6,2437,0,0},{11,2462,1,0},{36,5180,0,1},{116,5580,6,1}};')
 pre=pre.replace('struct Hw{Wiphy*wiphy;};',r'''
 struct ieee80211_scan_request {struct {Channel **channels=nullptr;int n_channels=0;} req;};
 struct Hw;
@@ -32,17 +32,18 @@ void thread_call_enter(void*){++queued;}
 void clock_interval_to_deadline(unsigned n,int,uint64_t *d){*d=n;}
 void IOSleep(unsigned){}
 void rtw88_sw_scan_start(Hw*,void*){}
-void rtw88_sw_scan_switch_channel(Hw *h){assert(h->conf.chandef.chan->hw_value==6);++switches;}
+void rtw88_sw_scan_switch_channel(Hw *h){assert(h->conf.chandef.chan->hw_value!=11);++switches;}
 void rtw88_sw_scan_complete(Hw*,void*){}
 struct Timer {void wakeAtTime(uint64_t){}};
 ''')
 pre=pre.replace('void roamTrace(const char*,uint32_t=0){}',r'''
- const char *_roamStage="idle";uint64_t _roamStageMs=0;uint32_t _roamDataRx=0;
+ const char *_roamStage="idle";uint64_t _roamStageMs=0,_roamScanCompletedMs=0;uint32_t _roamDataRx=0;
  void roamTrace(const char*,uint32_t=0);
  unsigned roamingStat(unsigned i)const{return _roamingStats[i];}
  unsigned roamSwitchResult()const{return _roamSwitchResult;}
  void copyRoamDiagnostics(char*,uint32_t,uint64_t)const;
  IOReturn refreshRoamNeighbors(uint64_t);IOReturn scanRoamTarget(const uint8_t*,uint64_t);
+ IOReturn startRoamScan(uint16_t,uint64_t);IOReturn discoverRoamAPs(uint64_t);IOReturn selectRoamTarget(uint64_t);
  IOReturn cmdScan(uint16_t=0);void runManualScan();
  int _rssi=-45;uint32_t _scanGeneration=0,_lastScanCacheCount=0,_lastScanChannelCount=0;
  uint32_t _scanVisited2GHz=0,_scanVisited5GHz=0,_timeoutMs=0,_rxFrameCount=0;
@@ -50,12 +51,12 @@ pre=pre.replace('void roamTrace(const char*,uint32_t=0){}',r'''
  bool _manualScanAbort=false,_manualScanOnHomeChannel=false,_manualScanFallbackLogged=false;
  ieee80211_scan_request *_scanRequest=nullptr;Channel *_scanRequestChannels[256]={},*_manualScanChannels[256]={};
  void *_manualScanTC=this,*_vif=this;Timer timer;Timer *_timer=&timer;
- void restoreConnectedChannel(){++restores;}void txNullFunc(bool x){ps.push_back(x);}void txProbeRequest(){++probes;}
+ void restoreConnectedChannel(){++restores;}void txNullFunc(bool x){ps.push_back(x);}void txProbeRequest(){assert(!(_hw->conf.chandef.chan->flags&6));++probes;}
  void scanDone(bool aborted){assert(_scanReturnState==5);restoreConnectedChannel();txNullFunc(false);_state=5;_scanReturnState=0;_roamScanResult=aborted?3:2;_roamScanActive=false;}
 ''')
 # Real scanner uses RTW88State only as a state-value type.
 pre=pre.replace('using IOReturn=int;', 'using IOReturn=int;using RTW88State=int;')
-pre=pre.replace('uint64_t observedMs=1000;', 'uint32_t last_seen_scan=0;uint64_t observedMs=1000;')
+pre=pre.replace('uint64_t observedMs=1000,', 'uint32_t last_seen_scan=0;uint64_t observedMs=1000,')
 pre=pre.replace('uint8_t ssid_len=4;', 'uint8_t ssid_len=4,channel=6;')
 pre=re.sub(r'\bChannel\b','ieee80211_channel',pre)
 pre=re.sub(r'\bBand\b','ieee80211_supported_band',pre)
@@ -63,6 +64,8 @@ methods=ns['methods']+''.join(method(x) for x in (
  'void RTW88IEEE80211::roamTrace(', 'bool RTW88IEEE80211::sendRoamingAction(',
  'void RTW88IEEE80211::roamingTick(', 'void RTW88IEEE80211::handleRoamingAction(',
  'IOReturn RTW88IEEE80211::refreshRoamNeighbors(', 'IOReturn RTW88IEEE80211::scanRoamTarget(',
+ 'IOReturn RTW88IEEE80211::startRoamScan(', 'IOReturn RTW88IEEE80211::discoverRoamAPs(',
+ 'IOReturn RTW88IEEE80211::selectRoamTarget(',
  'IOReturn RTW88IEEE80211::cmdScan(', 'void RTW88IEEE80211::runManualScan(',
  'void RTW88IEEE80211::copyRoamDiagnostics('))
 cases=r'''
@@ -81,13 +84,17 @@ int main() {
  b.handleRoamingAction(response.data(),response.size(),1100);assert(b._roamLastResponseCount==1);
  assert(b.refreshRoamNeighbors(2000)==kIOReturnBusy&&b._roamReason==RefreshLimited);
  b.roamingTick(32000);assert(!b._roaming.neighbors.count&&b._roamLastResponseCount==1);
- assert(b.checkRoam(candidate.bssid,32000)==kIOReturnNotFound&&b._roamReason==NeighborStale);
+ assert(b.checkRoam(candidate.bssid,32000)==kIOReturnNotFound&&b._roamReason==ScanStale);
  assert(b.refreshRoamNeighbors(32001)==0&&b._roaming.pending); // no Wi-Fi toggle
  response[26]=b._roaming.pendingToken;b.handleRoamingAction(response.data(),response.size(),32002);
  candidate.observedMs=1;
  assert(b.checkRoam(candidate.bssid,32003)==kIOReturnNotFound&&b._roamReason==ScanStale);
- band.channels[0].flags=IEEE80211_CHAN_RADAR;
- assert(b.scanRoamTarget(candidate.bssid,32004)==kIOReturnNotFound&&b._roamReason==ChannelDFS&&!queued);
+ band.channels[0].flags=IEEE80211_CHAN_RADAR|IEEE80211_CHAN_NO_IR;
+ candidate.observedMs=32002;
+ assert(b.checkRoam(candidate.bssid,32004)==kIOReturnNotFound&&b._roamReason==BeaconMissing&&!queued);
+ candidate.beaconObservedMs=32002;assert(b.checkRoam(candidate.bssid,32004)==0);
+ band.channels[0].flags=IEEE80211_CHAN_DISABLED;
+ assert(b.scanRoamTarget(candidate.bssid,32004)==kIOReturnNotFound&&b._roamReason==ChannelDisabled&&!queued);
  band.channels[0].flags=0;
  assert(b.cmdScan()==kIOReturnBusy&&!queued); // ordinary connected scans still prohibited
  assert(b.scanRoamTarget(candidate.bssid,32005)==0&&b.roamScanActive()&&queued==1);
@@ -112,8 +119,39 @@ int main() {
  assert(b.scanRoamTarget(candidate.bssid,38000)==0&&b._roamScanWorkerPending);
  b._manualScanAbort=true;b.runManualScan();
  assert(!b._roamScanWorkerPending&&!b.roamScanActive()&&b._roamScanResult==3&&switches==1&&b._state==5);
+ // Real discovery plan skips disabled channels, listens on DFS without probes,
+ // and restores the home channel between slots. No Neighbor Report required.
+ b._roaming.neighbors={};b._roaming.neighborsMs=0;
+ unsigned beforeProbes=probes,beforeSwitches=switches;
+ assert(b.discoverRoamAPs(50000)==0&&b._manualScanChannelCount==3);
+ b.runManualScan();assert(switches-beforeSwitches==3&&probes-beforeProbes==2&&!b._roamScanWorkerPending);
+ assert(b._state==5&&band.channels[3].flags==6&&band.channels[1].flags==1);
+ candidate.observedMs=50000;assert(b.checkRoam(candidate.bssid,50001)==0&&b._roamTargetFromScan);
+ RTW88BSS five=candidate;five.bssid[5]=99;five.channel=36;five.freq=5180;five.rssi=-65;
+ candidate.next=&five;b._rssi=-45;b._targetBSS.channel=6;
+ assert(b.selectRoamTarget(50002)==0&&!memcmp(b._roamRecommended,five.bssid,6));
+ five.rssi=-74;assert(b.selectRoamTarget(50003)==0&&!memcmp(b._roamRecommended,b._targetBSS.bssid,6));
+ b._targetBSS.channel=36;b._rssi=-75;
+ assert(b.selectRoamTarget(50004)==0&&!memcmp(b._roamRecommended,b._targetBSS.bssid,6));
+ b._rssi=-79;assert(b.selectRoamTarget(50005)==0&&!memcmp(b._roamRecommended,candidate.bssid,6));
+ b._rssi=-65;five.rssi=-62;assert(b.selectRoamTarget(50006)==0&&b._roamReason==KeepCurrent);
+ five.rssi=-58;assert(b.selectRoamTarget(50007)==0&&!memcmp(b._roamRecommended,five.bssid,6));
+ five.channel=116;five.freq=5580;five.beaconObservedMs=0;
+ assert(b.checkRoam(five.bssid,50008)==kIOReturnNotFound&&b._roamReason==BeaconMissing);
+ five.beaconObservedMs=50000;assert(b.checkRoam(five.bssid,50009)==0);
+ five.capabilities=0x12;assert(b.checkRoam(five.bssid,50010)==kIOReturnNotFound&&b._roamReason==BeaconMissing);five.capabilities=0x11;
+ assert(b.checkRoam(five.bssid,80000)==kIOReturnNotFound&&b._roamReason==ScanStale);
+ uint8_t ap[]={2,3,4,5,6,7};
+ assert(beaconProof(0x80,0,0x11,116,5580,true,ap,ap));
+ assert(!beaconProof(0x50,0,0x11,116,5580,true,ap,ap));
+ assert(!beaconProof(0x80,1,0x11,116,5580,true,ap,ap));
+ assert(!beaconProof(0x80,0,0x12,116,5580,true,ap,ap));
+ assert(!beaconProof(0x80,0,0x11,116,5500,true,ap,ap));
+ assert(!beaconProof(0x80,0,0x11,116,5580,false,ap,ap));
+ assert(!beaconProof(0x4080,0,0x11,116,5580,true,ap,ap));
+ b.copyRoamDiagnostics(out,sizeof(out),50010);assert(strstr(out,"ap[0]=")&&strstr(out,"recommended_bssid="));
  free(b._scanRequest);
- puts("PASS: real refresh after TTL, exact reject reasons, bounded one-channel scan, PS/home restore calls, PM guards, snapshots and runtime log levels");
+ puts("PASS: refresh/scan diagnostics, no-neighbor RF targets, bounded discovery, passive DFS/beacon guards, disabled channels, 5 GHz priority/hysteresis, fallback and snapshots");
 }
 '''
 controller=(root/'src/kext/AirPortRTW.cpp').read_text()

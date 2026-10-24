@@ -4,6 +4,25 @@
 namespace RTW88RoamSwitch {
 constexpr uint64_t FreshMs=30000, AttemptMs=15000, CooldownMs=60000;
 constexpr uint64_t RefreshIntervalMs=5000, ScanIntervalMs=5000;
+constexpr uint16_t DiscoveryChannel=0xffff;
+constexpr unsigned MaxDiscoveryChannels=64;
+constexpr int Prefer5GHzRSSI=-70, Keep5GHzRSSI=-77, MinimumRSSI=-80, SameBandGain=6;
+inline bool band5(unsigned frequency) { return frequency>=5000 && frequency<=5900; }
+// Compare bands by suitability first, RSSI only within a class. A weak 5 GHz
+// link must not outrank usable 2.4 GHz merely because of the frequency band.
+inline int rank(unsigned frequency,int rssi,bool current5=false) {
+    if(rssi<MinimumRSSI || rssi>=0)return -10000;
+    if(band5(frequency) && rssi>=(current5?Keep5GHzRSSI:Prefer5GHzRSSI))return 1000+rssi;
+    if(frequency>=2400 && frequency<=2500)return 500+rssi;
+    return band5(frequency)?rssi:-10000;
+}
+inline bool beaconProof(uint16_t fc,uint16_t sequence,uint32_t caps,unsigned channel,
+                        unsigned frequency,bool complete,const uint8_t *sender,const uint8_t *bssid) {
+    const unsigned expected=channel==14?2484:channel<=13?2407+5*channel:5000+5*channel;
+    return (fc&0xc7ff)==0x0080 && !(sequence&15) && (caps&3)==1 && channel &&
+        complete && frequency==expected && sender && bssid &&
+        !memcmp(sender,bssid,6) && RTW88Roaming::unicast(bssid);
+}
 enum Reason : unsigned {
     Ready, Disabled, PowerBlocked, NotConnected, SecurityMode, KeysMissing,
     AuthBusy, InvalidTarget, CurrentTarget, SwitchBusy, Cooldown,
@@ -11,7 +30,7 @@ enum Reason : unsigned {
     ChannelMismatch, SignalWeak, ScanStale, TargetSecurity, ChannelMissing,
     ChannelDisabled, ChannelNoIR, ChannelDFS, CurrentSecurity, RefreshPending,
     RefreshLimited, APNoNeighbor, RefreshTxFailed, ScanBusy, ScanLimited,
-    ScanStartFailed
+    ScanStartFailed, BeaconMissing, NoCandidate, KeepCurrent
 };
 inline const char *reasonName(unsigned reason) {
     static const char *const names[] = {
@@ -24,7 +43,8 @@ inline const char *reasonName(unsigned reason) {
         "channel-not-in-regulatory-table", "channel-disabled", "channel-no-ir",
         "dfs-channel-excluded", "current-security-incompatible", "neighbor-request-pending",
         "neighbor-request-rate-limited", "ap-no-neighbor-report", "neighbor-request-tx-failed",
-        "scan-busy", "scan-rate-limited", "scan-start-failed"
+        "scan-busy", "scan-rate-limited", "scan-start-failed",
+        "fresh-ap-beacon-required", "no-eligible-candidate", "current-ap-preferred"
     };
     return reason < sizeof(names)/sizeof(names[0]) ? names[reason] : "unknown";
 }

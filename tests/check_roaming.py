@@ -65,7 +65,7 @@ struct RTW88IEEE80211 {
  void *_ptkConf=this,*_gtkConf=this;
  uint8_t _macAddr[6]={2,1,2,3,4,5};uint16_t _txSeq=0;
  struct {
-  uint8_t bssid[6]={2,6,7,8,9,10};char ssid[33]="Test";uint8_t ssid_len=4;
+  uint8_t bssid[6]={2,6,7,8,9,10};char ssid[33]="Test";uint8_t ssid_len=4,channel=6;
   uint32_t cipher=WLAN_CIPHER_SUITE_CCMP;uint8_t ies[512]={};uint16_t ies_len=0;
  } _targetBSS;
  bool txSucceeds=true;std::vector<std::vector<uint8_t>> submitted;

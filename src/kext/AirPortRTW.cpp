@@ -114,7 +114,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.6-roam-diagnostics");
+    setProperty("DriverBuild", "1.1.0-beta.7-band-priority");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -283,7 +283,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.1.0-beta.6 runtime roaming diagnostics enabled\n");
+    IOLog("AirPortRTW: 1.1.0-beta.7 scan candidates, band priority and passive DFS discovery enabled\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -416,7 +416,7 @@ IOReturn AirPortRTW::setProperties(OSObject *properties)
     auto *name=dict?OSDynamicCast(OSString,dict->getObject("RoamCommand")):nullptr;
     const char *command=name?name->getCStringNoCopy():nullptr;
     unsigned operation=target&&!command?3:0;
-    static const char *const commands[]={"refresh","check","switch","scan","snapshot","log-off","log-normal","log-verbose"};
+    static const char *const commands[]={"refresh","check","switch","scan","snapshot","log-off","log-normal","log-verbose","discover","select"};
     for(unsigned i=0;command && i<sizeof(commands)/sizeof(commands[0]);++i)
         if(!strcmp(command,commands[i]))operation=i+1;
     if(!operation)return kIOReturnUnsupported;
@@ -432,7 +432,7 @@ IOReturn AirPortRTW::setProperties(OSObject *properties)
         if(self->_shutdown || !self->_ieee80211)return kIOReturnNotReady;
         uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
         IOReturn result=kIOReturnSuccess;
-        if(request->operation>=6) {
+        if(request->operation>=6 && request->operation<=8) {
             self->_ieee80211->setRoamLogLevel(request->operation-6);
             self->_ieee80211->roamTrace("log-level-changed",request->operation-6);
         } else if(request->operation!=5) {
@@ -445,6 +445,8 @@ IOReturn AirPortRTW::setProperties(OSObject *properties)
                 case 2: result=self->_ieee80211->checkRoam(request->bssid,ns/1000000ULL);break;
                 case 3: result=self->_ieee80211->requestRoam(request->bssid,ns/1000000ULL);break;
                 case 4: result=self->_ieee80211->scanRoamTarget(request->bssid,ns/1000000ULL);break;
+                case 9: result=self->_ieee80211->discoverRoamAPs(ns/1000000ULL);break;
+                case 10: result=self->_ieee80211->selectRoamTarget(ns/1000000ULL);break;
             }
             __atomic_store_n(&self->_diagnosticsInHardware,false,__ATOMIC_SEQ_CST);
         }

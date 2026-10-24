@@ -137,6 +137,7 @@ struct RTW88BSS {
     uint32_t akm;
     uint32_t last_seen_scan;
     uint64_t observedMs;
+    uint64_t beaconObservedMs; // real, complete ESS beacon on matching RX frequency
     /* Final: a beacon from this BSSID carried a non-empty, non-zero SSID, so
      * the AP is not hidden even if a later frame has a blank SSID element. */
     uint8_t  beacon_named;
@@ -254,6 +255,8 @@ public:
     IOReturn checkRoam(const uint8_t *bssid, uint64_t nowMs);
     IOReturn refreshRoamNeighbors(uint64_t nowMs);
     IOReturn scanRoamTarget(const uint8_t *bssid, uint64_t nowMs);
+    IOReturn discoverRoamAPs(uint64_t nowMs);
+    IOReturn selectRoamTarget(uint64_t nowMs);
     void copyRoamDiagnostics(char *out, uint32_t capacity, uint64_t nowMs) const;
     void setRoamLogLevel(unsigned level) { __atomic_store_n(&_roamLogLevel, level, __ATOMIC_RELAXED); }
     bool roamScanActive() const { return __atomic_load_n(&_roamScanActive, __ATOMIC_ACQUIRE); }
@@ -290,6 +293,10 @@ private:
     void handleRoamingAction(const uint8_t *frame, uint32_t length, uint64_t nowMs);
     IOReturn roamDecision(unsigned reason, IOReturn result);
     IOReturn validateRoam(const uint8_t *bssid, uint64_t nowMs, bool scanOnly);
+    unsigned roamBSSReason(const RTW88BSS &bss, uint64_t nowMs) const;
+    unsigned roamChannelReason(unsigned channel, unsigned frequency, uint32_t *flags = nullptr) const;
+    IOReturn roamControlReady();
+    IOReturn startRoamScan(uint16_t channel, uint64_t nowMs);
     void beginRoamTest(const uint8_t *bssid);
 
     void      doAuthenticate();
@@ -532,8 +539,11 @@ private:
     uint8_t _roamDiagTarget[6]={};
     int _roamTargetRSSI=0;
     uint32_t _roamTargetChannel=0, _roamChannelFlags=0;
+    uint8_t _roamRecommended[6]={};
+    bool _roamTargetFromScan=false;
     bool _roamScanActive=false, _roamScanWorkerPending=false;
     uint32_t _roamScanResult=0;
+    uint64_t _roamScanCompletedMs=0;
     uint32_t _roamDataRx=0;
     bool _authenticationWorkerActive=false;
     bool _roamingAssistEnabled = false, _roamingCapsValid = false;

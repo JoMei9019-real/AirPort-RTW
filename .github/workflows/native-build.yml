@@ -39,8 +39,8 @@ jobs:
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
-          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.6" in p["CFBundleGetInfoString"]; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAssistEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingSwitchEnabled"] is True'
-          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.6-roam-diagnostics"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.7" in p["CFBundleGetInfoString"]; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAssistEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingSwitchEnabled"] is True'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.7-band-priority"
           build/out/rtw88-roam --help
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_K_REQUEST_SUBMITTED"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_R_FT_ENABLED"
@@ -52,17 +52,14 @@ jobs:
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "RX_DEFER_MODE"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "STA_LINK_EVENT_TLV_BYTES"
 
-      - name: Package kext
+      - name: Stage direct-download files (no nested archive)
         run: |
-          cd build/out
-          ditto -c -k --sequesterRsrc --keepParent AirPortRTW.kext AirPortRTW.kext.zip
-          cp ../../BETA_1_1_0_6.md .
-          zip -j AirPortRTW.kext.zip rtw88-roam BETA_1_1_0_6.md
-          shasum -a 256 AirPortRTW.kext.zip > AirPortRTW.kext.zip.sha256
+          mkdir -p build/package
+          cp -R build/out/AirPortRTW.kext build/package/
+          cp build/out/rtw88-roam BETA_1_1_0_7.md build/package/
+          python3 -c 'from pathlib import Path; p=Path("build/package"); assert (p/"AirPortRTW.kext/Contents/Info.plist").is_file(); assert not any(f.suffix in (".zip", ".tar", ".gz") for f in p.rglob("*") if f.is_file())'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-1.1.0-beta.6
-          path: |
-            build/out/AirPortRTW.kext.zip
-            build/out/AirPortRTW.kext.zip.sha256
+          name: AirPortRTW-1.1.0-beta.7
+          path: build/package/

@@ -7,7 +7,7 @@
 #include <unistd.h>
 
 static io_service_t service;
-static char status[8192];
+static char status[32768];
 
 static char *string_property(CFStringRef key) {
     CFTypeRef value=IORegistryEntryCreateCFProperty(service,key,kCFAllocatorDefault,0);
@@ -24,7 +24,7 @@ static char *string_property(CFStringRef key) {
 }
 static int read_status(void) {
     char *text=string_property(CFSTR("ROAM_DIAGNOSTICS"));
-    if(!text){fprintf(stderr,"Beta 6 diagnostics unavailable; verify DriverBuild\n");return 1;}
+    if(!text){fprintf(stderr,"Roaming diagnostics unavailable; verify Beta 7 DriverBuild\n");return 1;}
     snprintf(status,sizeof(status),"%s",text);free(text);return 0;
 }
 static unsigned long long number(const char *key) {
@@ -66,6 +66,29 @@ static int parse_mac(const char *arg,UInt8 mac[6]) {
     }
     return 0;
 }
+static int field(const char *key,char *out,size_t capacity) {
+    size_t n=strlen(key);
+    for(const char *p=status;*p;) {
+        if(!strncmp(p,key,n)&&p[n]=='=') {
+            const char *value=p+n+1;size_t length=strcspn(value,"\n");
+            if(length>=capacity)return 1;
+            memcpy(out,value,length);out[length]=0;return 0;
+        }
+        p=strchr(p,'\n');if(!p)break;++p;
+    }
+    return 1;
+}
+static int aps(void) {
+    if(snapshot())return 1;
+    char *p=status;
+    while(*p) {
+        char *end=strchr(p,'\n');size_t n=end?(size_t)(end-p):strlen(p);
+        if(!strncmp(p,"ap[",3)||!strncmp(p,"aps_listed=",11)||!strncmp(p,"current_bssid=",14)||!strncmp(p,"recommended_bssid=",18))
+            printf("%.*s\n",(int)n,p);
+        if(!end)break;p=end+1;
+    }
+    return 0;
+}
 static int neighbors(void) {
     CFTypeRef value=IORegistryEntryCreateCFProperty(service,CFSTR("ROAM_K_CANDIDATES"),kCFAllocatorDefault,0);
     int found=0;
@@ -74,7 +97,7 @@ static int neighbors(void) {
         for(CFIndex i=0;i+6<=n;i+=6){printf("%02x:%02x:%02x:%02x:%02x:%02x\n",p[i],p[i+1],p[i+2],p[i+3],p[i+4],p[i+5]);found=1;}
     }
     if(value)CFRelease(value);
-    if(!found)fprintf(stderr,"No fresh candidates. Use sudo rtw88-roam --refresh; --status shows report age and last response count.\n");
+    if(!found)fprintf(stderr,"No fresh Neighbor Report candidates. Use --discover and --aps for actual scan results.\n");
     return found?0:1;
 }
 static int refresh(void) {
@@ -92,16 +115,38 @@ static int refresh(void) {
     }
     fprintf(stderr,"Refresh wait expired (12 seconds); no switch requested\n");fputs(status,stdout);return 1;
 }
-static int scan(const UInt8 mac[6]) {
-    if(command("scan",mac,1))return 1;
-    for(unsigned i=0;i<32;++i) {
+static int wait_scan(unsigned seconds) {
+    for(unsigned i=0;i<seconds*4;++i) {
         if(snapshot())return 1;
         if(!number("scan_active")&&!number("scan_worker_pending")) {
             fputs(status,stdout);return number("scan_result")==2?0:1;
         }
         usleep(250000);
     }
-    fprintf(stderr,"Target scan wait expired (8 seconds); no switch requested\n");fputs(status,stdout);return 1;
+    fprintf(stderr,"Scan wait expired (%u seconds); no switch requested\n",seconds);fputs(status,stdout);return 1;
+}
+static int scan(const UInt8 mac[6]) {
+    if(command("scan",mac,1))return 1;
+    return wait_scan(8);
+}
+static int discover(void) {
+    if(snapshot())return 1;
+    char engine[64];
+    if(!field("scan_engine",engine,sizeof(engine))&&!strcmp(engine,"roam-discovery")&&
+       number("scan_result")==2&&!number("scan_worker_pending")&&number("scan_completed_age_ms")<5000) {
+        puts("Reusing the completed discovery from the last 5 seconds");return aps();
+    }
+    if(command("discover",NULL,1)||wait_scan(30))return 1;
+    return aps();
+}
+static int best(int doRoam) {
+    if(doRoam&&discover())return 1;
+    if(command("select",NULL,1)||read_status())return 1;
+    char chosen[18],current[18];UInt8 mac[6];
+    if(field("recommended_bssid",chosen,sizeof(chosen))||field("current_bssid",current,sizeof(current))||parse_mac(chosen,mac))return 1;
+    if(!strcmp(chosen,current)){puts("Current AP is preferred; no switch requested");return 0;}
+    printf("Recommended target: %s\n",chosen);
+    return doRoam?command("switch",mac,1):0;
 }
 static int report(void) {
     if(snapshot())return 1;
@@ -136,12 +181,15 @@ static int watch(unsigned seconds) {
     return 0;
 }
 static void usage(void) {
-    puts("rtw88-roam [--neighbors | --status | --report | --watch [1..3600]]\n"
+    puts("rtw88-roam [--aps | --neighbors | --status | --report | --watch [1..3600]]\n"
+         "sudo rtw88-roam --discover          (bounded 2.4/5 GHz scan; DFS passive)\n"
+         "sudo rtw88-roam --best              (recommend from fresh scan cache)\n"
+         "sudo rtw88-roam --roam-best         (discover + 5 GHz priority + switch if useful)\n"
          "sudo rtw88-roam --refresh\n"
          "sudo rtw88-roam --check BSSID       (preflight only)\n"
-         "sudo rtw88-roam --scan BSSID        (one non-DFS channel)\n"
-         "sudo rtw88-roam --prepare BSSID     (refresh + scan + check)\n"
-         "sudo rtw88-roam --roam BSSID        (refresh + scan + switch)\n"
+         "sudo rtw88-roam --scan BSSID        (one known channel; DFS passive)\n"
+         "sudo rtw88-roam --prepare BSSID     (discover + check, no switch)\n"
+         "sudo rtw88-roam --roam BSSID        (discover + switch to explicit target)\n"
          "sudo rtw88-roam BSSID               (switch using existing data)\n"
          "sudo rtw88-roam --log-level off|normal|verbose\n"
          "Acceptance/local keys do not prove AP acceptance or working IP traffic.");
@@ -153,6 +201,10 @@ int main(int argc,char **argv) {
     if(!service){fprintf(stderr,"AirPortRTW service not found\n");return 1;}
     int result=2;
     if(argc==1 || (argc==2&&!strcmp(argv[1],"--neighbors")))result=neighbors();
+    else if(argc==2&&!strcmp(argv[1],"--aps"))result=aps();
+    else if(argc==2&&!strcmp(argv[1],"--discover"))result=discover();
+    else if(argc==2&&!strcmp(argv[1],"--best"))result=best(0);
+    else if(argc==2&&!strcmp(argv[1],"--roam-best"))result=best(1);
     else if(argc==2&&!strcmp(argv[1],"--status")){result=snapshot();if(!result)fputs(status,stdout);}
     else if(argc==2&&!strcmp(argv[1],"--report"))result=report();
     else if(argc==2&&!strcmp(argv[1],"--refresh"))result=refresh();
@@ -169,7 +221,7 @@ int main(int argc,char **argv) {
             else if(!strcmp(argv[1],"--check"))result=command("check",mac,1);
             else if(!strcmp(argv[1],"--scan"))result=scan(mac);
             else if(!strcmp(argv[1],"--prepare")||!strcmp(argv[1],"--roam")) {
-                result=refresh();if(!result)result=scan(mac);
+                result=discover();
                 if(!result)result=command(!strcmp(argv[1],"--prepare")?"check":"switch",mac,1);
             }
         }

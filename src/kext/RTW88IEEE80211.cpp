@@ -1748,6 +1748,13 @@ void RTW88IEEE80211::processScanResult(struct sk_buff *skb)
             bss->channel = (f - 5000) / 5;
     }
 
+    // Restricted-channel STA joins require a current AP beacon, not a
+    // Neighbor Report or a probe response alone. Never lift channel flags.
+    const uint16_t scanFC=le16_to_cpu(hdr->frame_control);
+    if(RTW88RoamSwitch::beaconProof(scanFC,le16_to_cpu(hdr->seq_ctrl),bss->capabilities,
+       bss->channel,bss->freq,iesComplete && body==end,hdr->addr2,bss->bssid))
+        bss->beaconObservedMs=bss->observedMs;
+
     /* Add to BSS list (deduplicate by BSSID) */
     IOLockLock(_bssLock);
     for (RTW88BSS *e = _bssList; e; e = e->next) {
@@ -1770,6 +1777,10 @@ void RTW88IEEE80211::processScanResult(struct sk_buff *skb)
                 }
             }
             bss->beacon_named |= e->beacon_named;
+            if((scanFC&0x00f0)!=0x0080 && bss->channel==e->channel && bss->freq==e->freq &&
+               bss->ssid_len==e->ssid_len && !memcmp(bss->ssid,e->ssid,bss->ssid_len) &&
+               (bss->capabilities&3)==1)
+                bss->beaconObservedMs=e->beaconObservedMs;
             if (!ssidNamed && bss->beacon_named && bss->ssid_len) {
                 static uint32_t sBlankSsidKept;
                 uint32_t c = ++sBlankSsidKept;
@@ -2523,6 +2534,8 @@ void RTW88IEEE80211::scanDone(bool aborted)
     IOLockUnlock(_bssLock);
 
     if (roamScan) {
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+        __atomic_store_n(&_roamScanCompletedMs,ns/1000000ULL,__ATOMIC_RELAXED);
         __atomic_store_n(&_roamScanResult, aborted ? 3U : 2U, __ATOMIC_RELAXED);
         roamTrace(aborted ? "target-scan-aborted" : "target-scan-complete", _lastScanCacheCount);
         __atomic_store_n(&_roamScanActive, false, __ATOMIC_RELEASE);
@@ -2571,9 +2584,10 @@ void RTW88IEEE80211::scanDone(bool aborted)
 IOReturn RTW88IEEE80211::cmdScan(uint16_t roamChannel)
 {
     _awdlPreparedChannel = 0;
-    /* Ordinary CoreWiFi background scans remain cache-only. An explicit
-     * diagnostic roam scan may visit exactly one validated non-DFS channel,
-     * using the existing STA power-save/home-channel restore path. */
+    /* Ordinary CoreWiFi background scans remain cache-only. Explicit roam
+     * discovery is bounded, returns home between channels, and scans every
+     * DFS/no-IR channel passively. DISABLED is always authoritative. */
+    const bool discovery=roamChannel==RTW88RoamSwitch::DiscoveryChannel;
     const bool targeted = roamChannel && _state == RTW88_STATE_CONNECTED &&
         roamingActionsReady() && !_roamSwitch.phase && !_manualScanChannelCount &&
         !__atomic_load_n(&_authenticationWorkerActive, __ATOMIC_ACQUIRE);
@@ -2616,9 +2630,9 @@ IOReturn RTW88IEEE80211::cmdScan(uint16_t roamChannel)
                     /* Only scan enabled channels */
                     if (!(band->channels[j].flags & IEEE80211_CHAN_DISABLED) &&
                         (!roamChannel ||
-                         (band->channels[j].hw_value == roamChannel &&
-                          !(band->channels[j].flags &
-                            (IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_RADAR))))) {
+                         ((discovery || band->channels[j].hw_value == roamChannel) &&
+                          band->channels[j].center_freq>=2400 && band->channels[j].center_freq<=5900 &&
+                          (!discovery || n_chans<int(RTW88RoamSwitch::MaxDiscoveryChannels))))) {
                         band->channels[j].band = band->band;
                         chans[n_chans++] = &band->channels[j];
                     }
@@ -2635,7 +2649,7 @@ IOReturn RTW88IEEE80211::cmdScan(uint16_t roamChannel)
     }
 
     const bool firmwareScan = !targeted && _hw->ops->hw_scan && rtw88_hw_scan_supported(_hw);
-    _scanEngine = targeted ? "roam-single-channel" : firmwareScan ? "firmware" : "software";
+    _scanEngine = targeted ? (discovery?"roam-discovery":"roam-single-channel") : firmwareScan ? "firmware" : "software";
     _lastScanChannelCount = (uint32_t)n_chans;
     _scanVisited2GHz = _scanVisited5GHz = 0;
     if (!firmwareScan) {
@@ -2659,7 +2673,7 @@ IOReturn RTW88IEEE80211::cmdScan(uint16_t roamChannel)
         }
         thread_call_enter(_manualScanTC);
 
-        _timeoutMs = targeted ? 3000 : 12000;
+        _timeoutMs = targeted ? (discovery?25000:3000) : 12000;
         uint64_t d;
         clock_interval_to_deadline(_timeoutMs, kMillisecondScale, &d);
         _timer->wakeAtTime(d);
@@ -2756,7 +2770,7 @@ void RTW88IEEE80211::runManualScan()
 
         /* Active channels can use a short probe dwell. Passive/DFS channels
          * still need a beacon-listen dwell. */
-        IOSleep(passiveOnly ? 140 : 70);
+        IOSleep(passiveOnly ? (roamWorker?180:140) : 70);
         /* Software dwell completed; this is not proof of successful RF RX. */
         if (chan->band == NL80211_BAND_5GHZ) ++_scanVisited5GHz;
         else if (chan->band == NL80211_BAND_2GHZ) ++_scanVisited2GHz;
@@ -4418,73 +4432,115 @@ IOReturn RTW88IEEE80211::roamDecision(unsigned reason, IOReturn result)
     return result;
 }
 
-IOReturn RTW88IEEE80211::validateRoam(const uint8_t *bssid, uint64_t nowMs, bool scanOnly)
+unsigned RTW88IEEE80211::roamChannelReason(unsigned channel,unsigned frequency,uint32_t *flags) const
 {
     using namespace RTW88RoamSwitch;
-    if (!_roamSwitchEnabled || !_roamingAssistEnabled) return roamDecision(Disabled,kIOReturnNotReady);
-    if (!_parent || !_parent->roamingActionsAllowed() || !_powered) return roamDecision(PowerBlocked,kIOReturnNotReady);
-    if (_state != RTW88_STATE_CONNECTED || !_associatedVisible || _awdlOffChannel || authenticationCancelled())
+    for(int band=0;_hw && _hw->wiphy && band<NL80211_NUM_BANDS;++band) {
+        const auto *s=_hw->wiphy->bands[band];if(!s)continue;
+        for(int j=0;j<s->n_channels;++j) {
+            const auto &ch=s->channels[j];
+            if(unsigned(ch.hw_value)!=channel || (frequency && unsigned(ch.center_freq)!=frequency))continue;
+            if(flags)*flags=ch.flags;
+            return (ch.flags&IEEE80211_CHAN_DISABLED)?ChannelDisabled:Ready;
+        }
+    }
+    return ChannelMissing;
+}
+
+unsigned RTW88IEEE80211::roamBSSReason(const RTW88BSS &b,uint64_t nowMs) const
+{
+    using namespace RTW88RoamSwitch;
+    if(!RTW88Roaming::unicast(b.bssid))return InvalidTarget;
+    if(b.ssid_len!=_targetBSS.ssid_len || memcmp(b.ssid,_targetBSS.ssid,b.ssid_len))return SSIDMismatch;
+    if(b.rssi<MinimumRSSI || b.rssi>=0)return SignalWeak;
+    if(!fresh(nowMs,b.observedMs))return ScanStale;
+    if(!security(b.ies,b.ies_len))return TargetSecurity;
+    if(!((b.freq>=2400 && b.freq<=2500)||band5(b.freq)))return ChannelMissing;
+    uint32_t flags=0;
+    unsigned reason=roamChannelReason(b.channel,b.freq,&flags);
+    if(reason!=Ready)return reason;
+    if((flags&(IEEE80211_CHAN_NO_IR|IEEE80211_CHAN_RADAR)) &&
+       ((b.capabilities&3)!=1 || !fresh(nowMs,b.beaconObservedMs)))return BeaconMissing;
+    return Ready;
+}
+
+IOReturn RTW88IEEE80211::roamControlReady()
+{
+    using namespace RTW88RoamSwitch;
+    if(!_roamSwitchEnabled || !_roamingAssistEnabled)return roamDecision(Disabled,kIOReturnNotReady);
+    if(!_parent || !_parent->roamingActionsAllowed() || !_powered)return roamDecision(PowerBlocked,kIOReturnNotReady);
+    if(_roamSwitch.phase)return roamDecision(SwitchBusy,kIOReturnBusy);
+    if(roamScanActive() || _manualScanChannelCount ||
+       __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE))return roamDecision(ScanBusy,kIOReturnBusy);
+    if(_state!=RTW88_STATE_CONNECTED || !_associatedVisible || _awdlOffChannel || authenticationCancelled())
         return roamDecision(NotConnected,kIOReturnNotReady);
-    if (!_wpa2 || _enterprise || _externalSupplicant || _targetBSS.cipher!=WLAN_CIPHER_SUITE_CCMP)
+    if(!_wpa2 || _enterprise || _externalSupplicant || _targetBSS.cipher!=WLAN_CIPHER_SUITE_CCMP)
         return roamDecision(SecurityMode,kIOReturnUnsupported);
-    if (!_ptkConf || !_gtkConf) return roamDecision(KeysMissing,kIOReturnNotReady);
-    if (__atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE)) return roamDecision(AuthBusy,kIOReturnBusy);
-    if (!bssid || !RTW88Roaming::unicast(bssid)) return roamDecision(InvalidTarget,kIOReturnBadArgument);
-    if (!memcmp(bssid,_targetBSS.bssid,6)) return roamDecision(CurrentTarget,kIOReturnBadArgument);
-    if (_roamSwitch.phase) return roamDecision(SwitchBusy,kIOReturnBusy);
-    if (roamScanActive() || _manualScanChannelCount ||
-        __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE)) return roamDecision(ScanBusy,kIOReturnBusy);
-    if (!scanOnly && _roamSwitchLast && (nowMs<_roamSwitchLast || nowMs-_roamSwitchLast<CooldownMs))
+    if(!_ptkConf || !_gtkConf)return roamDecision(KeysMissing,kIOReturnNotReady);
+    if(__atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE))return roamDecision(AuthBusy,kIOReturnBusy);
+    if(!RTW88RoamSwitch::security(_targetBSS.ies,_targetBSS.ies_len))return roamDecision(CurrentSecurity,kIOReturnUnsupported);
+    return kIOReturnSuccess;
+}
+
+IOReturn RTW88IEEE80211::validateRoam(const uint8_t *bssid,uint64_t nowMs,bool scanOnly)
+{
+    using namespace RTW88RoamSwitch;
+    IOReturn ready=roamControlReady();if(ready!=kIOReturnSuccess)return ready;
+    if(!bssid || !RTW88Roaming::unicast(bssid))return roamDecision(InvalidTarget,kIOReturnBadArgument);
+    if(!memcmp(bssid,_targetBSS.bssid,6))return roamDecision(CurrentTarget,kIOReturnBadArgument);
+    if(!scanOnly && _roamSwitchLast && (nowMs<_roamSwitchLast || nowMs-_roamSwitchLast<CooldownMs))
         return roamDecision(Cooldown,kIOReturnBusy);
     _roamNeighborAge=age(nowMs,_roaming.neighborsMs);
-    if (!_roaming.neighborsMs) return roamDecision(NeighborMissing,kIOReturnNotFound);
-    if (!fresh(nowMs,_roaming.neighborsMs)) return roamDecision(NeighborStale,kIOReturnNotFound);
-    const RTW88Roaming::Candidate *hint=nullptr;
-    for (unsigned i=0;i<_roaming.neighbors.count;++i)
-        if (!memcmp(bssid,_roaming.neighbors.entries[i].bssid,6)) hint=&_roaming.neighbors.entries[i];
-    if (!hint) return roamDecision(TargetNotListed,kIOReturnNotFound);
-    _roamTargetChannel=hint->channel;
-    unsigned reason=ChannelMissing;
-    for (int band=0;_hw && _hw->wiphy && band<NL80211_NUM_BANDS;++band) {
-        auto *s=_hw->wiphy->bands[band]; if(!s)continue;
-        for(int j=0;j<s->n_channels;++j) { const auto &ch=s->channels[j];
-            if(ch.hw_value!=hint->channel)continue;
-            _roamChannelFlags=ch.flags;
-            reason=(ch.flags&IEEE80211_CHAN_DISABLED)?ChannelDisabled:
-                (ch.flags&IEEE80211_CHAN_RADAR)?ChannelDFS:
-                (ch.flags&IEEE80211_CHAN_NO_IR)?ChannelNoIR:Ready;
-            break;
-        }
-        if(reason!=ChannelMissing)break;
-    }
-    if(reason!=Ready)return roamDecision(reason,kIOReturnNotFound);
-    if(!security(_targetBSS.ies,_targetBSS.ies_len))return roamDecision(CurrentSecurity,kIOReturnUnsupported);
-    if(scanOnly)return roamDecision(Ready,kIOReturnSuccess);
-    reason=ScanMissing;
+    _roamTargetFromScan=false;
+    unsigned reason=ScanMissing;
     IOLockLock(_bssLock);
-    for(RTW88BSS *b=_bssList;b;b=b->next) {
+    for(const RTW88BSS *b=_bssList;b;b=b->next) {
         if(memcmp(bssid,b->bssid,6))continue;
-        _roamScanAge=age(nowMs,b->observedMs);_roamTargetRSSI=b->rssi;
-        if(b->ssid_len!=_targetBSS.ssid_len || memcmp(b->ssid,_targetBSS.ssid,b->ssid_len))reason=SSIDMismatch;
-        else if(b->channel!=hint->channel)reason=ChannelMismatch;
-        else if(b->rssi < -80 || b->rssi>=0)reason=SignalWeak;
-        else if(!fresh(nowMs,b->observedMs))reason=ScanStale;
-        else if(!security(b->ies,b->ies_len))reason=TargetSecurity;
-        else {
-            reason=ChannelMissing;
-            for(int band=0;_hw && _hw->wiphy && band<NL80211_NUM_BANDS;++band) {
-                auto *s=_hw->wiphy->bands[band];if(!s)continue;
-                for(int j=0;j<s->n_channels;++j) {
-                    const auto &ch=s->channels[j];
-                    if(ch.hw_value==b->channel && ch.center_freq==b->freq &&
-                       !(ch.flags&(IEEE80211_CHAN_DISABLED|IEEE80211_CHAN_NO_IR|IEEE80211_CHAN_RADAR))) reason=Ready;
-                }
-            }
+        _roamTargetFromScan=true;_roamTargetChannel=b->channel;
+        _roamTargetRSSI=b->rssi;_roamScanAge=age(nowMs,b->observedMs);
+        reason=roamChannelReason(b->channel,b->freq,&_roamChannelFlags);
+        if(reason==Ready) {
+            if(scanOnly)reason=(b->ssid_len==_targetBSS.ssid_len && !memcmp(b->ssid,_targetBSS.ssid,b->ssid_len))?Ready:SSIDMismatch;
+            else reason=roamBSSReason(*b,nowMs);
         }
         break;
     }
     IOLockUnlock(_bssLock);
+    // A neighbor is only a channel hint for a scan. It cannot authorize a
+    // switch without an actual matching, fresh RF observation.
+    if(scanOnly && !_roamTargetFromScan && fresh(nowMs,_roaming.neighborsMs)) {
+        for(unsigned i=0;i<_roaming.neighbors.count;++i) {
+            const auto &hint=_roaming.neighbors.entries[i];
+            if(memcmp(bssid,hint.bssid,6))continue;
+            _roamTargetChannel=hint.channel;
+            reason=roamChannelReason(hint.channel,0,&_roamChannelFlags);break;
+        }
+    }
     return roamDecision(reason,reason==Ready?kIOReturnSuccess:kIOReturnNotFound);
+}
+
+IOReturn RTW88IEEE80211::selectRoamTarget(uint64_t nowMs)
+{
+    using namespace RTW88RoamSwitch;
+    beginRoamTest(nullptr);memset(_roamRecommended,0,6);
+    IOReturn ready=roamControlReady();if(ready!=kIOReturnSuccess)return ready;
+    const unsigned currentFreq=_targetBSS.channel<=14?2407+5*_targetBSS.channel:5000+5*_targetBSS.channel;
+    const bool current5=band5(currentFreq);
+    int bestRank=rank(currentFreq,_rssi,current5);
+    if(bestRank>-10000)memcpy(_roamRecommended,_targetBSS.bssid,6);
+    IOLockLock(_bssLock);
+    for(const RTW88BSS *b=_bssList;b;b=b->next) {
+        if(!memcmp(b->bssid,_targetBSS.bssid,6) || roamBSSReason(*b,nowMs)!=Ready)continue;
+        if(band5(b->freq)==current5 && _rssi>=MinimumRSSI && _rssi<0 && b->rssi<_rssi+SameBandGain)continue;
+        const int score=rank(b->freq,b->rssi);
+        if(score>bestRank || (score==bestRank && memcmp(b->bssid,_roamRecommended,6)<0)) {
+            bestRank=score;memcpy(_roamRecommended,b->bssid,6);
+        }
+    }
+    IOLockUnlock(_bssLock);
+    if(!RTW88Roaming::unicast(_roamRecommended))return roamDecision(NoCandidate,kIOReturnNotFound);
+    const bool stay=!memcmp(_roamRecommended,_targetBSS.bssid,6);
+    return roamDecision(stay?KeepCurrent:Ready,kIOReturnSuccess);
 }
 
 IOReturn RTW88IEEE80211::checkRoam(const uint8_t *bssid,uint64_t nowMs)
@@ -4517,18 +4573,33 @@ IOReturn RTW88IEEE80211::refreshRoamNeighbors(uint64_t nowMs)
 
 IOReturn RTW88IEEE80211::scanRoamTarget(const uint8_t *bssid,uint64_t nowMs)
 {
-    using namespace RTW88RoamSwitch;
     beginRoamTest(bssid);
+    if(!roamScanActive() && !__atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE))
+        __atomic_store_n(&_roamScanResult,0U,__ATOMIC_RELAXED);
     IOReturn result=validateRoam(bssid,nowMs,true);
     if(result!=kIOReturnSuccess)return result;
+    return startRoamScan(uint16_t(_roamTargetChannel),nowMs);
+}
+
+IOReturn RTW88IEEE80211::discoverRoamAPs(uint64_t nowMs)
+{
+    beginRoamTest(nullptr);
+    IOReturn result=roamControlReady();if(result!=kIOReturnSuccess)return result;
+    return startRoamScan(RTW88RoamSwitch::DiscoveryChannel,nowMs);
+}
+
+IOReturn RTW88IEEE80211::startRoamScan(uint16_t channel,uint64_t nowMs)
+{
+    using namespace RTW88RoamSwitch;
     if(_roamScanLast && (nowMs<_roamScanLast || nowMs-_roamScanLast<ScanIntervalMs))
         return roamDecision(ScanLimited,kIOReturnBusy);
     _roamScanLast=nowMs;
+    __atomic_store_n(&_roamScanCompletedMs,0ULL,__ATOMIC_RELAXED);
     __atomic_store_n(&_roamScanResult,1U,__ATOMIC_RELAXED);
     __atomic_store_n(&_roamScanActive,true,__ATOMIC_RELEASE);
     __atomic_store_n(&_roamScanWorkerPending,true,__ATOMIC_RELEASE);
-    roamTrace("target-scan-start",_roamTargetChannel);
-    result=cmdScan(uint16_t(_roamTargetChannel));
+    roamTrace(channel==DiscoveryChannel?"discovery-scan-start":"target-scan-start",channel);
+    IOReturn result=cmdScan(channel);
     if(result!=kIOReturnSuccess) {
         __atomic_store_n(&_roamScanActive,false,__ATOMIC_RELEASE);
         __atomic_store_n(&_roamScanWorkerPending,false,__ATOMIC_RELEASE);
@@ -4612,6 +4683,13 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
     ROAM_APPEND("target_bssid=%02x:%02x:%02x:%02x:%02x:%02x\ntarget_channel=%u\ntarget_rssi=%d\ntarget_channel_flags=0x%08x\n",
         _roamDiagTarget[0],_roamDiagTarget[1],_roamDiagTarget[2],_roamDiagTarget[3],_roamDiagTarget[4],_roamDiagTarget[5],
         _roamTargetChannel,_roamTargetRSSI,_roamChannelFlags);
+    ROAM_APPEND("target_source=%s\nrecommended_bssid=%02x:%02x:%02x:%02x:%02x:%02x\nprefer_5ghz_rssi=%d\nkeep_5ghz_rssi=%d\nsame_band_gain_db=%d\nscan_age_ms=%lld\n",
+        _roamTargetFromScan?"scan-cache":"none-or-neighbor-hint",
+        _roamRecommended[0],_roamRecommended[1],_roamRecommended[2],_roamRecommended[3],_roamRecommended[4],_roamRecommended[5],
+        RTW88RoamSwitch::Prefer5GHzRSSI,RTW88RoamSwitch::Keep5GHzRSSI,RTW88RoamSwitch::SameBandGain,
+        (long long)RTW88RoamSwitch::age(nowMs,_roamScanLast));
+    ROAM_APPEND("scan_completed_age_ms=%lld\n",(long long)RTW88RoamSwitch::age(nowMs,
+        __atomic_load_n(&_roamScanCompletedMs,__ATOMIC_RELAXED)));
     ROAM_APPEND("neighbor_pending=%u\nneighbor_token=%u\nneighbor_age_ms=%lld\nneighbor_fresh=%u\nneighbor_count=%u\nlast_response_count=%u\n",
         unsigned(_roaming.pending),unsigned(_roaming.pendingToken),
         (long long)RTW88RoamSwitch::age(nowMs,_roaming.neighborsMs),
@@ -4634,6 +4712,18 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
         ROAM_APPEND("neighbor[%u]=%02x:%02x:%02x:%02x:%02x:%02x channel=%u opclass=%u preference=%u\n",
             i,c.bssid[0],c.bssid[1],c.bssid[2],c.bssid[3],c.bssid[4],c.bssid[5],c.channel,c.opClass,c.preference);
     }
+    unsigned listed=0;
+    IOLockLock(_bssLock);
+    for(const RTW88BSS *b=_bssList;b && listed<64;b=b->next) {
+        if(b->ssid_len!=_targetBSS.ssid_len || memcmp(b->ssid,_targetBSS.ssid,b->ssid_len))continue;
+        const unsigned reason=roamBSSReason(*b,nowMs);
+        ROAM_APPEND("ap[%u]=%02x:%02x:%02x:%02x:%02x:%02x channel=%u freq=%u rssi=%d age_ms=%lld beacon_age_ms=%lld reason=%s\n",
+            listed++,b->bssid[0],b->bssid[1],b->bssid[2],b->bssid[3],b->bssid[4],b->bssid[5],
+            b->channel,b->freq,b->rssi,(long long)RTW88RoamSwitch::age(nowMs,b->observedMs),
+            (long long)RTW88RoamSwitch::age(nowMs,b->beaconObservedMs),RTW88RoamSwitch::reasonName(reason));
+    }
+    IOLockUnlock(_bssLock);
+    ROAM_APPEND("aps_listed=%u\n",listed);
     out[capacity-1]=0;
 #undef ROAM_APPEND
 }

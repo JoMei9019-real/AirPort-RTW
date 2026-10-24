@@ -1,5 +1,16 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 7: scan-based targets, band priority and DFS STA roaming
+
+Beta 7 accepts eligible APs found over the air even when absent from the
+Neighbor Report. `--discover` scans enabled 2.4/5 GHz channels with a home-channel
+return between slots; `--aps` lists actual BSSIDs. DFS/no-IR channels are scanned
+passively and require a fresh matching ESS beacon before a STA roam is allowed.
+`--roam-best` prefers usable 5 GHz, falls back to 2.4 GHz and keeps the current AP
+when it is preferable. Selection is invoked by the tool, not a background roam
+daemon. Artifacts contain the kext, helper and notes directly, with no inner ZIP.
+See [Beta 7 commands, selection thresholds and limits](BETA_1_1_0_7.md).
+
 ## 1.1.0 Beta 6: repeatable roaming tests and diagnostics
 
 Beta 6 adds runtime Neighbor Report refresh, exact preflight rejection reasons,
