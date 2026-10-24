@@ -19,6 +19,7 @@
 #include <net/ethernet.h>
 #include <kern/thread_call.h>
 #include "RTW88Roaming.hpp"
+#include "RTW88RoamSwitch.hpp"
 
 /* Opaque C driver handle */
 struct rtw_dev;
@@ -135,6 +136,7 @@ struct RTW88BSS {
     uint32_t group_cipher; /* selected group WLAN_CIPHER_SUITE_* */
     uint32_t akm;
     uint32_t last_seen_scan;
+    uint64_t observedMs;
     /* Final: a beacon from this BSSID carried a non-empty, non-zero SSID, so
      * the AP is not hidden even if a later frame has a blank SSID element. */
     uint8_t  beacon_named;
@@ -248,6 +250,12 @@ public:
     uint32_t scanGeneration() const { return _scanGeneration; }
     void setRoamingAssistEnabled(bool enabled) { _roamingAssistEnabled = enabled; }
     void roamingTick(uint64_t nowMs);
+    IOReturn requestRoam(const uint8_t *bssid,uint64_t nowMs);
+    void roamSwitchTick(uint64_t nowMs);
+    void cancelRoamSwitch();
+    void setRoamSwitchEnabled(bool enabled) { _roamSwitchEnabled=enabled; }
+    unsigned roamSwitchResult() const { return __atomic_load_n(&_roamSwitchResult,__ATOMIC_RELAXED); }
+    unsigned copyRoamNeighbors(uint8_t *out) const;
     uint32_t roamingStat(unsigned slot) const {
         return slot < RTW88Roaming::Count ?
             __atomic_load_n(&_roamingStats[slot], __ATOMIC_RELAXED) : 0;
@@ -500,6 +508,11 @@ private:
     /* RSSI tracking */
     // Session/cache accessed on the controller RX workloop. No new worker/timer.
     RTW88Roaming::Session _roaming;
+    RTW88RoamSwitch::Transaction _roamSwitch;
+    bool _roamSwitchEnabled=false, _roamSwitchInternal=false;
+    uint64_t _roamSwitchLast=0;
+    uint32_t _roamSwitchResult=0;
+    bool _authenticationWorkerActive=false;
     bool _roamingAssistEnabled = false, _roamingCapsValid = false;
     uint32_t _roamingStats[RTW88Roaming::Count] = {};
     int      _rssi     = -100;

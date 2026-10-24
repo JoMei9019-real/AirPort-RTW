@@ -26,6 +26,8 @@ extern "C" void rtw88_trigger_interrupt(void);  /* esta si es la unica con exter
 #include <net/kpi_interface.h>            /* ifnet_stat_increment_in/out */
 #include <kern/clock.h>
 #include <mach/mach_time.h>
+#include <IOKit/IOUserClient.h>
+#include <kern/task.h>
 
 #define IOLog rtw88_candidate_log
 
@@ -112,7 +114,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.4-roaming-foundations");
+    setProperty("DriverBuild", "1.1.0-beta.5-controlled-roam");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -207,6 +209,10 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("ROAM_ASSIST_ENABLED", roamingEnabled ? kOSBooleanTrue : kOSBooleanFalse);
     setProperty("ROAM_V_MODE", "reject-only");
     setProperty("ROAM_R_FT_ENABLED", kOSBooleanFalse);
+    OSBoolean *switching=OSDynamicCast(OSBoolean,getProperty("RoamingSwitchEnabled"));
+    const bool switchEnabled=switching && switching->isTrue();
+    _ieee80211->setRoamSwitchEnabled(switchEnabled);
+    setProperty("ROAM_SWITCH_ENABLED",switchEnabled?kOSBooleanTrue:kOSBooleanFalse);
 
     rtw88_force_wifi_only();
 
@@ -277,7 +283,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.1.0-beta.4 diagnostics enabled; opt-in k/v and passive FT metadata\n");
+    IOLog("AirPortRTW: 1.1.0-beta.5 diagnostics enabled; opt-in k/v and passive FT metadata\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -305,6 +311,10 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         uint64_t nowNs = 0;
         absolutetime_to_nanoseconds(mach_absolute_time(), &nowNs);
         self->_ieee80211->roamingTick(nowNs / 1000000ULL);
+        self->setProperty("ROAM_SWITCH_RESULT",(uint64_t)self->_ieee80211->roamSwitchResult(),32);
+        uint8_t neighbors[RTW88Roaming::MaxCandidates*6]={};
+        unsigned neighborCount=self->_ieee80211->copyRoamNeighbors(neighbors);
+        self->setProperty("ROAM_K_CANDIDATES",neighbors,neighborCount*6);
         static const char *const names[RTW88Roaming::Count] = {
             "ROAM_AP_NEIGHBOR_REPORT", "ROAM_AP_BTM", "ROAM_AP_MOBILITY_DOMAIN",
             "ROAM_AP_MDID", "ROAM_AP_FT_POLICY", "ROAM_AP_FT_AKMS",
@@ -376,6 +386,25 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     self->setProperty("DiagnosticLogWrapped", bytes > 32767 ? kOSBooleanTrue : kOSBooleanFalse);
     self->setProperty("DiagnosticLogSnapshotLength", (uint64_t)n, 32);
     timer->setTimeoutMS(5000);
+}
+
+IOReturn AirPortRTW::setProperties(OSObject *properties)
+{
+    auto *dict=OSDynamicCast(OSDictionary,properties);
+    auto *target=dict?OSDynamicCast(OSData,dict->getObject("RoamToBSSID")):nullptr;
+    if(!target)return kIOReturnUnsupported;
+    if(IOUserClient::clientHasPrivilege(current_task(),kIOClientPrivilegeAdministrator)!=kIOReturnSuccess)
+        return kIOReturnNotPrivileged;
+    if(target->getLength()!=6 || !_ieee80211 || !_workLoop)return kIOReturnBadArgument;
+    uint8_t bssid[6];memcpy(bssid,target->getBytesNoCopy(),6);
+    return _workLoop->runAction([](OSObject *owner,void *address,void*,void*,void*)->IOReturn{
+        auto *self=static_cast<AirPortRTW*>(owner);
+        if(!self->roamingActionsAllowed() || !self->_ieee80211)return kIOReturnNotReady;
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+        IOReturn result=self->_ieee80211->requestRoam(static_cast<uint8_t*>(address),ns/1000000ULL);
+        self->setProperty("ROAM_SWITCH_REQUEST_RESULT",(uint64_t)(uint32_t)result,32);
+        return result;
+    },this,bssid);
 }
 
 void AirPortRTW::waitForDiagnosticsIdle()
@@ -2165,7 +2194,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.1.0-beta.4)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.1.0-beta.5)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));

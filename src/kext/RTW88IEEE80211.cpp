@@ -1225,6 +1225,7 @@ void RTW88IEEE80211::powerOff()
 
 void RTW88IEEE80211::powerOffGated()
 {
+    cancelRoamSwitch();
     flushTxBatch();
     IOLog("rtw88: IEEE80211 powerOff\n");
     if (_parent) {
@@ -1726,6 +1727,9 @@ void RTW88IEEE80211::processScanResult(struct sk_buff *skb)
     bss->rssi = rxs->signal;
     bss->freq = rxs->freq;
     bss->last_seen_scan = _scanGeneration;
+    uint64_t observedNs=0;
+    absolutetime_to_nanoseconds(mach_absolute_time(),&observedNs);
+    bss->observedMs=observedNs/1000000ULL;
     const bool ssidNamed = bss->ssid_len != 0;
     if (ssidNamed && (le16_to_cpu(hdr->frame_control) & 0x00f0) == 0x0080)
         bss->beacon_named = 1;
@@ -2779,6 +2783,7 @@ void RTW88IEEE80211::failJoin(const char *stage)
 IOReturn RTW88IEEE80211::cmdConnect(const char *ssid, const char *password, const uint8_t *pmk,
                                       const uint8_t *bssid, bool externalSupplicant)
 {
+    if(!_roamSwitchInternal)cancelRoamSwitch();
     if (!ssid || !ssid[0] || strnlen(ssid, 33) > 32) return kIOReturnBadArgument;
 
     /* The reference IO80211 driver accepts ASSOCIATE while net80211 is in SCAN.  Returning
@@ -2896,7 +2901,10 @@ IOReturn RTW88IEEE80211::cmdConnect(const char *ssid, const char *password, cons
 
 void RTW88IEEE80211::connectTCFn(thread_call_param_t self, thread_call_param_t)
 {
-    ((RTW88IEEE80211 *)self)->doAuthenticate();
+    auto *backend=(RTW88IEEE80211 *)self;
+    __atomic_store_n(&backend->_authenticationWorkerActive,true,__ATOMIC_RELEASE);
+    backend->doAuthenticate();
+    __atomic_store_n(&backend->_authenticationWorkerActive,false,__ATOMIC_RELEASE);
 }
 
 void RTW88IEEE80211::doAuthenticate()
@@ -3630,6 +3638,7 @@ void RTW88IEEE80211::cancelAuthentication()
 
 IOReturn RTW88IEEE80211::cmdDisconnect()
 {
+    cancelRoamSwitch();
     clearDeferredJoin();
     /* A disconnected SCANNING state is not an association that can be torn
      * down.  The reference IO80211 driver's net80211 stays in SCAN here; it does not emit a
@@ -3719,6 +3728,7 @@ IOReturn RTW88IEEE80211::cmdPowerOff()
 
 IOReturn RTW88IEEE80211::cmdPowerOffGated()
 {
+    cancelRoamSwitch();
     __atomic_store_n(&_disconnectVoluntary, true, __ATOMIC_RELEASE);
     if (_parent) {
         _parent->radioPowerChanged(false);
@@ -4185,6 +4195,7 @@ bool RTW88IEEE80211::sendRoamingAction(const uint8_t *body, uint32_t length)
 
 void RTW88IEEE80211::roamingTick(uint64_t nowMs)
 {
+    roamSwitchTick(nowMs);
     // Called by the existing diagnostic timer while its PM hardware fence is
     // held, on the controller/RX workloop. Never create another timer/worker.
     if (!_powered || !_associatedVisible || _state != RTW88_STATE_CONNECTED)
@@ -4270,6 +4281,95 @@ void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
                                                 RTW88Roaming::BtmTxFail], 1U, __ATOMIC_RELAXED);
         // Never accept, disconnect, channel-hop, rekey, or obey a remote URL.
     }
+}
+
+unsigned RTW88IEEE80211::copyRoamNeighbors(uint8_t *out) const
+{
+    if(!out)return 0;
+    for(unsigned i=0;i<_roaming.neighbors.count;++i)
+        memcpy(out+6*i,_roaming.neighbors.entries[i].bssid,6);
+    return _roaming.neighbors.count;
+}
+
+void RTW88IEEE80211::cancelRoamSwitch()
+{
+    if(_roamSwitchInternal || !_roamSwitch.phase)return;
+    _roamSwitch.clear();
+    __atomic_store_n(&_roamSwitchResult,6U,__ATOMIC_RELAXED);
+}
+
+IOReturn RTW88IEEE80211::requestRoam(const uint8_t *bssid,uint64_t nowMs)
+{
+    if(!_roamSwitchEnabled || !roamingActionsReady())return kIOReturnNotReady;
+    if(__atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE))return kIOReturnBusy;
+    if(!bssid || !RTW88Roaming::unicast(bssid) || !memcmp(bssid,_targetBSS.bssid,6))return kIOReturnBadArgument;
+    if(_roamSwitch.phase || (_roamSwitchLast &&
+        (nowMs<_roamSwitchLast || nowMs-_roamSwitchLast<RTW88RoamSwitch::CooldownMs)))return kIOReturnBusy;
+    if(!RTW88RoamSwitch::fresh(nowMs,_roaming.neighborsMs))return kIOReturnNotFound;
+    const RTW88Roaming::Candidate *hint=nullptr;
+    for(unsigned i=0;i<_roaming.neighbors.count;++i)
+        if(!memcmp(bssid,_roaming.neighbors.entries[i].bssid,6))hint=&_roaming.neighbors.entries[i];
+    if(!hint)return kIOReturnNotFound;
+    bool valid=false;
+    IOLockLock(_bssLock);
+    for(RTW88BSS *b=_bssList;b;b=b->next){
+        if(!memcmp(bssid,b->bssid,6) && b->ssid_len==_targetBSS.ssid_len &&
+           !memcmp(b->ssid,_targetBSS.ssid,b->ssid_len) && b->channel==hint->channel &&
+           b->rssi>=-80 && b->rssi<0 && RTW88RoamSwitch::fresh(nowMs,b->observedMs) &&
+           RTW88RoamSwitch::security(b->ies,b->ies_len)){
+            for(int band=0;_hw && _hw->wiphy && band<NL80211_NUM_BANDS;++band){
+                auto *s=_hw->wiphy->bands[band];if(!s)continue;
+                for(int j=0;j<s->n_channels;++j){auto &ch=s->channels[j];
+                    if(ch.hw_value==b->channel && ch.center_freq==b->freq &&
+                       !(ch.flags&(IEEE80211_CHAN_DISABLED|IEEE80211_CHAN_NO_IR|IEEE80211_CHAN_RADAR)))valid=true;
+                }
+            }
+        }
+    }
+    IOLockUnlock(_bssLock);
+    if(!valid)return kIOReturnNotFound;
+    if(!RTW88RoamSwitch::security(_targetBSS.ies,_targetBSS.ies_len))return kIOReturnUnsupported;
+    cancelAuthentication(); // Drain the old auth worker before changing target/key state.
+    _roamSwitch.phase=1;_roamSwitch.started=nowMs;_roamSwitchLast=nowMs;
+    memcpy(_roamSwitch.oldAP,_targetBSS.bssid,6);memcpy(_roamSwitch.target,bssid,6);
+    memcpy(_roamSwitch.pmk,_pmk,32);memcpy(_roamSwitch.ssid,_targetBSS.ssid,33);
+    __atomic_store_n(&_roamSwitchResult,1U,__ATOMIC_RELAXED);
+    _roamSwitchInternal=true;
+    doDisconnect();
+    IOReturn ret=cmdConnect(_roamSwitch.ssid,nullptr,_roamSwitch.pmk,_roamSwitch.target,false);
+    _roamSwitchInternal=false;
+    // An asynchronous handshake is still pending even when submission succeeds.
+    if(ret!=kIOReturnSuccess)_roamSwitch.started=0;
+    return kIOReturnSuccess;
+}
+
+void RTW88IEEE80211::roamSwitchTick(uint64_t nowMs)
+{
+    if(!_roamSwitch.phase)return;
+    if(!_roamSwitchEnabled || !_powered || !_parent || !_parent->roamingActionsAllowed()){
+        cancelRoamSwitch();return;
+    }
+    const uint8_t *expected=_roamSwitch.phase==1?_roamSwitch.target:_roamSwitch.oldAP;
+    if(_state==RTW88_STATE_CONNECTED && _associatedVisible && _ptkConf && _gtkConf &&
+       !_enterprise && !_externalSupplicant && !memcmp(_targetBSS.bssid,expected,6)){
+        const unsigned result=_roamSwitch.phase==1?3:4;
+        _roamSwitch.clear();__atomic_store_n(&_roamSwitchResult,result,__ATOMIC_RELAXED);return;
+    }
+    if(_state!=RTW88_STATE_IDLE && _roamSwitch.started && nowMs>=_roamSwitch.started &&
+       nowMs-_roamSwitch.started<RTW88RoamSwitch::AttemptMs)return;
+    // Never wait on an auth worker that might need this controller workloop
+    // to finish a failure notification. Let it observe cancellation and exit.
+    __atomic_store_n(&_connectCancelled,true,__ATOMIC_RELEASE);
+    if(__atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE))return;
+    cancelAuthentication();
+    _roamSwitchInternal=true;doDisconnect();
+    if(_roamSwitch.phase==1){
+        _roamSwitch.phase=2;_roamSwitch.started=nowMs;
+        __atomic_store_n(&_roamSwitchResult,2U,__ATOMIC_RELAXED);
+        IOReturn ret=cmdConnect(_roamSwitch.ssid,nullptr,_roamSwitch.pmk,_roamSwitch.oldAP,false);
+        if(ret!=kIOReturnSuccess){_roamSwitch.clear();__atomic_store_n(&_roamSwitchResult,5U,__ATOMIC_RELAXED);}
+    }else{_roamSwitch.clear();__atomic_store_n(&_roamSwitchResult,5U,__ATOMIC_RELAXED);}
+    _roamSwitchInternal=false;
 }
 
 void RTW88IEEE80211::sendAddbaRequest(uint8_t tid)

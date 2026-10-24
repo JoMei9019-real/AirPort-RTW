@@ -65,6 +65,7 @@ struct RTW88IEEE80211 {
  } _targetBSS;
  bool txSucceeds=true;std::vector<std::vector<uint8_t>> submitted;
  bool authenticationCancelled()const{return canceled;}
+ void roamSwitchTick(uint64_t){}
  bool txMgmtFrame(const uint8_t*p,uint32_t n){
   if(!txSucceeds)return false;submitted.emplace_back(p,p+n);return true;
  }

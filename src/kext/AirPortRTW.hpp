@@ -125,6 +125,7 @@ public:
     /* IOService */
     bool     init(OSDictionary *props) override;
     bool     start(IOService *provider) override;
+    IOReturn setProperties(OSObject *properties) override;
     void     stop(IOService *provider) override;
     void     free() override;
     void     systemWillShutdown(IOOptionBits specifier) override;

@@ -1,5 +1,12 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 5: controlled WPA2 AP switching
+
+Beta 5 adds an opt-in manual switch to a neighbor verified in the recent scan
+cache, using a fresh WPA2-Personal handshake and one fallback attempt. A small
+`rtw88-roam` test tool is bundled. Automatic steering and 802.11r FT remain
+unimplemented. See [Beta 5 enable switches, limits and test commands](BETA_1_1_0_5.md).
+
 ## 1.1.0 Beta 4: experimental 802.11k/v/r foundations
 
 Beta 4 adds opt-in 802.11k Neighbor Report requests and a bounded response cache,
