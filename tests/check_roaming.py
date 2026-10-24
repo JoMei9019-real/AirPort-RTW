@@ -46,12 +46,17 @@ pre = r'''
 #include <cassert>
 #include <cstdio>
 #include <vector>
+template<class... T> void IOLog(const char *, T...) {}
 using namespace RTW88Roaming;
 constexpr int RTW88_STATE_CONNECTED=5,RTW88_STATE_SCANNING=1;
 constexpr uint32_t WLAN_CIPHER_SUITE_CCMP=0x000fac04;
 struct Parent {bool allowed=true;bool roamingActionsAllowed(){return allowed;}};
 struct RTW88IEEE80211 {
  Session _roaming;uint32_t _roamingStats[Count]={};
+ bool _roamScanActive=false,_roamScanWorkerPending=false;uint32_t _roamScanResult=0,_roamLastResponseCount=0,_roamTestID=0;
+ unsigned _roamLogLevel=1;uint64_t _roamRefreshLast=0;
+ bool roamScanActive()const{return _roamScanActive;}
+ void roamTrace(const char*,uint32_t=0){}
  bool _roamingAssistEnabled=false,_roamingCapsValid=false;
  bool _powered=true,_associatedVisible=true,_awdlOffChannel=false;
  bool _wpa2=true,_enterprise=false,_externalSupplicant=false,canceled=false;

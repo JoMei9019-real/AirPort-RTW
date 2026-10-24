@@ -3,6 +3,34 @@
 #include "RTW88Roaming.hpp"
 namespace RTW88RoamSwitch {
 constexpr uint64_t FreshMs=30000, AttemptMs=15000, CooldownMs=60000;
+constexpr uint64_t RefreshIntervalMs=5000, ScanIntervalMs=5000;
+enum Reason : unsigned {
+    Ready, Disabled, PowerBlocked, NotConnected, SecurityMode, KeysMissing,
+    AuthBusy, InvalidTarget, CurrentTarget, SwitchBusy, Cooldown,
+    NeighborMissing, NeighborStale, TargetNotListed, ScanMissing, SSIDMismatch,
+    ChannelMismatch, SignalWeak, ScanStale, TargetSecurity, ChannelMissing,
+    ChannelDisabled, ChannelNoIR, ChannelDFS, CurrentSecurity, RefreshPending,
+    RefreshLimited, APNoNeighbor, RefreshTxFailed, ScanBusy, ScanLimited,
+    ScanStartFailed
+};
+inline const char *reasonName(unsigned reason) {
+    static const char *const names[] = {
+        "ready", "disabled", "power-transition-or-off", "not-connected",
+        "unsupported-security-mode", "keys-not-ready", "authentication-worker-busy",
+        "invalid-target", "target-is-current-ap", "switch-in-progress", "switch-cooldown",
+        "neighbor-report-missing", "neighbor-report-stale", "target-not-in-neighbor-report",
+        "target-not-in-scan-cache", "ssid-mismatch", "neighbor-scan-channel-mismatch",
+        "signal-too-weak-or-invalid", "target-scan-stale", "target-security-incompatible",
+        "channel-not-in-regulatory-table", "channel-disabled", "channel-no-ir",
+        "dfs-channel-excluded", "current-security-incompatible", "neighbor-request-pending",
+        "neighbor-request-rate-limited", "ap-no-neighbor-report", "neighbor-request-tx-failed",
+        "scan-busy", "scan-rate-limited", "scan-start-failed"
+    };
+    return reason < sizeof(names)/sizeof(names[0]) ? names[reason] : "unknown";
+}
+inline uint64_t age(uint64_t now, uint64_t observed) {
+    return observed && now>=observed ? now-observed : ~uint64_t(0);
+}
 struct Transaction {
     unsigned phase=0;
     uint64_t started=0;

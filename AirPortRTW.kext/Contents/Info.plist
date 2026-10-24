@@ -15,7 +15,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>AirPortRTW for RTL88xx</string>
 	<key>CFBundleGetInfoString</key>
-	<string>AirPortRTW 1.1.0-beta.5 — experimental controlled WPA2 AP switching; no Fast Transition</string>
+	<string>AirPortRTW 1.1.0-beta.6 — runtime roaming diagnostics and targeted scan; no Fast Transition</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
@@ -118,6 +118,10 @@
 			<string>IOPCIDevice</string>
 			<key>IOPCIMatch</key>
 			<string>0xC82110EC 0xB82110EC</string>
+			<key>RoamingAssistEnabled</key>
+			<true/>
+			<key>RoamingSwitchEnabled</key>
+			<true/>
 		</dict>
 	</dict>
 </dict>

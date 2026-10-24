@@ -83,6 +83,7 @@ bool rtw88StationSignal(const uint8_t*,unsigned,const uint8_t*,const uint8_t*,in
 bool ieee80211_is_mgmt(__le16 fc){return (fc&12)==0;}
 bool ieee80211_is_data(__le16 fc){return (fc&12)==8;}
 struct RTW88IEEE80211{
+ unsigned _authAttempts=0;bool roamScanActive()const{return false;}void roamTrace(const char*,unsigned=0){}
  int _state=RTW88_STATE_IDLE,_rssi=-80;
  bool _enterprise=false,_enterpriseAuthorized=false,_manualScanAbort=false,canceled=false;
  unsigned _manualScanChannelCount=0,_rxFrameCount=0,completions=0,disconnects=0,failures=0;

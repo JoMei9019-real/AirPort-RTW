@@ -23,13 +23,14 @@ jobs:
           python3 tests/check_scan_rx.py
           python3 tests/check_roaming.py
           python3 tests/check_roam_switch.py
+          python3 tests/check_roam_diagnostics.py
           python3 tests/check_stack_budget.py --self-test
       - name: Bootstrap dependencies
         run: ./scripts/bootstrap-deps.sh
       - name: Build AirPortRTW
         run: |
           make airport
-          xcrun clang -arch x86_64 -mmacosx-version-min=13.0 ctl/roam-test.c -framework IOKit -framework CoreFoundation -o build/out/rtw88-roam
+          xcrun clang -Wall -Wextra -Werror -arch x86_64 -mmacosx-version-min=13.0 ctl/roam-test.c -framework IOKit -framework CoreFoundation -o build/out/rtw88-roam
       - name: Enforce compiled IOCTL stack budgets
         run: python3 tests/check_stack_budget.py build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
       - name: Inspect bundle
@@ -38,8 +39,9 @@ jobs:
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
-          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.5" in p["CFBundleGetInfoString"]'
-          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.5-controlled-roam"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.6" in p["CFBundleGetInfoString"]; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAssistEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingSwitchEnabled"] is True'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.6-roam-diagnostics"
+          build/out/rtw88-roam --help
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_K_REQUEST_SUBMITTED"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_R_FT_ENABLED"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "TX_BATCH_DEFERRED_FRAMES"
@@ -54,13 +56,13 @@ jobs:
         run: |
           cd build/out
           ditto -c -k --sequesterRsrc --keepParent AirPortRTW.kext AirPortRTW.kext.zip
-          cp ../../BETA_1_1_0_5.md .
-          zip -j AirPortRTW.kext.zip rtw88-roam BETA_1_1_0_5.md
+          cp ../../BETA_1_1_0_6.md .
+          zip -j AirPortRTW.kext.zip rtw88-roam BETA_1_1_0_6.md
           shasum -a 256 AirPortRTW.kext.zip > AirPortRTW.kext.zip.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-1.1.0-beta.5
+          name: AirPortRTW-1.1.0-beta.6
           path: |
             build/out/AirPortRTW.kext.zip
             build/out/AirPortRTW.kext.zip.sha256

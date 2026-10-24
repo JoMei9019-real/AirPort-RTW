@@ -114,7 +114,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.5-controlled-roam");
+    setProperty("DriverBuild", "1.1.0-beta.6-roam-diagnostics");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -283,7 +283,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.1.0-beta.5 diagnostics enabled; opt-in k/v and passive FT metadata\n");
+    IOLog("AirPortRTW: 1.1.0-beta.6 runtime roaming diagnostics enabled\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -385,26 +385,74 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     self->setProperty("DiagnosticSamples", self->_diagnosticsSamples, 64);
     self->setProperty("DiagnosticLogWrapped", bytes > 32767 ? kOSBooleanTrue : kOSBooleanFalse);
     self->setProperty("DiagnosticLogSnapshotLength", (uint64_t)n, 32);
+    self->publishRoamDiagnostics();
     timer->setTimeoutMS(5000);
+}
+
+void AirPortRTW::publishRoamDiagnostics()
+{
+    if(!_ieee80211 || !_diagnosticsBuffer)return;
+    uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+    _ieee80211->copyRoamDiagnostics(_diagnosticsBuffer,32768,ns/1000000ULL);
+    setProperty("ROAM_DIAGNOSTICS",_diagnosticsBuffer);
+    setProperty("ROAM_SWITCH_RESULT",uint64_t(_ieee80211->roamSwitchResult()),32);
+    setProperty("ROAM_SCAN_ACTIVE",_ieee80211->roamScanActive()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_K_PENDING",_ieee80211->roamNeighborPending()?kOSBooleanTrue:kOSBooleanFalse);
+    uint8_t neighbors[RTW88Roaming::MaxCandidates*6]={};
+    unsigned count=_ieee80211->copyRoamNeighbors(neighbors);
+    setProperty("ROAM_K_CANDIDATES",neighbors,count*6);
+    uint64_t bytes=0;
+    uint32_t length=rtw88_copy_log(_diagnosticsBuffer,32768,&bytes);
+    setProperty("DiagnosticLog",_diagnosticsBuffer);
+    setProperty("DiagnosticLogBytes",bytes,64);
+    setProperty("DiagnosticLogWrapped",bytes>32767?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("DiagnosticLogSnapshotLength",uint64_t(length),32);
 }
 
 IOReturn AirPortRTW::setProperties(OSObject *properties)
 {
     auto *dict=OSDynamicCast(OSDictionary,properties);
     auto *target=dict?OSDynamicCast(OSData,dict->getObject("RoamToBSSID")):nullptr;
-    if(!target)return kIOReturnUnsupported;
+    auto *name=dict?OSDynamicCast(OSString,dict->getObject("RoamCommand")):nullptr;
+    const char *command=name?name->getCStringNoCopy():nullptr;
+    unsigned operation=target&&!command?3:0;
+    static const char *const commands[]={"refresh","check","switch","scan","snapshot","log-off","log-normal","log-verbose"};
+    for(unsigned i=0;command && i<sizeof(commands)/sizeof(commands[0]);++i)
+        if(!strcmp(command,commands[i]))operation=i+1;
+    if(!operation)return kIOReturnUnsupported;
     if(IOUserClient::clientHasPrivilege(current_task(),kIOClientPrivilegeAdministrator)!=kIOReturnSuccess)
         return kIOReturnNotPrivileged;
-    if(target->getLength()!=6 || !_ieee80211 || !_workLoop)return kIOReturnBadArgument;
-    uint8_t bssid[6];memcpy(bssid,target->getBytesNoCopy(),6);
-    return _workLoop->runAction([](OSObject *owner,void *address,void*,void*,void*)->IOReturn{
+    if(!_ieee80211 || !_workLoop || ((operation>=2 && operation<=4) && (!target || target->getLength()!=6)))
+        return kIOReturnBadArgument;
+    struct Control { unsigned operation; uint8_t bssid[6]; } control={operation,{}};
+    if(target && target->getLength()==6)memcpy(control.bssid,target->getBytesNoCopy(),6);
+    return _workLoop->runAction([](OSObject *owner,void *context,void*,void*,void*)->IOReturn{
         auto *self=static_cast<AirPortRTW*>(owner);
-        if(!self->roamingActionsAllowed() || !self->_ieee80211)return kIOReturnNotReady;
+        auto *request=static_cast<Control*>(context);
+        if(self->_shutdown || !self->_ieee80211)return kIOReturnNotReady;
         uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
-        IOReturn result=self->_ieee80211->requestRoam(static_cast<uint8_t*>(address),ns/1000000ULL);
-        self->setProperty("ROAM_SWITCH_REQUEST_RESULT",(uint64_t)(uint32_t)result,32);
+        IOReturn result=kIOReturnSuccess;
+        if(request->operation>=6) {
+            self->_ieee80211->setRoamLogLevel(request->operation-6);
+            self->_ieee80211->roamTrace("log-level-changed",request->operation-6);
+        } else if(request->operation!=5) {
+            // Same PM interlock as periodic diagnostics. Never sleep on the
+            // controller workloop while a scanner/authentication worker runs.
+            __atomic_store_n(&self->_diagnosticsInHardware,true,__ATOMIC_SEQ_CST);
+            if(!self->roamingActionsAllowed())result=self->_ieee80211->roamPowerBlocked();
+            else switch(request->operation) {
+                case 1: result=self->_ieee80211->refreshRoamNeighbors(ns/1000000ULL);break;
+                case 2: result=self->_ieee80211->checkRoam(request->bssid,ns/1000000ULL);break;
+                case 3: result=self->_ieee80211->requestRoam(request->bssid,ns/1000000ULL);break;
+                case 4: result=self->_ieee80211->scanRoamTarget(request->bssid,ns/1000000ULL);break;
+            }
+            __atomic_store_n(&self->_diagnosticsInHardware,false,__ATOMIC_SEQ_CST);
+        }
+        self->setProperty("ROAM_CONTROL_RESULT",uint64_t(uint32_t(result)),64);
+        if(request->operation==3)self->setProperty("ROAM_SWITCH_REQUEST_RESULT",uint64_t(uint32_t(result)),64);
+        self->publishRoamDiagnostics();
         return result;
-    },this,bssid);
+    },this,&control);
 }
 
 void AirPortRTW::waitForDiagnosticsIdle()

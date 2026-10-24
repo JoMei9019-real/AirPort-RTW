@@ -14,7 +14,7 @@ pre=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign
 pre=pre.replace('#include "RTW88Roaming.hpp"','#include "RTW88RoamSwitch.hpp"')
 extra=r'''
 using IOReturn=int;
-constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnBusy=3,kIOReturnNotFound=4,kIOReturnUnsupported=5;
+constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnBusy=3,kIOReturnNotFound=4,kIOReturnUnsupported=5,kIOReturnError=6;
 constexpr int NL80211_NUM_BANDS=1,IEEE80211_CHAN_DISABLED=1,IEEE80211_CHAN_NO_IR=2,IEEE80211_CHAN_RADAR=4,RTW88_STATE_IDLE=0;
 void IOLockLock(void*){}void IOLockUnlock(void*){}
 struct Channel{int hw_value=6,center_freq=2437,flags=0;};
@@ -31,6 +31,11 @@ struct RTW88IEEE80211 {
  bool _roamSwitchEnabled=true,_roamSwitchInternal=false;
  bool _authenticationWorkerActive=false,_connectCancelled=false;
  uint64_t _roamSwitchLast=0;uint32_t _roamSwitchResult=0;
+ unsigned _roamReason=0;uint32_t _roamRequestReturn=0,_deauthReason=0,_manualScanChannelCount=0;
+ uint64_t _roamNeighborAge=0,_roamScanAge=0,_roamScanLast=0;
+ uint8_t _roamDiagTarget[6]={};int _roamTargetRSSI=0;uint32_t _roamTargetChannel=0,_roamChannelFlags=0;
+ IOReturn validateRoam(const uint8_t*,uint64_t,bool);void beginRoamTest(const uint8_t*);
+ IOReturn roamDecision(unsigned,IOReturn);IOReturn checkRoam(const uint8_t*,uint64_t);
  uint8_t _pmk[32]={7};void *_bssLock=nullptr;RTW88BSS *_bssList=nullptr;Hw *_hw=nullptr;
  unsigned disconnects=0,joins=0,drains=0;int joinResult=0;
  void cancelAuthentication(){++drains;}
@@ -42,7 +47,7 @@ struct RTW88IEEE80211 {
  IOReturn requestRoam(const uint8_t*,uint64_t);void cancelRoamSwitch();
 ''')
 pre=pre.replace('void roamSwitchTick(uint64_t){}','void roamSwitchTick(uint64_t);')
-methods=''.join(method(n) for n in ('void RTW88IEEE80211::resetRoamingState()', 'bool RTW88IEEE80211::roamingActionsReady() const','void RTW88IEEE80211::cancelRoamSwitch()','IOReturn RTW88IEEE80211::requestRoam(','void RTW88IEEE80211::roamSwitchTick('))
+methods=''.join(method(n) for n in ('void RTW88IEEE80211::resetRoamingState()', 'bool RTW88IEEE80211::roamingActionsReady() const','void RTW88IEEE80211::beginRoamTest(','IOReturn RTW88IEEE80211::roamDecision(','IOReturn RTW88IEEE80211::validateRoam(','IOReturn RTW88IEEE80211::checkRoam(','void RTW88IEEE80211::cancelRoamSwitch()','IOReturn RTW88IEEE80211::requestRoam(','void RTW88IEEE80211::roamSwitchTick('))
 cases=r'''
 void keyed(RTW88IEEE80211 &b){b._state=5;b._associatedVisible=true;b._ptkConf=b._gtkConf=&b;}
 void erased(RTW88IEEE80211 &b){assert(!b._roamSwitch.phase);for(auto v:b._roamSwitch.pmk)assert(!v);}

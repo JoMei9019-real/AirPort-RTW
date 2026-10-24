@@ -76,6 +76,7 @@ template<class...T> void IOLog(const char*,T...){}
 struct Ops { void (*set_key)(void*,int,void*,void*,ieee80211_key_conf*)=nullptr; };
 struct Hw { Ops *ops=nullptr; };
 struct RTW88IEEE80211 {
+ uint32_t _roamDataRx=0;void roamTrace(const char*,uint32_t=0){}
  bool _powered=true,_associatedVisible=true,_enterprise=true,_enterpriseAuthorized=false;
  bool _externalSupplicant=true,_wpa2=true,_externalPTKInstalled=false,_externalGTKInstalled=false;
  bool _pmkProvided=false,_internalEapolTx=false,_rxCcmpIvSkipLogged=false,_snonceValid=false;

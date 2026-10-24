@@ -1,5 +1,15 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 6: repeatable roaming tests and diagnostics
+
+Beta 6 adds runtime Neighbor Report refresh, exact preflight rejection reasons,
+a diagnostic scan of one validated non-DFS neighbor channel, and a structured
+event timeline through authentication, association, key exchange and fallback.
+The bundled tool provides `--prepare`, `--roam`, `--status`, `--watch`, `--report`
+and runtime log levels. RTL8821CE personalities enable both roaming switches in
+this beta; other cards remain opt-in. No automatic steering or 802.11r FT.
+See [Beta 6 commands, limits and test plan](BETA_1_1_0_6.md).
+
 ## 1.1.0 Beta 5: controlled WPA2 AP switching
 
 Beta 5 adds an opt-in manual switch to a neighbor verified in the recent scan
