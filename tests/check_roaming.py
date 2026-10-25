@@ -50,11 +50,19 @@ template<class... T> void IOLog(const char *, T...) {}
 using namespace RTW88Roaming;
 constexpr int RTW88_STATE_CONNECTED=5,RTW88_STATE_SCANNING=1;
 constexpr uint32_t WLAN_CIPHER_SUITE_CCMP=0x000fac04;
-struct Parent {bool allowed=true;bool roamingActionsAllowed(){return allowed;}};
+struct Parent {bool allowed=true,btmAvailable=false;unsigned scheduled=0;
+ bool roamingActionsAllowed(){return allowed;}bool btmControlAvailable(){return btmAvailable&&allowed;}
+ bool scheduleBtmControl(unsigned delay){assert(delay>0&&delay<=100);++scheduled;return btmControlAvailable();}};
 struct RTW88IEEE80211 {
  bool _autoRoamEnabled=false,_autoScanPending=false,_stationNeighborReport=false;uint64_t _autoNextMs=0;
  uint32_t _autoScanGeneration=0,_autoScans=0,_autoSwitches=0;const char *_autoStage="disabled";
  ParseDiagnostic _neighborDiagnostic;const char *_neighborReject="none";
+ bool _stationBTM=false;unsigned _btmPhase=0;BtmRequest _btmRequest;
+ uint8_t _btmSource[6]={},_btmTarget[6]={};
+ uint64_t _btmDeadline=0,_btmAckDeadline=0,_btmReplyIdentity=0,_btmAckIdentity=0;
+ uint32_t _btmScanGeneration=0,_btmLastStatus=255,_btmLastResponseToken=0;bool _btmScanned=false;const char *_btmStage="idle";
+ void cancelBTM(const char*){_btmPhase=0;}
+ void queueBtm(const BtmRequest&,uint64_t){}
  uint32_t _neighborActionLength=0,_neighborActualToken=0;uint64_t _neighborResponseAge=0;
  Session _roaming;uint32_t _roamingStats[Count]={};
  bool _roamScanActive=false,_roamScanWorkerPending=false;uint32_t _roamScanResult=0,_roamLastResponseCount=0,_roamTestID=0;
@@ -69,7 +77,7 @@ struct RTW88IEEE80211 {
  void *_ptkConf=this,*_gtkConf=this;
  uint8_t _macAddr[6]={2,1,2,3,4,5};uint16_t _txSeq=0;
  struct {
-  uint8_t bssid[6]={2,6,7,8,9,10};char ssid[33]="Test";uint8_t ssid_len=4,channel=6;
+  uint8_t bssid[6]={2,6,7,8,9,10};char ssid[33]="Test";uint8_t ssid_len=4,channel=6;uint16_t beacon_interval=100;
   uint32_t cipher=WLAN_CIPHER_SUITE_CCMP;uint8_t ies[512]={};uint16_t ies_len=0;
  } _targetBSS;
  bool txSucceeds=true;std::vector<std::vector<uint8_t>> submitted;

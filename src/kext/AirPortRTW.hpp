@@ -111,6 +111,9 @@ class AirPortRTW : public IO80211Controller, public RTW88EventDelegate, public R
 
 public:
     static void diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *timer);
+    static void btmTimerFired(OSObject *owner,IOTimerEventSource *timer);
+    bool btmControlAvailable() const override { return _btmTimer && roamingActionsAllowed(); }
+    bool scheduleBtmControl(unsigned delayMs) override;
     static void awdlTimerFired(OSObject *owner, IOTimerEventSource *timer);
     static void deferredRxReady(OSObject *owner, IOInterruptEventSource *source, int count);
     bool deferRxFrame(struct sk_buff *skb) override;
@@ -298,6 +301,7 @@ private:
     RTW88IEEE80211         *_ieee80211   = nullptr;  /* reused as-is from rtw88 core */
 
     IOTimerEventSource *_diagnosticsTimer = nullptr;
+    IOTimerEventSource *_btmTimer = nullptr;
     char *_diagnosticsBuffer = nullptr;
     uint64_t _diagnosticsSamples = 0;
     /* Last periodic sample written to the diagnostic ring (r8 throttle). */

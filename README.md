@@ -1,5 +1,18 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 10: active 802.11v BSS Transition Management
+
+Compatible WPA2/CCMP associations now advertise BTM when automatic roaming and
+the bounded BTM control path are available. AP candidates are checked against
+fresh same-SSID scan results and security/regulatory policy. The driver can scan
+one proposed channel if time permits, send an acceptance with the target BSSID,
+wait for the matching TX ACK, then invoke the tested switch/fallback path.
+Unsupported modes, unsuitable targets, short deadlines and failures are rejected
+or canceled. This is an experimental BTM subset, not all 802.11v features or FT.
+The existing `-rtwnoautoroam` boot override disables both automatic selection and
+BTM-triggered changes and omits the BTM advertisement on the next association.
+See [Beta 10 behavior, limits and hardware test commands](BETA_1_1_0_10.md).
+
 ## 1.1.0 Beta 9: automatic roaming and Neighbor Report diagnostics
 
 RTL8821CE enables automatic WPA2/CCMP roaming by default. The existing controller

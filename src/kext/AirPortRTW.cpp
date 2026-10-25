@@ -115,7 +115,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.9-auto-roam");
+    setProperty("DriverBuild", "1.1.0-beta.10-controlled-btm");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -289,7 +289,11 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.1.0-beta.9 automatic roaming and detailed Neighbor Report diagnostics enabled\n");
+    _btmTimer=IOTimerEventSource::timerEventSource(this,&AirPortRTW::btmTimerFired);
+    if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
+        _btmTimer->release();_btmTimer=nullptr;
+    }
+    IOLog("AirPortRTW: 1.1.0-beta.10 controlled 802.11v BTM and automatic roaming enabled\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -322,15 +326,17 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         uint8_t neighbors[RTW88Roaming::MaxCandidates*6]={};
         unsigned neighborCount=self->_ieee80211->copyRoamNeighbors(neighbors);
         self->setProperty("ROAM_K_CANDIDATES",neighbors,neighborCount*6);
-        static const char *const names[RTW88Roaming::Count] = {
+        static const char *const names[] = {
             "ROAM_AP_NEIGHBOR_REPORT", "ROAM_AP_BTM", "ROAM_AP_MOBILITY_DOMAIN",
             "ROAM_AP_MDID", "ROAM_AP_FT_POLICY", "ROAM_AP_FT_AKMS",
             "ROAM_K_REQUEST_SUBMITTED", "ROAM_K_REQUEST_FAILED", "ROAM_K_RESPONSE_RX",
             "ROAM_K_RESPONSE_INVALID", "ROAM_K_RESPONSE_TIMEOUT", "ROAM_K_NEIGHBOR_COUNT",
             "ROAM_K_NEIGHBOR_TRUNCATED", "ROAM_V_REQUEST_RX", "ROAM_V_REJECT_SUBMITTED",
             "ROAM_V_RESPONSE_FAILED", "ROAM_V_REQUEST_INVALID", "ROAM_V_RATE_LIMITED",
-            "ROAM_V_CANDIDATE_COUNT", "ROAM_V_LAST_MODE", "ROAM_V_DISASSOC_TIMER_TBTT"
+            "ROAM_V_CANDIDATE_COUNT", "ROAM_V_LAST_MODE", "ROAM_V_DISASSOC_TIMER_TBTT",
+            "ROAM_V_ACCEPT_SUBMITTED", "ROAM_V_SWITCH_SUBMITTED", "ROAM_V_SCAN_SUBMITTED", "ROAM_V_CANCELED"
         };
+        static_assert(sizeof(names)/sizeof(names[0])==RTW88Roaming::Count,"roaming diagnostic names must match counters");
         for (unsigned i = 0; i < RTW88Roaming::Count; ++i)
             self->setProperty(names[i], (uint64_t)self->_ieee80211->roamingStat(i), 32);
         unsigned state = self->_ieee80211->rawState();
@@ -396,6 +402,31 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     timer->setTimeoutMS(5000);
 }
 
+bool AirPortRTW::scheduleBtmControl(unsigned delayMs)
+{
+    if(!btmControlAvailable())return false;
+    _btmTimer->setTimeoutMS(delayMs);
+    if(!btmControlAvailable()){_btmTimer->cancelTimeout();return false;}
+    return true;
+}
+
+void AirPortRTW::btmTimerFired(OSObject *owner,IOTimerEventSource *timer)
+{
+    auto *self=OSDynamicCast(AirPortRTW,owner);
+    if(!self || self->_shutdown)return;
+    __atomic_store_n(&self->_diagnosticsInHardware,true,__ATOMIC_SEQ_CST);
+    if(self->roamingActionsAllowed() && self->_ieee80211 && self->_ieee80211->isPowered()) {
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+        self->_ieee80211->btmTick(ns/1000000ULL);
+    }
+    __atomic_store_n(&self->_diagnosticsInHardware,false,__ATOMIC_SEQ_CST);
+    if(self->_shutdown)return;
+    self->publishRoamDiagnostics();
+    if(self->btmControlAvailable() && self->_ieee80211 && self->_ieee80211->isPowered() && self->_ieee80211->btmPending())
+        self->scheduleBtmControl(self->_ieee80211->btmPollMs());
+    else timer->cancelTimeout();
+}
+
 void AirPortRTW::publishRoamDiagnostics()
 {
     if(!_ieee80211 || !_diagnosticsBuffer)return;
@@ -406,7 +437,8 @@ void AirPortRTW::publishRoamDiagnostics()
     setProperty("ROAM_SCAN_ACTIVE",_ieee80211->roamScanActive()?kOSBooleanTrue:kOSBooleanFalse);
     setProperty("ROAM_AUTO_ENABLED",_ieee80211->autoRoamingEnabled()?kOSBooleanTrue:kOSBooleanFalse);
     setProperty("ROAM_K_ADVERTISED",_ieee80211->neighborReportAdvertised()?kOSBooleanTrue:kOSBooleanFalse);
-    setProperty("ROAM_V_ADVERTISED",kOSBooleanFalse);
+    setProperty("ROAM_V_ADVERTISED",_ieee80211->btmAdvertised()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_V_MODE",_ieee80211->btmAdvertised()?"controlled-btm":"reject-only");
     setProperty("ROAM_K_PENDING",_ieee80211->roamNeighborPending()?kOSBooleanTrue:kOSBooleanFalse);
     uint8_t neighbors[RTW88Roaming::MaxCandidates*6]={};
     unsigned count=_ieee80211->copyRoamNeighbors(neighbors);
@@ -470,10 +502,12 @@ IOReturn AirPortRTW::setProperties(OSObject *properties)
 
 void AirPortRTW::waitForDiagnosticsIdle()
 {
+    if(_btmTimer)_btmTimer->cancelTimeout();
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     for (int i = 0; i < 1000 &&
          __atomic_load_n(&_diagnosticsInHardware, __ATOMIC_SEQ_CST); i++)
         IOSleep(1);
+    if(_btmTimer)_btmTimer->cancelTimeout();
 }
 
 bool AirPortRTW::failStart(IOService *provider, const char *reason)
@@ -711,6 +745,11 @@ void AirPortRTW::teardown()
     if (_deferredRxSource) {
         _deferredRxSource->disable();
         if (_workLoop) _workLoop->removeEventSource(_deferredRxSource);
+    }
+    if(_btmTimer) {
+        _btmTimer->disable();_btmTimer->cancelTimeout();
+        if(_workLoop)_workLoop->removeEventSource(_btmTimer);
+        _btmTimer->cancelTimeout();_btmTimer->release();_btmTimer=nullptr;
     }
     if (_diagnosticsTimer) {
         /* A callback already running may re-arm after the first cancel;

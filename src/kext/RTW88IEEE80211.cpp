@@ -1100,7 +1100,7 @@ void RTW88IEEE80211::restoreSTAChannelAfterAWDL()
 IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
 {
     // Explicit roaming owns the single PHY until scan/switch completion.
-    if (roamScanActive() || _roamSwitch.phase ||
+    if (roamScanActive() || _roamSwitch.phase || _btmPhase ||
         __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE))
         return kIOReturnBusy;
     if (!_powered || !_hw || !_hw->wiphy || channel == 0)
@@ -2295,6 +2295,7 @@ void RTW88IEEE80211::txStatus(struct sk_buff *skb)
     struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
     if (!(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS))
         return;
+    observeBtmTx(skb->data,skb->len,(info->flags&IEEE80211_TX_STAT_ACK)!=0);
 
     const char *frameName = "frame";
     if (skb->len >= sizeof(struct ieee80211_hdr_3addr)) {
@@ -3413,11 +3414,13 @@ bool RTW88IEEE80211::buildAssocReq(uint8_t *buf, uint32_t *len)
     /* Capability: ESS, Short Preamble, and Privacy for encrypted APs. */
     uint16_t cap = 0x0431;
     RTW88Roaming::Capabilities roamCaps;
-    const bool requestRrm = _roamingAssistEnabled && _wpa2 &&
+    const bool roamSupported = _roamingAssistEnabled && _wpa2 &&
         !_externalSupplicant && !_enterprise &&
         _targetBSS.cipher == WLAN_CIPHER_SUITE_CCMP &&
-        RTW88Roaming::capabilities(_targetBSS.ies, _targetBSS.ies_len, roamCaps) &&
-        roamCaps.neighborReport && !roamCaps.pmfRequired;
+        RTW88Roaming::capabilities(_targetBSS.ies, _targetBSS.ies_len, roamCaps);
+    const bool requestRrm=roamSupported && roamCaps.neighborReport && !roamCaps.pmfRequired;
+    _stationBTM=roamSupported && roamCaps.btm && !roamCaps.pmfRequired &&
+        _roamSwitchEnabled && _autoRoamEnabled && _parent && _parent->btmControlAvailable();
     if (requestRrm) cap |= 0x1000; // Radio Measurement capability
     _stationNeighborReport=requestRrm;
     if (_wpa2)
@@ -3545,8 +3548,11 @@ bool RTW88IEEE80211::buildAssocReq(uint8_t *buf, uint32_t *len)
         static const uint8_t rrm[] = {70, 5, 2, 0, 0, 0, 0};
         memcpy(body, rrm, sizeof(rrm)); body += sizeof(rrm);
     }
-    // Do not add BTM Extended Capabilities, MDIE, FTIE or FT AKMs: an
-    // always-reject BTM handler and passive FT metadata are not active roaming.
+    if(_stationBTM) {
+        static const uint8_t btm[]={127,3,0,0,8}; // Extended capability bit 19.
+        memcpy(body,btm,sizeof(btm));body+=sizeof(btm);
+    }
+    // No MDIE, FTIE or FT AKMs: 802.11r is not implemented.
 
     /* Advertise the cipher choice we actually implement: pairwise CCMP/AES
      * with the AP's selected group cipher.  Mixed TKIP+AES APs often list
@@ -4247,6 +4253,7 @@ bool RTW88IEEE80211::txMgmtFrame(const uint8_t *frame, uint32_t len)
 
 void RTW88IEEE80211::resetRoamingState()
 {
+    cancelBTM("link-reset");_stationBTM=false;
     _autoScanPending=false;_autoNextMs=0;_autoStage="waiting-link";
     _stationNeighborReport=false;
     if (roamScanActive()) {
@@ -4411,6 +4418,9 @@ void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
             return;
         }
         _roaming.btmReplied = true; _roaming.lastBtmMs = nowMs;
+        if(_stationBTM && _autoRoamEnabled && _parent && _parent->btmControlAvailable()) {
+            queueBtm(request,nowMs);return;
+        }
         uint8_t response[5] = {};
         const size_t size = RTW88Roaming::btmReject(response, sizeof(response), request.token);
         const bool sent = sendRoamingAction(response, uint32_t(size));
@@ -4418,6 +4428,156 @@ void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
                                                 RTW88Roaming::BtmTxFail], 1U, __ATOMIC_RELAXED);
         // Never accept, disconnect, channel-hop, rekey, or obey a remote URL.
     }
+}
+
+void RTW88IEEE80211::cancelBTM(const char *reason)
+{
+    if(!_btmPhase)return;
+    _btmPhase=0;_btmStage=reason;
+    __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmCanceled],1U,__ATOMIC_RELAXED);
+    roamTrace("btm-canceled");
+}
+
+bool RTW88IEEE80211::sendBtmResponse(uint8_t token,uint8_t status,const uint8_t *target)
+{
+    uint8_t body[11]={};
+    const size_t n=RTW88Roaming::btmResponse(body,sizeof(body),token,status,target);
+    _btmLastStatus=status;_btmLastResponseToken=token;
+    const bool sent=n && sendRoamingAction(body,unsigned(n));
+    const unsigned stat=sent?(status==0?RTW88Roaming::BtmAcceptTx:RTW88Roaming::BtmRejectTx):RTW88Roaming::BtmTxFail;
+    __atomic_add_fetch(&_roamingStats[stat],1U,__ATOMIC_RELAXED);
+    roamTrace(sent?(status==0?"btm-accept-submitted":"btm-reject-submitted"):"btm-response-tx-failed",status);
+    return sent;
+}
+
+void RTW88IEEE80211::rejectBtm(uint8_t status,const char *reason)
+{
+    (void)sendBtmResponse(_btmRequest.token,status);
+    _btmPhase=0;_btmStage=reason;
+}
+
+void RTW88IEEE80211::queueBtm(const RTW88Roaming::BtmRequest &request,uint64_t nowMs)
+{
+    if(_btmPhase){(void)sendBtmResponse(request.token,1);return;}
+    _btmRequest=request;memcpy(_btmSource,_targetBSS.bssid,6);memset(_btmTarget,0,6);
+    _btmDeadline=0;_btmScanned=false;_btmScanGeneration=0;_btmLastStatus=255;
+    // Termination schedules and ESS-leaving requests are parsed but are not
+    // implemented by this first intra-ESS BTM path. Do not fetch remote URLs.
+    if(request.mode&24) {
+        (void)sendBtmResponse(request.token,1);_btmStage="unsupported-termination-or-ess-mode";return;
+    }
+    if(!(request.mode&1) || !request.candidates.count) {
+        (void)sendBtmResponse(request.token,7);_btmStage="no-candidates";return;
+    }
+    pauseAutoRoaming(nowMs);
+    const uint64_t lifetime=RTW88Roaming::btmLifetimeMs(request,_targetBSS.beacon_interval);
+    _btmDeadline=nowMs+lifetime;
+    if(lifetime<1000){rejectBtm(7,"deadline-too-short");return;}
+    _btmPhase=1;_btmStage="queued";
+    if(!_parent->scheduleBtmControl(1)){rejectBtm(1,"control-unavailable");return;}
+    roamTrace("btm-control-queued",request.token);
+}
+
+bool RTW88IEEE80211::selectBtmTarget(uint64_t nowMs,uint8_t target[6])
+{
+    using namespace RTW88RoamSwitch;
+    int best=-10000000;memset(target,0,6);
+    const unsigned currentFreq=channelFrequency(_targetBSS.channel);
+    const bool current5=band5(currentFreq),imminent=(_btmRequest.mode&4)!=0;
+    const int currentRank=rank(currentFreq,_rssi,current5);
+    IOLockLock(_bssLock);
+    for(unsigned i=0;i<_btmRequest.candidates.count;++i) {
+        const auto &hint=_btmRequest.candidates.entries[i];
+        if(hint.hasPreference && !hint.preference)continue;
+        for(const RTW88BSS *b=_bssList;b;b=b->next) {
+            if(memcmp(b->bssid,hint.bssid,6) || !memcmp(b->bssid,_targetBSS.bssid,6) ||
+               b->channel!=hint.channel || roamBSSReason(*b,nowMs)!=Ready)continue;
+            const int score=rank(b->freq,b->rssi);
+            if(!imminent && (score<currentRank ||
+               (band5(b->freq)==current5 && _rssi>=MinimumRSSI && b->rssi<_rssi+SameBandGain)))continue;
+            const int preferred=score+int(hint.hasPreference?hint.preference:0)*10000;
+            if(preferred>best || (preferred==best && memcmp(b->bssid,target,6)<0)) {
+                best=preferred;memcpy(target,b->bssid,6);
+            }
+        }
+    }
+    IOLockUnlock(_bssLock);
+    return RTW88Roaming::unicast(target);
+}
+
+void RTW88IEEE80211::observeBtmTx(const uint8_t *frame,uint32_t length,bool acknowledged)
+{
+    // Publish only an ACK identity; never join or re-arm a timer from TX/RX.
+    if(!acknowledged || !frame || length<35 || (RTW88Enterprise::le16(frame)&0x00fc)!=0x00d0 ||
+       frame[24]!=10 || frame[25]!=8 || frame[27]!=0)return;
+    const uint16_t sequence=RTW88Enterprise::le16(frame+22)>>4;
+    __atomic_store_n(&_btmAckIdentity,RTW88Roaming::btmIdentity(sequence,frame+4),__ATOMIC_RELEASE);
+}
+
+void RTW88IEEE80211::btmTick(uint64_t nowMs)
+{
+    using namespace RTW88RoamSwitch;
+    if(!_btmPhase)return;
+    if(!_autoRoamEnabled || !_parent || !_parent->roamingActionsAllowed() || !_powered ||
+       !_associatedVisible || memcmp(_btmSource,_targetBSS.bssid,6)) {
+        cancelBTM("link-or-power-changed");return;
+    }
+    if(nowMs>=_btmDeadline) {
+        if(_btmPhase==1)rejectBtm(7,"request-expired");
+        else cancelBTM("request-expired-after-accept");
+        return;
+    }
+    if(_btmPhase==2) {
+        if(__atomic_load_n(&_btmAckIdentity,__ATOMIC_ACQUIRE)==_btmReplyIdentity) {
+            uint8_t target[6];memcpy(target,_btmTarget,6);
+            // Revalidate after ACK, before any destructive operation.
+            if(validateRoam(target,nowMs,false)!=kIOReturnSuccess){cancelBTM("target-invalid-after-ack");return;}
+            _btmPhase=0;_btmStage="switch-submitted";roamTrace("btm-response-acked");
+            if(requestRoam(target,nowMs)==kIOReturnSuccess)
+                __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmSwitchTx],1U,__ATOMIC_RELAXED);
+            else _btmStage="switch-rejected-after-ack";
+        } else if(nowMs>=_btmAckDeadline)cancelBTM("accept-not-acknowledged");
+        return;
+    }
+    const bool scanning=roamScanActive() || _manualScanChannelCount ||
+        __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE);
+    if(scanning) {
+        if(!_btmScanned)rejectBtm(1,"radio-busy");
+        return;
+    }
+    if(_btmScanned && (_scanGeneration!=_btmScanGeneration ||
+       __atomic_load_n(&_roamScanResult,__ATOMIC_RELAXED)!=2)) {
+        rejectBtm(7,"target-scan-failed-or-replaced");return;
+    }
+    if(_btmDeadline-nowMs<1000){rejectBtm(7,"insufficient-join-time");return;}
+    if(roamControlReady()!=kIOReturnSuccess){rejectBtm(1,"preflight-rejected");return;}
+    uint8_t target[6]={};
+    if(selectBtmTarget(nowMs,target)) {
+        if(validateRoam(target,nowMs,false)!=kIOReturnSuccess){rejectBtm(7,"target-rejected");return;}
+        memcpy(_btmTarget,target,6);
+        _btmReplyIdentity=RTW88Roaming::btmIdentity(_txSeq,_btmSource);
+        __atomic_store_n(&_btmAckIdentity,0ULL,__ATOMIC_RELEASE);
+        if(!sendBtmResponse(_btmRequest.token,0,target)){cancelBTM("accept-tx-failed");return;}
+        _btmPhase=2;_btmStage="waiting-accept-ack";_btmAckDeadline=nowMs+250;
+        return;
+    }
+    if(!_btmScanned && _btmDeadline-nowMs>=4500) {
+        const RTW88Roaming::Candidate *hint=nullptr;
+        for(unsigned i=0;i<_btmRequest.candidates.count;++i) {
+            const auto &c=_btmRequest.candidates.entries[i];
+            if(!memcmp(c.bssid,_targetBSS.bssid,6) || (c.hasPreference && !c.preference) ||
+               roamChannelReason(c.channel,0)!=Ready)continue;
+            if(!hint || c.preference>hint->preference)hint=&c;
+        }
+        if(hint) {
+            beginRoamTest(hint->bssid);
+            if(startRoamScan(hint->channel,nowMs)==kIOReturnSuccess) {
+                _btmScanned=true;_btmScanGeneration=_scanGeneration;_btmStage="scanning-target-channel";
+                __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmScanTx],1U,__ATOMIC_RELAXED);return;
+            }
+        }
+    }
+    rejectBtm(7,"no-suitable-candidate");
 }
 
 unsigned RTW88IEEE80211::copyRoamNeighbors(uint8_t *out) const
@@ -4606,6 +4766,7 @@ void RTW88IEEE80211::autoRoamTick(uint64_t nowMs)
     // Existing five-second controller timer, with its PM interlock held.
     // No new timer, thread, polling loop or waits for an auth/scan worker.
     if(!_autoRoamEnabled){_autoStage="disabled";return;}
+    if(_btmPhase){_autoStage="btm-pending";return;}
     if(!_roamingAssistEnabled || !_roamSwitchEnabled || !_parent ||
        !_parent->roamingActionsAllowed() || !_powered) {
         _autoScanPending=false;_autoNextMs=0;_autoStage="waiting-link-or-power";return;
@@ -4787,8 +4948,13 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
         _roamGateSnapshot,unsigned(authenticationCancelled()),unsigned(_awdlOffChannel),_manualScanChannelCount);
     ROAM_APPEND("auto_enabled=%u\nauto_stage=%s\nauto_next_ms=%llu\nauto_scan_pending=%u\nauto_scans=%u\nauto_switches=%u\n",
         unsigned(_autoRoamEnabled),_autoStage,(unsigned long long)_autoNextMs,unsigned(_autoScanPending),_autoScans,_autoSwitches);
-    ROAM_APPEND("assoc_neighbor_report_advertised=%u\nassoc_btm_advertised=0\nbtm_mode=reject-only\n",
-        unsigned(_stationNeighborReport));
+    ROAM_APPEND("assoc_neighbor_report_advertised=%u\nassoc_btm_advertised=%u\nbtm_mode=%s\n",
+        unsigned(_stationNeighborReport),unsigned(_stationBTM),_stationBTM?"controlled-btm":"reject-only");
+    ROAM_APPEND("btm_phase=%u\nbtm_stage=%s\nbtm_token=%u\nbtm_last_status=%u\nbtm_deadline_ms=%llu\nbtm_remaining_ms=%llu\nbtm_scan_generation=%u\nbtm_target=%02x:%02x:%02x:%02x:%02x:%02x\n",
+        _btmPhase,_btmStage,_btmRequest.token,_btmLastStatus,(unsigned long long)_btmDeadline,
+        (unsigned long long)(_btmDeadline>nowMs?_btmDeadline-nowMs:0),_btmScanGeneration,
+        _btmTarget[0],_btmTarget[1],_btmTarget[2],_btmTarget[3],_btmTarget[4],_btmTarget[5]);
+    ROAM_APPEND("btm_last_response_token=%u\n",_btmLastResponseToken);
     ROAM_APPEND("neighbor_reject=%s\nneighbor_action_bytes=%u\nneighbor_actual_token=%u\nneighbor_response_age_ms=%lld\nneighbor_parse_reason=%s\nneighbor_parse_offset=%u\nneighbor_parse_id=%u\nneighbor_parse_length=%u\nneighbor_parse_remaining=%u\nneighbor_parse_candidate=%u\n",
         _neighborReject,_neighborActionLength,_neighborActualToken,(long long)_neighborResponseAge,
         RTW88Roaming::parseName(_neighborDiagnostic.code),_neighborDiagnostic.offset,_neighborDiagnostic.id,

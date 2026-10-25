@@ -46,7 +46,7 @@ pre=pre.replace('void roamTrace(const char*,uint32_t=0){}',r'''
  IOReturn startRoamScan(uint16_t,uint64_t);IOReturn discoverRoamAPs(uint64_t);IOReturn selectRoamTarget(uint64_t);
  IOReturn cmdScan(uint16_t=0);void runManualScan();
  void autoRoamTick(uint64_t);
- void pauseAutoRoaming(uint64_t now){_autoScanPending=false;_autoNextMs=now+60000;}
+ void pauseAutoRoaming(uint64_t now){cancelBTM("manual-command");_autoScanPending=false;_autoNextMs=now+60000;}
  int _rssi=-45;uint32_t _scanGeneration=0,_lastScanCacheCount=0,_lastScanChannelCount=0;
  uint32_t _scanVisited2GHz=0,_scanVisited5GHz=0,_timeoutMs=0,_rxFrameCount=0;
  int _scanReturnState=0,_awdlPreparedChannel=0;const char *_scanEngine="none";

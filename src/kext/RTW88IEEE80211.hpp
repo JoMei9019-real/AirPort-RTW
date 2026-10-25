@@ -104,6 +104,8 @@ public:
     virtual bool deferRxFrame(struct sk_buff *skb) { (void)skb; return false; }
     virtual bool rxProcessingDeferred() const { return false; }
     virtual bool roamingActionsAllowed() const { return false; }
+    virtual bool btmControlAvailable() const { return false; }
+    virtual bool scheduleBtmControl(unsigned delayMs) { (void)delayMs; return false; }
     virtual void setRxQueueEnabled(bool enabled) { (void)enabled; }
     virtual void radioPowerChanged(bool powered) { (void)powered; }
     /* Optional native 802.11 action-frame sink for AWDL/P2P controllers. */
@@ -254,8 +256,13 @@ public:
     void autoRoamTick(uint64_t nowMs);
     bool autoRoamingEnabled() const { return _autoRoamEnabled; }
     bool neighborReportAdvertised() const { return _stationNeighborReport; }
+    bool btmAdvertised() const { return _stationBTM; }
+    bool btmPending() const { return _btmPhase!=0; }
+    unsigned btmPollMs() const { return _btmPhase==2?20:100; }
+    void btmTick(uint64_t nowMs);
+    void cancelBTM(const char *reason);
     void setAutoRoamingEnabled(bool enabled) { _autoRoamEnabled=enabled; _autoScanPending=false; _autoNextMs=0; _autoStage=enabled?"warming-up":"disabled"; }
-    void pauseAutoRoaming(uint64_t nowMs) { _autoScanPending=false; _autoNextMs=nowMs+60000; _autoStage="manual-command-pause"; }
+    void pauseAutoRoaming(uint64_t nowMs) { cancelBTM("manual-command"); _autoScanPending=false; _autoNextMs=nowMs+60000; _autoStage="manual-command-pause"; }
     IOReturn requestRoam(const uint8_t *bssid,uint64_t nowMs);
     IOReturn checkRoam(const uint8_t *bssid, uint64_t nowMs);
     IOReturn refreshRoamNeighbors(uint64_t nowMs);
@@ -303,6 +310,11 @@ private:
     IOReturn roamControlReady();
     IOReturn startRoamScan(uint16_t channel, uint64_t nowMs);
     void beginRoamTest(const uint8_t *bssid);
+    void queueBtm(const RTW88Roaming::BtmRequest &request,uint64_t nowMs);
+    bool sendBtmResponse(uint8_t token,uint8_t status,const uint8_t *target=nullptr);
+    void rejectBtm(uint8_t status,const char *reason);
+    bool selectBtmTarget(uint64_t nowMs,uint8_t target[6]);
+    void observeBtmTx(const uint8_t *frame,uint32_t length,bool acknowledged);
 
     void      doAuthenticate();
     void      cancelAuthentication();
@@ -549,6 +561,14 @@ private:
     uint32_t _roamGateSnapshot=0;
     bool _autoRoamEnabled=false, _autoScanPending=false;
     bool _stationNeighborReport=false;
+    bool _stationBTM=false;
+    unsigned _btmPhase=0;
+    RTW88Roaming::BtmRequest _btmRequest;
+    uint8_t _btmSource[6]={},_btmTarget[6]={};
+    uint64_t _btmDeadline=0,_btmAckDeadline=0,_btmReplyIdentity=0,_btmAckIdentity=0;
+    uint32_t _btmScanGeneration=0,_btmLastStatus=255,_btmLastResponseToken=0;
+    bool _btmScanned=false;
+    const char *_btmStage="idle";
     uint64_t _autoNextMs=0;
     uint32_t _autoScanGeneration=0, _autoScans=0, _autoSwitches=0;
     const char *_autoStage="disabled";

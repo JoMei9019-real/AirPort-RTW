@@ -188,6 +188,27 @@ inline size_t btmReject(uint8_t *out, size_t capacity, uint8_t token) {
     out[3] = 1; out[4] = 0; // Reject unspecified; no target BSSID on rejection.
     return 5;
 }
+inline size_t btmResponse(uint8_t *out,size_t capacity,uint8_t token,uint8_t status,const uint8_t *target=nullptr) {
+    const size_t bytes=status==0?11:5;
+    if(!out || capacity<bytes || (status==0 && (!target || !unicast(target))))return 0;
+    out[0]=10;out[1]=8;out[2]=token;out[3]=status;out[4]=0;
+    if(status==0)memcpy(out+5,target,6);
+    return bytes;
+}
+inline uint64_t btmIdentity(uint16_t sequence,const uint8_t *ap) {
+    uint64_t id=uint64_t(sequence&4095)<<48;
+    for(unsigned i=0;i<6;++i)id|=uint64_t(ap[i])<<(8*i);
+    return id;
+}
+inline uint64_t btmLifetimeMs(const BtmRequest &request,unsigned beaconTU) {
+    if(!beaconTU || !request.validity)return 0;
+    uint64_t lifetime=uint64_t(request.validity)*beaconTU*1024/1000;
+    if(request.mode&4) {
+        const uint64_t disconnect=uint64_t(request.disassociationTimer)*beaconTU*1024/1000;
+        if(disconnect<lifetime)lifetime=disconnect;
+    }
+    return lifetime<30000?lifetime:30000;
+}
 struct Session {
     Capabilities ap;
     Candidates neighbors;
@@ -210,6 +231,6 @@ enum Stat : unsigned {
     RequestTx, RequestTxFail, ResponseRx, ResponseInvalid, ResponseTimeout,
     NeighborCount, NeighborTruncated, BtmRx, BtmRejectTx, BtmTxFail,
     BtmInvalid, BtmRateLimited, BtmCandidates, BtmMode, BtmDisassocTimer,
-    Count
+    BtmAcceptTx, BtmSwitchTx, BtmScanTx, BtmCanceled, Count
 };
 }
