@@ -19,7 +19,7 @@ void absolutetime_to_nanoseconds(uint64_t t,uint64_t *n){*n=t;}
 ''')
 pre=pre.replace('int hw_value=6,center_freq=2437,flags=0;', 'int hw_value=6,center_freq=2437,flags=0,band=0;')
 pre=pre.replace('int n_channels=1;Channel channels[1];','int n_channels=4,band=0;Channel channels[4]={{6,2437,0,0},{11,2462,1,0},{36,5180,0,1},{116,5580,6,1}};')
-pre=pre.replace('struct Hw{Wiphy*wiphy;};',r'''
+pre=pre.replace('struct Hw{Wiphy*wiphy;struct {struct {Channel *chan=nullptr;} chandef;} conf;};',r'''
 struct ieee80211_scan_request {struct {Channel **channels=nullptr;int n_channels=0;} req;};
 struct Hw;
 struct Ops {int (*hw_scan)(Hw*,void*,ieee80211_scan_request*)=nullptr;};

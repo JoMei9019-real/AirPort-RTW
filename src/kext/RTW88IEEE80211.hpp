@@ -541,6 +541,7 @@ private:
     uint32_t _roamTargetChannel=0, _roamChannelFlags=0;
     uint8_t _roamRecommended[6]={};
     bool _roamTargetFromScan=false;
+    uint32_t _roamGateSnapshot=0;
     bool _roamScanActive=false, _roamScanWorkerPending=false;
     uint32_t _roamScanResult=0;
     uint64_t _roamScanCompletedMs=0;

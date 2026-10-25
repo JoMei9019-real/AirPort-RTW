@@ -1099,6 +1099,10 @@ void RTW88IEEE80211::restoreSTAChannelAfterAWDL()
 
 IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
 {
+    // Explicit roaming owns the single PHY until scan/switch completion.
+    if (roamScanActive() || _roamSwitch.phase ||
+        __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE))
+        return kIOReturnBusy;
     if (!_powered || !_hw || !_hw->wiphy || channel == 0)
         return kIOReturnNotReady;
 
@@ -1748,11 +1752,18 @@ void RTW88IEEE80211::processScanResult(struct sk_buff *skb)
             bss->channel = (f - 5000) / 5;
     }
 
+    // Keep AP channel and frequency coherent, including observations received
+    // on an adjacent 2.4 GHz scan channel. The regulatory table remains the
+    // authority; never turn an invalid advertised channel into an eligible AP.
+    const unsigned advertisedFrequency=RTW88RoamSwitch::channelFrequency(bss->channel);
+    if(advertisedFrequency && roamChannelReason(bss->channel,advertisedFrequency)==RTW88RoamSwitch::Ready)
+        bss->freq=advertisedFrequency;
+
     // Restricted-channel STA joins require a current AP beacon, not a
     // Neighbor Report or a probe response alone. Never lift channel flags.
     const uint16_t scanFC=le16_to_cpu(hdr->frame_control);
     if(RTW88RoamSwitch::beaconProof(scanFC,le16_to_cpu(hdr->seq_ctrl),bss->capabilities,
-       bss->channel,bss->freq,iesComplete && body==end,hdr->addr2,bss->bssid))
+       bss->channel,rxs->freq,iesComplete && body==end,hdr->addr2,bss->bssid))
         bss->beaconObservedMs=bss->observedMs;
 
     /* Add to BSS list (deduplicate by BSSID) */
@@ -4416,12 +4427,14 @@ void RTW88IEEE80211::roamTrace(const char *stage, uint32_t detail)
     __atomic_store_n(&_roamStage, stage, __ATOMIC_RELAXED);
     __atomic_store_n(&_roamStageMs, ns/1000000ULL, __ATOMIC_RELAXED);
     if (!__atomic_load_n(&_roamLogLevel, __ATOMIC_RELAXED)) return;
-    IOLog("rtw88: ROAM id=%u ms=%llu stage=%s detail=%u state=%u powered=%u visible=%u ptk=%u gtk=%u ap=%02x:%02x:%02x:%02x:%02x:%02x ch=%u\n",
+    IOLog("rtw88: ROAM id=%u ms=%llu stage=%s detail=%u state=%u powered=%u visible=%u ptk=%u gtk=%u ap=%02x:%02x:%02x:%02x:%02x:%02x ch=%u auth_cancelled=%u awdl_off_channel=%u auth_worker=%u gate=0x%x\n",
           __atomic_load_n(&_roamTestID,__ATOMIC_RELAXED), ns/1000000ULL, stage, detail,
           unsigned(_state), unsigned(_powered), unsigned(_associatedVisible),
           unsigned(_ptkConf!=nullptr), unsigned(_gtkConf!=nullptr),
           _targetBSS.bssid[0],_targetBSS.bssid[1],_targetBSS.bssid[2],
-          _targetBSS.bssid[3],_targetBSS.bssid[4],_targetBSS.bssid[5],_targetBSS.channel);
+          _targetBSS.bssid[3],_targetBSS.bssid[4],_targetBSS.bssid[5],_targetBSS.channel,
+          unsigned(authenticationCancelled()),unsigned(_awdlOffChannel),
+          unsigned(__atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE)),_roamGateSnapshot);
 }
 
 IOReturn RTW88IEEE80211::roamDecision(unsigned reason, IOReturn result)
@@ -4467,18 +4480,37 @@ unsigned RTW88IEEE80211::roamBSSReason(const RTW88BSS &b,uint64_t nowMs) const
 IOReturn RTW88IEEE80211::roamControlReady()
 {
     using namespace RTW88RoamSwitch;
+    // Snapshot the actual rejection-time inputs. Watch/status reports also
+    // show live inputs so a transient gate is distinguishable from its result.
+    _roamGateSnapshot=unsigned(_state==RTW88_STATE_CONNECTED) |
+        (unsigned(_associatedVisible)<<1) | (unsigned(authenticationCancelled())<<2) |
+        (unsigned(_awdlOffChannel)<<3) |
+        (unsigned(__atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE))<<4);
     if(!_roamSwitchEnabled || !_roamingAssistEnabled)return roamDecision(Disabled,kIOReturnNotReady);
     if(!_parent || !_parent->roamingActionsAllowed() || !_powered)return roamDecision(PowerBlocked,kIOReturnNotReady);
     if(_roamSwitch.phase)return roamDecision(SwitchBusy,kIOReturnBusy);
     if(roamScanActive() || _manualScanChannelCount ||
        __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE))return roamDecision(ScanBusy,kIOReturnBusy);
-    if(_state!=RTW88_STATE_CONNECTED || !_associatedVisible || _awdlOffChannel || authenticationCancelled())
-        return roamDecision(NotConnected,kIOReturnNotReady);
+    if(_state!=RTW88_STATE_CONNECTED)return roamDecision(NotConnected,kIOReturnNotReady);
+    if(!_associatedVisible)return roamDecision(LinkInvisible,kIOReturnNotReady);
+    if(authenticationCancelled())return roamDecision(AuthCancelled,kIOReturnNotReady);
     if(!_wpa2 || _enterprise || _externalSupplicant || _targetBSS.cipher!=WLAN_CIPHER_SUITE_CCMP)
         return roamDecision(SecurityMode,kIOReturnUnsupported);
     if(!_ptkConf || !_gtkConf)return roamDecision(KeysMissing,kIOReturnNotReady);
     if(__atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE))return roamDecision(AuthBusy,kIOReturnBusy);
     if(!RTW88RoamSwitch::security(_targetBSS.ies,_targetBSS.ies_len))return roamDecision(CurrentSecurity,kIOReturnUnsupported);
+    // Called under the controller workloop and PM interlock. End an AWDL
+    // availability window before handing the PHY to explicit roaming. Verify
+    // the actual home channel; clearing the latch alone is not sufficient.
+    if(_awdlOffChannel) {
+        roamTrace("roam-return-home-start");
+        restoreSTAChannelAfterAWDL();
+        if(_awdlOffChannel)return roamDecision(AWDLOffChannel,kIOReturnBusy);
+        if(!_hw || !_hw->conf.chandef.chan ||
+           unsigned(_hw->conf.chandef.chan->hw_value)!=_targetBSS.channel)
+            return roamDecision(HomeChannelMismatch,kIOReturnNotReady);
+        roamTrace("roam-return-home-complete");
+    }
     return kIOReturnSuccess;
 }
 
@@ -4680,6 +4712,8 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
     ROAM_APPEND("current_bssid=%02x:%02x:%02x:%02x:%02x:%02x\ncurrent_channel=%u\ncurrent_rssi=%d\n",
         _targetBSS.bssid[0],_targetBSS.bssid[1],_targetBSS.bssid[2],_targetBSS.bssid[3],_targetBSS.bssid[4],_targetBSS.bssid[5],
         _targetBSS.channel,_rssi);
+    ROAM_APPEND("last_gate_flags=0x%08x\nauth_cancelled=%u\nawdl_off_channel=%u\nmanual_scan_channels=%u\n",
+        _roamGateSnapshot,unsigned(authenticationCancelled()),unsigned(_awdlOffChannel),_manualScanChannelCount);
     ROAM_APPEND("target_bssid=%02x:%02x:%02x:%02x:%02x:%02x\ntarget_channel=%u\ntarget_rssi=%d\ntarget_channel_flags=0x%08x\n",
         _roamDiagTarget[0],_roamDiagTarget[1],_roamDiagTarget[2],_roamDiagTarget[3],_roamDiagTarget[4],_roamDiagTarget[5],
         _roamTargetChannel,_roamTargetRSSI,_roamChannelFlags);

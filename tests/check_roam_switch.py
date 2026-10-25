@@ -12,13 +12,14 @@ def method(signature):
 tree=ast.parse((root/'tests/check_roaming.py').read_text())
 pre=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='pre' for t in n.targets))
 pre=pre.replace('#include "RTW88Roaming.hpp"','#include "RTW88RoamSwitch.hpp"')
+pre=pre.replace('bool authenticationCancelled()const{return canceled;}', 'bool authenticationCancelled()const{return _connectCancelled;}')
 extra=r'''
 using IOReturn=int;
 constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnBusy=3,kIOReturnNotFound=4,kIOReturnUnsupported=5,kIOReturnError=6;
 constexpr int NL80211_NUM_BANDS=1,IEEE80211_CHAN_DISABLED=1,IEEE80211_CHAN_NO_IR=2,IEEE80211_CHAN_RADAR=4,RTW88_STATE_IDLE=0;
 void IOLockLock(void*){}void IOLockUnlock(void*){}
 struct Channel{int hw_value=6,center_freq=2437,flags=0;};
-struct Band{int n_channels=1;Channel channels[1];};struct Wiphy{Band*bands[1];};struct Hw{Wiphy*wiphy;};
+struct Band{int n_channels=1;Channel channels[1];};struct Wiphy{Band*bands[1];};struct Hw{Wiphy*wiphy;struct {struct {Channel *chan=nullptr;} chandef;} conf;};
 struct RTW88BSS{
  uint8_t bssid[6]={2,9,8,7,6,1},ssid_len=4,channel=6;
  char ssid[33]="Test";int rssi=-45,freq=2437;
@@ -35,6 +36,8 @@ struct RTW88IEEE80211 {
  uint64_t _roamNeighborAge=0,_roamScanAge=0,_roamScanLast=0;
  uint8_t _roamDiagTarget[6]={};int _roamTargetRSSI=0;uint32_t _roamTargetChannel=0,_roamChannelFlags=0;
  uint8_t _roamRecommended[6]={};bool _roamTargetFromScan=false;
+ uint32_t _roamGateSnapshot=0;bool restoreFails=false;unsigned homeRestores=0;
+ void restoreSTAChannelAfterAWDL(){++homeRestores;_awdlOffChannel=false;if(!restoreFails)_hw->conf.chandef.chan=&_hw->wiphy->bands[0]->channels[0];}
  unsigned roamChannelReason(unsigned,unsigned,uint32_t * =nullptr)const;
  unsigned roamBSSReason(const RTW88BSS&,uint64_t)const;IOReturn roamControlReady();
  IOReturn validateRoam(const uint8_t*,uint64_t,bool);void beginRoamTest(const uint8_t*);
@@ -70,6 +73,17 @@ int main(){
  candidate.ies[sizeof(rsn)-2]=0x40;assert(b.requestRoam(candidate.bssid,1100)==kIOReturnNotFound);candidate.ies[sizeof(rsn)-2]=0;
  band.channels[0].flags=IEEE80211_CHAN_RADAR;assert(b.requestRoam(candidate.bssid,1100)==kIOReturnNotFound);band.channels[0].flags=0;
  assert(!b.disconnects&&!b.joins);
+ // A live link must report its exact guard, never a generic disconnected.
+ b._connectCancelled=true;assert(b.checkRoam(candidate.bssid,1100)==kIOReturnNotReady&&b._roamReason==RTW88RoamSwitch::AuthCancelled);
+ assert(b._roamGateSnapshot&4);b._connectCancelled=false;
+ b._associatedVisible=false;assert(b.checkRoam(candidate.bssid,1100)==kIOReturnNotReady&&b._roamReason==RTW88RoamSwitch::LinkInvisible);b._associatedVisible=true;
+ b._awdlOffChannel=true;b.restoreFails=true;
+ assert(b.checkRoam(candidate.bssid,1100)==kIOReturnNotReady&&b._roamReason==RTW88RoamSwitch::HomeChannelMismatch&&!b.disconnects);
+ b.restoreFails=false;b._awdlOffChannel=true;
+ assert(b.checkRoam(candidate.bssid,1100)==0&&!b._awdlOffChannel&&b.homeRestores==2&&(b._roamGateSnapshot&8));
+ assert(RTW88RoamSwitch::channelFrequency(1)==2412&&RTW88RoamSwitch::channelFrequency(14)==2484);
+ assert(RTW88RoamSwitch::channelFrequency(116)==5580&&!RTW88RoamSwitch::channelFrequency(0));
+ assert(!RTW88RoamSwitch::beaconProof(0x80,0,0x11,1,2417,true,candidate.bssid,candidate.bssid));
  assert(b.requestRoam(candidate.bssid,1100)==0&&b._roamSwitch.phase==1&&b.joins==1&&b.disconnects==1);
  assert(b._roamSwitch.pmk[0]==7&&b._pmk[0]==7&&!b._roamSwitchInternal);
  b.roamSwitchTick(1200);assert(b.joins==1);

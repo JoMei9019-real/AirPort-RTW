@@ -1,5 +1,17 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 8: roaming preflight and scan-channel coherence
+
+Beta 8 separates link-state, visibility, authentication cancellation and AWDL
+ownership rejection reasons. Explicit roaming returns an AWDL-owned PHY to the
+infrastructure channel and verifies the result before continuing; AWDL channel
+requests are blocked while a roaming scan or switch owns the PHY. Authentication,
+security, freshness and power guards remain active. Scan-cache frequencies follow
+the AP's advertised primary channel when present in the enabled regulatory table;
+restricted-channel beacon proof still uses the original receive frequency.
+See [Beta 8 diagnostics and test procedure](BETA_1_1_0_8.md).
+The reported Beta 7 boot panic and successful over-air AP switching remain unconfirmed.
+
 ## 1.1.0 Beta 7: scan-based targets, band priority and DFS STA roaming
 
 Beta 7 accepts eligible APs found over the air even when absent from the

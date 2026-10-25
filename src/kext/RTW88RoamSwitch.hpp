@@ -8,6 +8,14 @@ constexpr uint16_t DiscoveryChannel=0xffff;
 constexpr unsigned MaxDiscoveryChannels=64;
 constexpr int Prefer5GHzRSSI=-70, Keep5GHzRSSI=-77, MinimumRSSI=-80, SameBandGain=6;
 inline bool band5(unsigned frequency) { return frequency>=5000 && frequency<=5900; }
+// DS/HT operation describes the AP's primary channel. RX frequency may be
+// the adjacent scan channel on which a 2.4 GHz management frame was heard.
+inline unsigned channelFrequency(unsigned channel) {
+    if(channel==14)return 2484;
+    if(channel>=1 && channel<=13)return 2407+5*channel;
+    if(channel>=32 && channel<=177)return 5000+5*channel;
+    return 0;
+}
 // Compare bands by suitability first, RSSI only within a class. A weak 5 GHz
 // link must not outrank usable 2.4 GHz merely because of the frequency band.
 inline int rank(unsigned frequency,int rssi,bool current5=false) {
@@ -30,7 +38,8 @@ enum Reason : unsigned {
     ChannelMismatch, SignalWeak, ScanStale, TargetSecurity, ChannelMissing,
     ChannelDisabled, ChannelNoIR, ChannelDFS, CurrentSecurity, RefreshPending,
     RefreshLimited, APNoNeighbor, RefreshTxFailed, ScanBusy, ScanLimited,
-    ScanStartFailed, BeaconMissing, NoCandidate, KeepCurrent
+    ScanStartFailed, BeaconMissing, NoCandidate, KeepCurrent,
+    LinkInvisible, AuthCancelled, AWDLOffChannel, HomeChannelMismatch
 };
 inline const char *reasonName(unsigned reason) {
     static const char *const names[] = {
@@ -44,7 +53,8 @@ inline const char *reasonName(unsigned reason) {
         "dfs-channel-excluded", "current-security-incompatible", "neighbor-request-pending",
         "neighbor-request-rate-limited", "ap-no-neighbor-report", "neighbor-request-tx-failed",
         "scan-busy", "scan-rate-limited", "scan-start-failed",
-        "fresh-ap-beacon-required", "no-eligible-candidate", "current-ap-preferred"
+        "fresh-ap-beacon-required", "no-eligible-candidate", "current-ap-preferred",
+        "link-not-visible", "authentication-cancelled", "awdl-off-channel", "home-channel-not-restored"
     };
     return reason < sizeof(names)/sizeof(names[0]) ? names[reason] : "unknown";
 }

@@ -114,7 +114,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.7-band-priority");
+    setProperty("DriverBuild", "1.1.0-beta.8-roam-preflight");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -283,7 +283,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.1.0-beta.7 scan candidates, band priority and passive DFS discovery enabled\n");
+    IOLog("AirPortRTW: 1.1.0-beta.8 scan candidates, band priority and passive DFS discovery enabled\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
