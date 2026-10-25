@@ -45,6 +45,8 @@ pre=pre.replace('void roamTrace(const char*,uint32_t=0){}',r'''
  IOReturn refreshRoamNeighbors(uint64_t);IOReturn scanRoamTarget(const uint8_t*,uint64_t);
  IOReturn startRoamScan(uint16_t,uint64_t);IOReturn discoverRoamAPs(uint64_t);IOReturn selectRoamTarget(uint64_t);
  IOReturn cmdScan(uint16_t=0);void runManualScan();
+ void autoRoamTick(uint64_t);
+ void pauseAutoRoaming(uint64_t now){_autoScanPending=false;_autoNextMs=now+60000;}
  int _rssi=-45;uint32_t _scanGeneration=0,_lastScanCacheCount=0,_lastScanChannelCount=0;
  uint32_t _scanVisited2GHz=0,_scanVisited5GHz=0,_timeoutMs=0,_rxFrameCount=0;
  int _scanReturnState=0,_awdlPreparedChannel=0;const char *_scanEngine="none";
@@ -66,6 +68,7 @@ methods=ns['methods']+''.join(method(x) for x in (
  'IOReturn RTW88IEEE80211::refreshRoamNeighbors(', 'IOReturn RTW88IEEE80211::scanRoamTarget(',
  'IOReturn RTW88IEEE80211::startRoamScan(', 'IOReturn RTW88IEEE80211::discoverRoamAPs(',
  'IOReturn RTW88IEEE80211::selectRoamTarget(',
+ 'void RTW88IEEE80211::autoRoamTick(',
  'IOReturn RTW88IEEE80211::cmdScan(', 'void RTW88IEEE80211::runManualScan(',
  'void RTW88IEEE80211::copyRoamDiagnostics('))
 cases=r'''
@@ -151,6 +154,38 @@ int main() {
  assert(!beaconProof(0x4080,0,0x11,116,5580,true,ap,ap));
  b.copyRoamDiagnostics(out,sizeof(out),50010);assert(strstr(out,"ap[0]=")&&strstr(out,"recommended_bssid="));
  free(b._scanRequest);
+ // Production automatic scheduler: no scan during warmup/cooldown, bounded
+ // discovery, stronger 5 GHz selection, manual precedence and PM cancellation.
+ RTW88IEEE80211 a;RTW88BSS near=candidate;near.next=nullptr;
+ near.channel=36;near.freq=5180;near.rssi=-45;near.observedMs=130000;
+ a._hw=&hw;a._bssList=&near;a._roamingAssistEnabled=true;a._roamingCapsValid=true;a._autoRoamEnabled=true;
+ memcpy(a._targetBSS.ies,ies,sizeof(ies));a._targetBSS.ies_len=sizeof(ies);
+ a._targetBSS.channel=6;a._rssi=-60;
+ a.autoRoamTick(100000);assert(a._autoNextMs==130000&&!a._autoScanPending);
+ a.autoRoamTick(129999);assert(!a._autoScanPending);
+ a.autoRoamTick(130000);assert(a._autoScanPending&&a._autoScans==1&&a._state==1);
+ a.autoRoamTick(130001);assert(a._autoScans==1&&!a.joins);
+ a.runManualScan();a.autoRoamTick(140000);
+ assert(a._autoSwitches==1&&a.joins==1&&a._roamSwitch.phase==1);
+ a.autoRoamTick(145000);assert(a.joins==1);
+ a._roamSwitch.clear();a._state=5;a._associatedVisible=true;a._ptkConf=a._gtkConf=&a;
+ a._roamingCapsValid=true; // Real diagnostics calls roamingTick before autoRoamTick.
+ a._autoNextMs=150000;a.autoRoamTick(150000);assert(a._autoScans==1); // cooldown
+ a._roamSwitchLast=0;a.pauseAutoRoaming(200000);
+ a.autoRoamTick(259999);assert(a._autoScans==1);
+ a.autoRoamTick(260000);assert(a._autoScanPending&&a._autoScans==2);
+ a.pauseAutoRoaming(260001);a.runManualScan();a.autoRoamTick(270000);
+ assert(a.joins==1&&!a._autoScanPending); // manual request owns completed scan
+ a._autoNextMs=280000;a.autoRoamTick(280000);assert(a._autoScanPending);
+ a.parent.allowed=false;a.autoRoamTick(280001);assert(!a._autoScanPending);
+ a._manualScanAbort=true;a.runManualScan();a.parent.allowed=true;
+ a._autoRoamEnabled=false;a.autoRoamTick(400000);assert(a._autoScans==3&&!a._autoScanPending);
+ a._autoRoamEnabled=true;a._autoNextMs=500000;a.autoRoamTick(500000);
+ assert(a._autoScanPending);a._manualScanAbort=true;a.runManualScan();a.autoRoamTick(510000);
+ assert(!strcmp(a._autoStage,"scan-aborted-or-replaced")&&a.joins==1);
+ a._autoNextMs=520000;near.observedMs=520000;a.autoRoamTick(520000);a.runManualScan();a.autoRoamTick(525000);
+ assert(!strcmp(a._autoStage,"current-ap-preferred")&&a.joins==1);
+ free(a._scanRequest);
  puts("PASS: refresh/scan diagnostics, no-neighbor RF targets, bounded discovery, passive DFS/beacon guards, disabled channels, 5 GHz priority/hysteresis, fallback and snapshots");
 }
 '''

@@ -3419,6 +3419,7 @@ bool RTW88IEEE80211::buildAssocReq(uint8_t *buf, uint32_t *len)
         RTW88Roaming::capabilities(_targetBSS.ies, _targetBSS.ies_len, roamCaps) &&
         roamCaps.neighborReport && !roamCaps.pmfRequired;
     if (requestRrm) cap |= 0x1000; // Radio Measurement capability
+    _stationNeighborReport=requestRrm;
     if (_wpa2)
         cap |= 0x0010;
     body[0] = (uint8_t)(cap & 0xff);
@@ -4246,6 +4247,8 @@ bool RTW88IEEE80211::txMgmtFrame(const uint8_t *frame, uint32_t len)
 
 void RTW88IEEE80211::resetRoamingState()
 {
+    _autoScanPending=false;_autoNextMs=0;_autoStage="waiting-link";
+    _stationNeighborReport=false;
     if (roamScanActive()) {
         __atomic_store_n(&_roamScanResult, 3U, __ATOMIC_RELAXED);
         __atomic_store_n(&_roamScanActive, false, __ATOMIC_RELEASE);
@@ -4311,9 +4314,14 @@ void RTW88IEEE80211::roamingTick(uint64_t nowMs)
                      uint32_t(_roaming.neighbors.count), __ATOMIC_RELAXED);
     if (!_roaming.neighbors.count)
         __atomic_store_n(&_roamingStats[RTW88Roaming::NeighborTruncated], 0U, __ATOMIC_RELAXED);
+    // Refresh throughout an association, bounded to one request per minute.
+    if(_roaming.requested && !_roaming.pending && _roamRefreshLast &&
+       nowMs>=_roamRefreshLast && nowMs-_roamRefreshLast>=60000)
+        _roaming.requested=false;
     if (!roamingActionsReady() || !_roaming.ap.neighborReport || _roaming.requested)
         return;
-    _roaming.requested = true; // Bounded: one attempt per association, no retries.
+    _roaming.requested = true; // Bounded to one attempt per minute, including TX failures.
+    _roamRefreshLast=nowMs;
     if (++_roaming.tokenCounter == 0) ++_roaming.tokenCounter;
     uint8_t body[37] = {};
     const size_t length = RTW88Roaming::neighborRequest(body, sizeof(body),
@@ -4341,12 +4349,30 @@ void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
     const size_t size = length - 24;
     if (body[0] == 5 && body[1] == 5) {
         RTW88Roaming::Candidates candidates;
+        _neighborDiagnostic={};_neighborActionLength=unsigned(size);
+        _neighborActualToken=size>=3?body[2]:0;
+        _neighborResponseAge=_roaming.requestMs && nowMs>=_roaming.requestMs?nowMs-_roaming.requestMs:~uint64_t(0);
         const bool timely = _roaming.pending && nowMs >= _roaming.requestMs &&
             nowMs - _roaming.requestMs < RTW88Roaming::ResponseTimeoutMs;
-        if (!_roaming.ap.neighborReport || !timely ||
-            !RTW88Roaming::neighborResponse(body, size, _roaming.pendingToken, candidates)) {
+        const bool parsed=RTW88Roaming::neighborResponse(body,size,_roaming.pendingToken,candidates,&_neighborDiagnostic);
+        _neighborReject=!_roaming.ap.neighborReport?"ap-capability-missing":!timely?"no-pending-or-expired":
+            !parsed?RTW88Roaming::parseName(_neighborDiagnostic.code):"none";
+        if (!_roaming.ap.neighborReport || !timely || !parsed) {
             __atomic_add_fetch(&_roamingStats[RTW88Roaming::ResponseInvalid], 1U, __ATOMIC_RELAXED);
             roamTrace("neighbor-response-invalid",size>=3?body[2]:0);
+            if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED))IOLog("rtw88: ROAM neighbor-reject=%s bytes=%u expected_token=%u actual_token=%u age_ms=%llu offset=%u id=%u length=%u remaining=%u candidate=%u\n",
+                _neighborReject,_neighborActionLength,_roaming.pendingToken,_neighborActualToken,
+                (unsigned long long)_neighborResponseAge,_neighborDiagnostic.offset,_neighborDiagnostic.id,
+                _neighborDiagnostic.length,_neighborDiagnostic.remaining,_neighborDiagnostic.candidate);
+            // Only this validated management-action body is sampled, never
+            // EAPOL or data payloads. Include context at the failing offset.
+            if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED)>=2 && size) {
+                char hex[97]={};const size_t offset=_neighborDiagnostic.offset<size?_neighborDiagnostic.offset:0;
+                const size_t start=offset>8?offset-8:0;
+                const size_t count=size-start<32?size-start:32;
+                for(size_t i=0;i<count;++i)snprintf(hex+3*i,sizeof(hex)-3*i,"%02x ",body[start+i]);
+                IOLog("rtw88: ROAM neighbor-body-window offset=%u bytes=%u hex=%s\n",unsigned(start),unsigned(count),hex);
+            }
             return;
         }
         _roaming.pending = false;
@@ -4575,6 +4601,51 @@ IOReturn RTW88IEEE80211::selectRoamTarget(uint64_t nowMs)
     return roamDecision(stay?KeepCurrent:Ready,kIOReturnSuccess);
 }
 
+void RTW88IEEE80211::autoRoamTick(uint64_t nowMs)
+{
+    // Existing five-second controller timer, with its PM interlock held.
+    // No new timer, thread, polling loop or waits for an auth/scan worker.
+    if(!_autoRoamEnabled){_autoStage="disabled";return;}
+    if(!_roamingAssistEnabled || !_roamSwitchEnabled || !_parent ||
+       !_parent->roamingActionsAllowed() || !_powered) {
+        _autoScanPending=false;_autoNextMs=0;_autoStage="waiting-link-or-power";return;
+    }
+    if(_roamSwitch.phase){_autoStage="switching";return;}
+    if(!_associatedVisible || authenticationCancelled()) {
+        _autoScanPending=false;_autoNextMs=0;_autoStage="waiting-link";return;
+    }
+    if(_autoScanPending) {
+        if(roamScanActive() || _manualScanChannelCount ||
+           __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE))return;
+        _autoScanPending=false;_autoNextMs=nowMs+60000;
+        if(_scanGeneration!=_autoScanGeneration ||
+           __atomic_load_n(&_roamScanResult,__ATOMIC_RELAXED)!=2) {
+            _autoStage="scan-aborted-or-replaced";roamTrace("auto-scan-discarded");return;
+        }
+        if(selectRoamTarget(nowMs)!=kIOReturnSuccess){_autoStage="no-eligible-target";return;}
+        if(!memcmp(_roamRecommended,_targetBSS.bssid,6)) {
+            _autoStage="current-ap-preferred";roamTrace("auto-keep-current");return;
+        }
+        uint8_t target[6];memcpy(target,_roamRecommended,6);
+        roamTrace("auto-switch-request");
+        if(requestRoam(target,nowMs)==kIOReturnSuccess){++_autoSwitches;_autoStage="switching";}
+        else _autoStage="switch-rejected";
+        return;
+    }
+    if(_state!=RTW88_STATE_CONNECTED || roamScanActive() || _manualScanChannelCount ||
+       __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE) ||
+       __atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE))return;
+    if(!_autoNextMs){_autoNextMs=nowMs+30000;_autoStage="warming-up";return;}
+    if(nowMs<_autoNextMs)return;
+    if(_roamSwitchLast && (nowMs<_roamSwitchLast || nowMs-_roamSwitchLast<RTW88RoamSwitch::CooldownMs)) {
+        _autoStage="cooldown";return;
+    }
+    _autoNextMs=nowMs+60000;
+    if(discoverRoamAPs(nowMs)!=kIOReturnSuccess){_autoStage="scan-rejected";return;}
+    _autoScanGeneration=_scanGeneration;_autoScanPending=true;++_autoScans;
+    _autoStage="scanning";roamTrace("auto-discovery-start");
+}
+
 IOReturn RTW88IEEE80211::checkRoam(const uint8_t *bssid,uint64_t nowMs)
 {
     beginRoamTest(bssid);
@@ -4714,6 +4785,14 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
         _targetBSS.channel,_rssi);
     ROAM_APPEND("last_gate_flags=0x%08x\nauth_cancelled=%u\nawdl_off_channel=%u\nmanual_scan_channels=%u\n",
         _roamGateSnapshot,unsigned(authenticationCancelled()),unsigned(_awdlOffChannel),_manualScanChannelCount);
+    ROAM_APPEND("auto_enabled=%u\nauto_stage=%s\nauto_next_ms=%llu\nauto_scan_pending=%u\nauto_scans=%u\nauto_switches=%u\n",
+        unsigned(_autoRoamEnabled),_autoStage,(unsigned long long)_autoNextMs,unsigned(_autoScanPending),_autoScans,_autoSwitches);
+    ROAM_APPEND("assoc_neighbor_report_advertised=%u\nassoc_btm_advertised=0\nbtm_mode=reject-only\n",
+        unsigned(_stationNeighborReport));
+    ROAM_APPEND("neighbor_reject=%s\nneighbor_action_bytes=%u\nneighbor_actual_token=%u\nneighbor_response_age_ms=%lld\nneighbor_parse_reason=%s\nneighbor_parse_offset=%u\nneighbor_parse_id=%u\nneighbor_parse_length=%u\nneighbor_parse_remaining=%u\nneighbor_parse_candidate=%u\n",
+        _neighborReject,_neighborActionLength,_neighborActualToken,(long long)_neighborResponseAge,
+        RTW88Roaming::parseName(_neighborDiagnostic.code),_neighborDiagnostic.offset,_neighborDiagnostic.id,
+        _neighborDiagnostic.length,_neighborDiagnostic.remaining,_neighborDiagnostic.candidate);
     ROAM_APPEND("target_bssid=%02x:%02x:%02x:%02x:%02x:%02x\ntarget_channel=%u\ntarget_rssi=%d\ntarget_channel_flags=0x%08x\n",
         _roamDiagTarget[0],_roamDiagTarget[1],_roamDiagTarget[2],_roamDiagTarget[3],_roamDiagTarget[4],_roamDiagTarget[5],
         _roamTargetChannel,_roamTargetRSSI,_roamChannelFlags);

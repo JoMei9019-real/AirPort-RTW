@@ -27,6 +27,25 @@ struct Candidates {
     uint8_t count = 0;
     bool truncated = false;
 };
+enum ParseCode : unsigned {
+    ParseOK, ParseBounds, ParseHeader, ParseToken, ParseIEHeader, ParseIELength,
+    ParseNeighborLength, ParseBSSID, ParseOperatingClass, ParseChannel,
+    ParseSubHeader, ParseSubLength, ParsePreferenceLength, ParsePreferenceDuplicate
+};
+struct ParseDiagnostic {
+    unsigned code=ParseOK, offset=0, id=0, length=0, remaining=0, candidate=0;
+};
+inline const char *parseName(unsigned code) {
+    static const char *const names[]={"ok","action-bounds","action-header","dialog-token",
+        "ie-header","ie-length","neighbor-short","bssid-invalid","operating-class-zero",
+        "channel-zero","subelement-header","subelement-length","preference-length","preference-duplicate"};
+    return code<sizeof(names)/sizeof(names[0])?names[code]:"unknown";
+}
+inline bool parseFail(ParseDiagnostic *d,unsigned code,size_t offset,size_t id=0,
+                      size_t length=0,size_t remaining=0,size_t candidate=0) {
+    if(d)*d={code,unsigned(offset),unsigned(id),unsigned(length),unsigned(remaining),unsigned(candidate)};
+    return false;
+}
 struct BtmRequest {
     uint8_t token = 0, mode = 0, validity = 0;
     uint16_t disassociationTimer = 0;
@@ -72,26 +91,34 @@ inline bool capabilities(const uint8_t *p, size_t n, Capabilities &out) {
     }
     out = result; return true;
 }
-inline bool candidateIEs(const uint8_t *p, size_t n, Candidates &out) {
+inline bool candidateIEs(const uint8_t *p, size_t n, Candidates &out, ParseDiagnostic *diag=nullptr) {
     out = {};
-    if ((!p && n) || n > MaxActionBytes) return false;
+    if(diag)*diag={};
+    if ((!p && n) || n > MaxActionBytes)return parseFail(diag,ParseBounds,0,0,n);
+    const size_t total=n;
     Candidates result;
     while (n) {
-        if (n < 2 || p[1] > n - 2) return false;
+        const size_t offset=total-n;
+        if(n<2)return parseFail(diag,ParseIEHeader,offset,p[0],0,n,result.count);
+        if(p[1]>n-2)return parseFail(diag,ParseIELength,offset,p[0],p[1],n,result.count);
         size_t len = p[1];
         if (p[0] == 52) {
-            if (len < 13) return false;
+            if(len<13)return parseFail(diag,ParseNeighborLength,offset,52,len,n,result.count);
             const uint8_t *v = p + 2;
             Candidate c;
             memcpy(c.bssid, v, 6);
-            if (!unicast(c.bssid) || !v[10] || !v[11]) return false;
+            if(!unicast(c.bssid))return parseFail(diag,ParseBSSID,offset+2,52,len,n,result.count);
+            if(!v[10])return parseFail(diag,ParseOperatingClass,offset+12,52,len,n,result.count);
+            if(!v[11])return parseFail(diag,ParseChannel,offset+13,52,len,n,result.count);
             c.info = uint32_t(v[6]) | (uint32_t(v[7]) << 8) |
                      (uint32_t(v[8]) << 16) | (uint32_t(v[9]) << 24);
             c.opClass = v[10]; c.channel = v[11]; c.phy = v[12];
             for (size_t pos = 13; pos < len;) {
-                if (len - pos < 2 || v[pos + 1] > len - pos - 2) return false;
+                if(len-pos<2)return parseFail(diag,ParseSubHeader,offset+2+pos,v[pos],0,len-pos,result.count);
+                if(v[pos+1]>len-pos-2)return parseFail(diag,ParseSubLength,offset+2+pos,v[pos],v[pos+1],len-pos,result.count);
                 if (v[pos] == 3) {
-                    if (v[pos + 1] != 1 || c.hasPreference) return false;
+                    if(v[pos+1]!=1)return parseFail(diag,ParsePreferenceLength,offset+2+pos,3,v[pos+1],len-pos,result.count);
+                    if(c.hasPreference)return parseFail(diag,ParsePreferenceDuplicate,offset+2+pos,3,v[pos+1],len-pos,result.count);
                     c.hasPreference = true; c.preference = v[pos + 2];
                 }
                 pos += size_t(v[pos + 1]) + 2;
@@ -108,10 +135,15 @@ inline bool candidateIEs(const uint8_t *p, size_t n, Candidates &out) {
     }
     out = result; return true;
 }
-inline bool neighborResponse(const uint8_t *p, size_t n, uint8_t token, Candidates &out) {
+inline bool neighborResponse(const uint8_t *p, size_t n, uint8_t token, Candidates &out, ParseDiagnostic *diag=nullptr) {
     out = {};
-    return p && n >= 3 && n <= MaxActionBytes && p[0] == 5 && p[1] == 5 &&
-        token && p[2] == token && candidateIEs(p + 3, n - 3, out);
+    if(diag)*diag={};
+    if(!p || n<3 || n>MaxActionBytes)return parseFail(diag,ParseBounds,0,0,n);
+    if(p[0]!=5 || p[1]!=5)return parseFail(diag,ParseHeader,0,p[0],p[1],n);
+    if(!token || p[2]!=token)return parseFail(diag,ParseToken,2,p[2],token,n);
+    const bool valid=candidateIEs(p+3,n-3,out,diag);
+    if(!valid && diag)diag->offset+=3; // Offsets relative to the action body.
+    return valid;
 }
 inline bool btmRequest(const uint8_t *p, size_t n, BtmRequest &out) {
     out = {};

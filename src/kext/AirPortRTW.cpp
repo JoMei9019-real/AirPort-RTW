@@ -28,6 +28,7 @@ extern "C" void rtw88_trigger_interrupt(void);  /* esta si es la unica con exter
 #include <mach/mach_time.h>
 #include <IOKit/IOUserClient.h>
 #include <kern/task.h>
+#include <pexpert/pexpert.h>
 
 #define IOLog rtw88_candidate_log
 
@@ -114,7 +115,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.8-roam-preflight");
+    setProperty("DriverBuild", "1.1.0-beta.9-auto-roam");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -212,6 +213,11 @@ bool AirPortRTW::start(IOService *provider)
     OSBoolean *switching=OSDynamicCast(OSBoolean,getProperty("RoamingSwitchEnabled"));
     const bool switchEnabled=switching && switching->isTrue();
     _ieee80211->setRoamSwitchEnabled(switchEnabled);
+    OSBoolean *automatic=OSDynamicCast(OSBoolean,getProperty("RoamingAutoEnabled"));
+    int noAutoRoam=0;
+    const bool autoDisabled=PE_parse_boot_argn("-rtwnoautoroam",&noAutoRoam,sizeof(noAutoRoam));
+    _ieee80211->setAutoRoamingEnabled(automatic && automatic->isTrue() && !autoDisabled);
+    setProperty("ROAM_AUTO_DISABLED_BY_BOOT_ARG",autoDisabled?kOSBooleanTrue:kOSBooleanFalse);
     setProperty("ROAM_SWITCH_ENABLED",switchEnabled?kOSBooleanTrue:kOSBooleanFalse);
 
     rtw88_force_wifi_only();
@@ -283,7 +289,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.1.0-beta.8 scan candidates, band priority and passive DFS discovery enabled\n");
+    IOLog("AirPortRTW: 1.1.0-beta.9 automatic roaming and detailed Neighbor Report diagnostics enabled\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -311,6 +317,7 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         uint64_t nowNs = 0;
         absolutetime_to_nanoseconds(mach_absolute_time(), &nowNs);
         self->_ieee80211->roamingTick(nowNs / 1000000ULL);
+        self->_ieee80211->autoRoamTick(nowNs / 1000000ULL);
         self->setProperty("ROAM_SWITCH_RESULT",(uint64_t)self->_ieee80211->roamSwitchResult(),32);
         uint8_t neighbors[RTW88Roaming::MaxCandidates*6]={};
         unsigned neighborCount=self->_ieee80211->copyRoamNeighbors(neighbors);
@@ -397,6 +404,9 @@ void AirPortRTW::publishRoamDiagnostics()
     setProperty("ROAM_DIAGNOSTICS",_diagnosticsBuffer);
     setProperty("ROAM_SWITCH_RESULT",uint64_t(_ieee80211->roamSwitchResult()),32);
     setProperty("ROAM_SCAN_ACTIVE",_ieee80211->roamScanActive()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_AUTO_ENABLED",_ieee80211->autoRoamingEnabled()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_K_ADVERTISED",_ieee80211->neighborReportAdvertised()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_V_ADVERTISED",kOSBooleanFalse);
     setProperty("ROAM_K_PENDING",_ieee80211->roamNeighborPending()?kOSBooleanTrue:kOSBooleanFalse);
     uint8_t neighbors[RTW88Roaming::MaxCandidates*6]={};
     unsigned count=_ieee80211->copyRoamNeighbors(neighbors);
@@ -436,6 +446,7 @@ IOReturn AirPortRTW::setProperties(OSObject *properties)
             self->_ieee80211->setRoamLogLevel(request->operation-6);
             self->_ieee80211->roamTrace("log-level-changed",request->operation-6);
         } else if(request->operation!=5) {
+            self->_ieee80211->pauseAutoRoaming(ns/1000000ULL);
             // Same PM interlock as periodic diagnostics. Never sleep on the
             // controller workloop while a scanner/authentication worker runs.
             __atomic_store_n(&self->_diagnosticsInHardware,true,__ATOMIC_SEQ_CST);

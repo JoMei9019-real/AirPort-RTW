@@ -251,6 +251,11 @@ public:
     uint32_t scanGeneration() const { return _scanGeneration; }
     void setRoamingAssistEnabled(bool enabled) { _roamingAssistEnabled = enabled; }
     void roamingTick(uint64_t nowMs);
+    void autoRoamTick(uint64_t nowMs);
+    bool autoRoamingEnabled() const { return _autoRoamEnabled; }
+    bool neighborReportAdvertised() const { return _stationNeighborReport; }
+    void setAutoRoamingEnabled(bool enabled) { _autoRoamEnabled=enabled; _autoScanPending=false; _autoNextMs=0; _autoStage=enabled?"warming-up":"disabled"; }
+    void pauseAutoRoaming(uint64_t nowMs) { _autoScanPending=false; _autoNextMs=nowMs+60000; _autoStage="manual-command-pause"; }
     IOReturn requestRoam(const uint8_t *bssid,uint64_t nowMs);
     IOReturn checkRoam(const uint8_t *bssid, uint64_t nowMs);
     IOReturn refreshRoamNeighbors(uint64_t nowMs);
@@ -542,6 +547,15 @@ private:
     uint8_t _roamRecommended[6]={};
     bool _roamTargetFromScan=false;
     uint32_t _roamGateSnapshot=0;
+    bool _autoRoamEnabled=false, _autoScanPending=false;
+    bool _stationNeighborReport=false;
+    uint64_t _autoNextMs=0;
+    uint32_t _autoScanGeneration=0, _autoScans=0, _autoSwitches=0;
+    const char *_autoStage="disabled";
+    RTW88Roaming::ParseDiagnostic _neighborDiagnostic;
+    const char *_neighborReject="none";
+    uint32_t _neighborActionLength=0, _neighborActualToken=0;
+    uint64_t _neighborResponseAge=0;
     bool _roamScanActive=false, _roamScanWorkerPending=false;
     uint32_t _roamScanResult=0;
     uint64_t _roamScanCompletedMs=0;

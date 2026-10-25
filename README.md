@@ -1,5 +1,21 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 9: automatic roaming and Neighbor Report diagnostics
+
+RTL8821CE enables automatic WPA2/CCMP roaming by default. The existing controller
+timer waits 30 seconds after connection, performs bounded discovery and selects
+eligible fresh targets using the established 5 GHz priority and 6 dB same-band
+hysteresis. Scans are spaced at least a minute after completion; switching keeps
+the 60-second cooldown and one fallback. Manual control pauses automatic actions.
+Boot with `-rtwnoautoroam` to disable automatic AP changes; remove it to restore
+the personality's default on the next boot. Manual switching remains available.
+Neighbor Report rejections now identify parser reason, offset, lengths, token and
+timing, with a bounded management-body window at verbose level. Requests refresh
+at most once a minute. The association advertises supported 802.11k Neighbor
+Reports only; 802.11v BTM remains reject-only and unadvertised. Full measurement,
+BTM steering and 802.11r FT are not claimed.
+See [Beta 9 installation, behavior and test commands](BETA_1_1_0_9.md).
+
 ## 1.1.0 Beta 8: roaming preflight and scan-channel coherence
 
 Beta 8 separates link-state, visibility, authentication cancellation and AWDL

@@ -52,6 +52,10 @@ constexpr int RTW88_STATE_CONNECTED=5,RTW88_STATE_SCANNING=1;
 constexpr uint32_t WLAN_CIPHER_SUITE_CCMP=0x000fac04;
 struct Parent {bool allowed=true;bool roamingActionsAllowed(){return allowed;}};
 struct RTW88IEEE80211 {
+ bool _autoRoamEnabled=false,_autoScanPending=false,_stationNeighborReport=false;uint64_t _autoNextMs=0;
+ uint32_t _autoScanGeneration=0,_autoScans=0,_autoSwitches=0;const char *_autoStage="disabled";
+ ParseDiagnostic _neighborDiagnostic;const char *_neighborReject="none";
+ uint32_t _neighborActionLength=0,_neighborActualToken=0;uint64_t _neighborResponseAge=0;
  Session _roaming;uint32_t _roamingStats[Count]={};
  bool _roamScanActive=false,_roamScanWorkerPending=false;uint32_t _roamScanResult=0,_roamLastResponseCount=0,_roamTestID=0;
  unsigned _roamLogLevel=1;uint64_t _roamRefreshLast=0;
@@ -104,6 +108,15 @@ int main(){
  bad=ie;bad.back()=0;bad[bad.size()-2]=0x40;
  assert(capabilities(bad.data(),bad.size(),caps)&&caps.pmfRequired);
  auto nr=neighbor();Candidates list;
+ ParseDiagnostic diagnostic;
+ auto zeroClass=nr;zeroClass[12]=0;
+ assert(!candidateIEs(zeroClass.data(),zeroClass.size(),list,&diagnostic));
+ assert(diagnostic.code==ParseOperatingClass&&diagnostic.offset==12);
+ auto zeroChannel=nr;zeroChannel[13]=0;
+ assert(!candidateIEs(zeroChannel.data(),zeroChannel.size(),list,&diagnostic));
+ assert(diagnostic.code==ParseChannel&&diagnostic.offset==13);
+ auto shortSub=nr;shortSub[16]=3;
+ assert(!candidateIEs(shortSub.data(),shortSub.size(),list,&diagnostic)&&diagnostic.code==ParseSubLength);
  assert(candidateIEs(nr.data(),nr.size(),list)&&list.count==1);
  assert(list.entries[0].info==0x44332211&&list.entries[0].channel==6&&list.entries[0].preference==255);
  for(size_t n=1;n<nr.size();++n)assert(!candidateIEs(nr.data(),n,list)&&list.count==0);
@@ -147,6 +160,8 @@ int main(){
  auto wrong=response;wrong[2]++;deliver(b,wrong,1200);assert(b._roamingStats[ResponseInvalid]==1);
  auto malformed=response;malformed.pop_back();deliver(b,malformed,1200);
  assert(b._roaming.pending&&b._roamingStats[ResponseInvalid]==2);
+ assert(b._neighborDiagnostic.code==ParseIELength&&b._neighborDiagnostic.offset==3);
+ assert(!strcmp(b._neighborReject,"ie-length")&&b._neighborActualToken==token);
  deliver(b,response,1200);assert(!b._roaming.pending&&b._roamingStats[ResponseRx]==1&&b._roamingStats[NeighborCount]==1);
  deliver(b,response,1201);assert(b._roamingStats[ResponseInvalid]==3);
  b.roamingTick(31200);assert(!b._roaming.neighbors.count&&!b._roamingStats[NeighborCount]);
@@ -173,12 +188,15 @@ int main(){
  b.roamingTick(55000);assert(!b._roaming.pending&&b._roamingStats[ResponseTimeout]==1);
  const auto attempts=b._roamingStats[RequestTx];b.roamingTick(70000);assert(b._roamingStats[RequestTx]==attempts);
  b.resetRoamingState();b.txSucceeds=false;b.roamingTick(80000);assert(!b._roaming.pending&&b._roamingStats[RequestTxFail]==1);
+ b.roamingTick(140000);assert(b._roamingStats[RequestTxFail]==2);
+ b.roamingTick(145000);assert(b._roamingStats[RequestTxFail]==2); // no rapid retry on failed TX
  // Corrupt/untrusted data: exercise all wire parsers under ASan/UBSan.
  uint32_t seed=7;uint8_t fuzz[1025];
  for(unsigned trial=0;trial<30000;++trial){
   size_t n=trial%sizeof(fuzz);for(size_t i=0;i<n;++i){seed=1664525*seed+1013904223;fuzz[i]=uint8_t(seed>>24);}
   capabilities(fuzz,n,caps);candidateIEs(fuzz,n,list);btmRequest(fuzz,n,request);
-  neighborResponse(fuzz,n,1,list);actionFromAP(fuzz,n,b._macAddr,b._targetBSS.bssid);
+  ParseDiagnostic diag;neighborResponse(fuzz,n,1,list,&diag);
+  assert(diag.offset<=MaxActionBytes+3);actionFromAP(fuzz,n,b._macAddr,b._targetBSS.bssid);
  }
  std::puts("PASS: production k/v/r parser fuzz, bounded cache, FT metadata, source/token/PM fences, reject-only BTM, timeouts and lifecycle");
 }
