@@ -84,6 +84,15 @@ int main() {
  receive(security,candidate,150000);security.btmTick(150001);security.runManualScan();security.btmTick(150300);
  assert(!security._btmPhase&&!security.joins&&security.submitted.back()[27]==7);free(security._scanRequest);
  uint8_t out[11];assert(!RTW88Roaming::btmResponse(out,10,1,0,candidate.bssid));
+ // Replayed manual-switch cooldown: preserve the exact reason after auto scans.
+ RTW88IEEE80211 cool;init(cool,hw,candidate,200000);cool._roamSwitchLast=180000;
+ receive(cool,candidate,200000);cool.btmTick(200001);
+ assert(!cool._btmPhase&&!cool.joins&&cool._btmOutcome.reason==RTW88RoamSwitch::Cooldown);
+ assert(cool._btmOutcome.cooldownMs==39999&&cool._btmOutcome.token==11);
+ assert(!memcmp(cool._btmOutcome.target,candidate.bssid,6));
+ cool.autoRoamTick(205000);
+ assert(cool._btmOutcome.reason==RTW88RoamSwitch::Cooldown&&cool._btmOutcome.decisionMs==200001);
+ assert(b._btmOutcome.ackMs==1020&&b._btmOutcome.switchMs==1020);
  assert(!RTW88Roaming::btmResponse(out,11,1,0,nullptr));
  RTW88Roaming::BtmRequest timed;timed.validity=255;timed.mode=4;timed.disassociationTimer=10;
  assert(RTW88Roaming::btmLifetimeMs(timed,100)==1024);

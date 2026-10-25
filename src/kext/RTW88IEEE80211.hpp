@@ -20,6 +20,7 @@
 #include <kern/thread_call.h>
 #include "RTW88Roaming.hpp"
 #include "RTW88RRM.hpp"
+#include "RTW88Lifecycle.hpp"
 #include "RTW88RoamSwitch.hpp"
 
 /* Opaque C driver handle */
@@ -107,6 +108,7 @@ public:
     virtual bool roamingActionsAllowed() const { return false; }
     virtual bool btmControlAvailable() const { return false; }
     virtual bool scheduleBtmControl(unsigned delayMs) { (void)delayMs; return false; }
+    virtual void scanTxReady() {}
     virtual void setRxQueueEnabled(bool enabled) { (void)enabled; }
     virtual void radioPowerChanged(bool powered) { (void)powered; }
     /* Optional native 802.11 action-frame sink for AWDL/P2P controllers. */
@@ -189,6 +191,12 @@ public:
     bool staAssociatedForAWDL() const { return _associatedVisible && _state == RTW88_STATE_CONNECTED; }
     uint16_t infrastructureChannel() const { return _targetBSS.channel; }
     bool staTxBlockedByAWDL() const { return _awdlOffChannel; }
+    bool staTxBlockedByScan() const { return _state==RTW88_STATE_SCANNING &&
+        _scanReturnState==RTW88_STATE_CONNECTED && _manualScanChannelCount && !_manualScanOnHomeChannel; }
+    void beginWakeTrace();
+    void wakeTrace(const char*);
+    void recordTxEvent(unsigned slot) { if(slot<RTW88Lifecycle::TxEvents)__atomic_add_fetch(&_queueTrace.events[slot],1U,__ATOMIC_RELAXED); }
+    void sampleQueueTrace(uint64_t now,uint64_t drops,uint64_t stalls,unsigned depth) { _queueTrace.sample(now,drops,stalls,depth,unsigned(_state)); }
     void restoreSTAChannelAfterAWDL();
     void setAWDLAddress(const uint8_t *mac);
     IOReturn  powerOn();     /* enable: rtw_core_start */
@@ -569,6 +577,9 @@ private:
     bool _autoRoamEnabled=false, _autoScanPending=false;
     bool _stationNeighborReport=false;
     bool _stationBTM=false;
+    RTW88Lifecycle::Wake _wakeTrace;
+    RTW88Lifecycle::BtmOutcome _btmOutcome;
+    RTW88Lifecycle::Queue _queueTrace;
     RTW88RRM::State _rm;
     unsigned _btmPhase=0;
     RTW88Roaming::BtmRequest _btmRequest;

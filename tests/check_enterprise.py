@@ -36,6 +36,7 @@ assert 'key->key_cipher_type == RTW88Enterprise::AppleMsk' in controller
 assert 'RTW88Enterprise::auth(' in controller
 pre = r'''
 #include "RTW88Enterprise.hpp"
+#include "RTW88Lifecycle.hpp"
 #include <cassert>
 #include <cstring>
 #include <cstdlib>
@@ -43,7 +44,7 @@ pre = r'''
 #include <iostream>
 using IOReturn=int; using UInt32=uint32_t;
 constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnUnsupported=3;
-constexpr int kIOReturnOutputDropped=5,kIOReturnOutputSuccess=0;
+constexpr int kIOReturnOutputDropped=5,kIOReturnOutputSuccess=0,kIOReturnOutputStall=6;
 constexpr int DISABLE_KEY=0,MBUF_WAITOK=0,ETH_P_PAE=0x888e;
 constexpr unsigned kIONetworkLinkActive=1,kIONetworkLinkValid=2;
 enum State { RTW88_STATE_IDLE, RTW88_STATE_CONNECTED,RTW88_STATE_SCANNING,RTW88_STATE_HANDSHAKING };
@@ -76,6 +77,10 @@ template<class...T> void IOLog(const char*,T...){}
 struct Ops { void (*set_key)(void*,int,void*,void*,ieee80211_key_conf*)=nullptr; };
 struct Hw { Ops *ops=nullptr; };
 struct RTW88IEEE80211 {
+ RTW88Lifecycle::Wake _wakeTrace;RTW88Lifecycle::Queue _queueTrace;
+ void wakeTrace(const char*){}
+ void recordTxEvent(unsigned i){++_queueTrace.events[i];}
+ bool staTxBlockedByScan()const{return _state==RTW88_STATE_SCANNING&&_scanReturnState==RTW88_STATE_CONNECTED&&_manualScanChannelCount&&!_manualScanOnHomeChannel;}
  uint32_t _roamDataRx=0;void roamTrace(const char*,uint32_t=0){}
  bool _powered=true,_associatedVisible=true,_enterprise=true,_enterpriseAuthorized=false;
  bool _externalSupplicant=true,_wpa2=true,_externalPTKInstalled=false,_externalGTKInstalled=false;
@@ -144,6 +149,13 @@ int main(){
  assert(!eapol(identity,3,type));assert(!eapol(identity,8,type));
  uint8_t keyFrame[]={2,3,0,0};assert(eapol(keyFrame,4,type)&&type==3);
  RTW88IEEE80211 b;Hw hw;b._hw=&hw;Parent parent;b._parent=&parent;
+ // Off-channel connected scans retain the exact mbuf for a later retry.
+ b._state=RTW88_STATE_SCANNING;b._scanReturnState=RTW88_STATE_CONNECTED;b._manualScanChannelCount=3;
+ auto deferred=packet(0x888e);
+ assert(b.outputPacket(deferred)==kIOReturnOutputStall&&deferred->bytes.size()==18&&b.tx==0);
+ assert(b._queueTrace.events[RTW88Lifecycle::StallScan]==1);
+ b._manualScanOnHomeChannel=true;assert(b.outputPacket(deferred)==0&&b.tx==1);
+ b.tx=0;b._state=RTW88_STATE_CONNECTED;b._scanReturnState=RTW88_STATE_IDLE;b._manualScanChannelCount=0;
  uint8_t pmk[32];memset(pmk,0x91,32);uint8_t zero[6]={},wrong[6]={1,1,1,1,1,1};
  assert(b.installEnterprisePMKGated(pmk,31,zero)==kIOReturnBadArgument);
  assert(b.installEnterprisePMKGated(pmk,32,wrong)==kIOReturnBadArgument);

@@ -44,6 +44,7 @@ assert diag.index('->roamingTick(') < diag.index('__atomic_store_n(&self->_diagn
 pre = r'''
 #include "RTW88Roaming.hpp"
 #include "RTW88RRM.hpp"
+#include "RTW88Lifecycle.hpp"
 #include <cassert>
 #include <cstdio>
 #include <vector>
@@ -52,9 +53,14 @@ using namespace RTW88Roaming;
 constexpr int RTW88_STATE_CONNECTED=5,RTW88_STATE_SCANNING=1;
 constexpr uint32_t WLAN_CIPHER_SUITE_CCMP=0x000fac04;
 struct Parent {bool allowed=true,btmAvailable=false;unsigned scheduled=0;
+ void scanTxReady(){}
  bool roamingActionsAllowed(){return allowed;}bool btmControlAvailable(){return btmAvailable&&allowed;}
  bool scheduleBtmControl(unsigned delay){assert(delay>0&&delay<=100);++scheduled;return btmControlAvailable();}};
 struct RTW88IEEE80211 {
+ RTW88Lifecycle::Wake _wakeTrace;
+ RTW88Lifecycle::BtmOutcome _btmOutcome;
+ RTW88Lifecycle::Queue _queueTrace;
+ void wakeTrace(const char*){}
  RTW88RRM::State _rm;
  void rrmReceive(const uint8_t*,uint32_t,uint64_t){}
  void rrmTick(uint64_t){}
@@ -123,8 +129,11 @@ int main(){
  auto nr=neighbor();Candidates list;
  ParseDiagnostic diagnostic;
  auto zeroClass=nr;zeroClass[12]=0;
- assert(!candidateIEs(zeroClass.data(),zeroClass.size(),list,&diagnostic));
- assert(diagnostic.code==ParseOperatingClass&&diagnostic.offset==12);
+ assert(candidateIEs(zeroClass.data(),zeroClass.size(),list,&diagnostic));
+ assert(list.count==1&&list.unknownClasses==1&&list.entries[0].opClass==0);
+ const uint8_t fritz[]={5,5,16,52,21,0x0e,0xc5,0x74,0x81,4,0x91,0x97,0x18,0,0,0,116,9,6,3,3,0x72,0,3,1,0};
+ assert(neighborResponse(fritz,sizeof(fritz),16,list,&diagnostic));
+ assert(list.count==1&&list.unknownClasses==1&&list.entries[0].channel==116&&list.entries[0].preference==0);
  auto zeroChannel=nr;zeroChannel[13]=0;
  assert(!candidateIEs(zeroChannel.data(),zeroChannel.size(),list,&diagnostic));
  assert(diagnostic.code==ParseChannel&&diagnostic.offset==13);

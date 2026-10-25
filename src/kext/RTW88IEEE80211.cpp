@@ -1286,6 +1286,11 @@ void RTW88IEEE80211::endTxBatch()
 
 UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)
 {
+    // The output queue retains ownership on Stall and retries on the home slot.
+    if (_powered && _rtwdev && _hw && _vif && _sta && staTxBlockedByScan()) {
+        recordTxEvent(RTW88Lifecycle::StallScan);
+        return kIOReturnOutputStall;
+    }
     /* Need an associated STA before data frames can be sent. */
     bool connected = (_state == RTW88_STATE_CONNECTED) ||
                      (_state == RTW88_STATE_SCANNING &&
@@ -1293,6 +1298,7 @@ UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)
                       (_manualScanChannelCount == 0 ||
                        _manualScanOnHomeChannel));
     if (!_powered || !connected || !_rtwdev || !_hw || !_vif || !_sta) {
+        recordTxEvent(RTW88Lifecycle::DropOffline);
         mbuf_freem(m);
         return kIOReturnOutputDropped;
     }
@@ -1304,6 +1310,7 @@ UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)
         if (mbuf_pkthdr_len(m) < sizeof(eh) ||
             mbuf_copydata(m, 0, sizeof(eh), eh) != 0 ||
             (uint16_t)((eh[12] << 8) | eh[13]) != ETH_P_PAE) {
+            recordTxEvent(RTW88Lifecycle::DropKeys);
             mbuf_freem(m);
             return kIOReturnOutputDropped;
         }
@@ -1311,7 +1318,9 @@ UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)
 
     /* txDataFrame() encapsulates the Ethernet frame as an 802.11 data frame
      * and consumes (frees) the mbuf in all paths. */
-    return txDataFrame(m) ? kIOReturnOutputSuccess : kIOReturnOutputDropped;
+    if (txDataFrame(m)) return kIOReturnOutputSuccess;
+    recordTxEvent(RTW88Lifecycle::DropEncap);
+    return kIOReturnOutputDropped;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2109,6 +2118,8 @@ void RTW88IEEE80211::deliverEthernet(const uint8_t *da, const uint8_t *sa,
         return;
     }
     _parent->injectRxFrame(m);
+    if(ethertype!=ETH_P_PAE && _wakeTrace.active && _wakeTrace.points[RTW88Lifecycle::Keys])
+        wakeTrace("first-data");
     if(ethertype!=ETH_P_PAE)__atomic_add_fetch(&_roamDataRx,1U,__ATOMIC_RELAXED);
 }
 
@@ -2601,6 +2612,8 @@ void RTW88IEEE80211::scanDone(bool aborted)
         __atomic_store_n(&_roamScanActive, false, __ATOMIC_RELEASE);
     }
 
+    wakeTrace("scan-done");
+    if (_powered && _state == RTW88_STATE_CONNECTED && _parent) _parent->scanTxReady();
     /* Complete the Apple scan transaction first.  If ASSOCIATE arrived while
      * scanning, start that already-accepted join immediately afterwards. */
     if (_delegate && !roamScan) {
@@ -2672,6 +2685,7 @@ IOReturn RTW88IEEE80211::cmdScan(uint16_t roamChannel)
     _scanReturnState = (returnState == RTW88_STATE_CONNECTED) ?
         returnState : RTW88_STATE_IDLE;
     _state = RTW88_STATE_SCANNING;
+    wakeTrace("scan-start");
 
     // Firmware retains the request until completion; neither object may live on the stack.
     if (!_scanRequest) _scanRequest = (ieee80211_scan_request *)IOMallocZero(sizeof(*_scanRequest));
@@ -2856,6 +2870,7 @@ void RTW88IEEE80211::runManualScan()
             txNullFunc(false);
             if(roamWorker)roamTrace("scan-home-restore-complete");
             _manualScanOnHomeChannel = true;
+            if (_parent) _parent->scanTxReady();
             IOSleep(80);
         }
     }
@@ -4462,6 +4477,8 @@ void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
         }
         _roaming.pending = false;
         _roaming.neighbors = candidates; _roaming.neighborsMs = nowMs;
+        __atomic_add_fetch(&_roamingStats[RTW88Roaming::NeighborUnknownClass],
+                           uint32_t(candidates.unknownClasses),__ATOMIC_RELAXED);
         _roamLastResponseCount=candidates.count;
         roamTrace(candidates.count?"neighbor-response-ok":"neighbor-response-empty",candidates.count);
         if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED)>=2) {
@@ -4668,6 +4685,7 @@ void RTW88IEEE80211::cancelBTM(const char *reason)
 {
     if(!_btmPhase)return;
     _btmPhase=0;_btmStage=reason;
+    _btmOutcome.stage=reason;
     __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmCanceled],1U,__ATOMIC_RELAXED);
     roamTrace("btm-canceled");
 }
@@ -4686,23 +4704,28 @@ bool RTW88IEEE80211::sendBtmResponse(uint8_t token,uint8_t status,const uint8_t 
 
 void RTW88IEEE80211::rejectBtm(uint8_t status,const char *reason)
 {
-    (void)sendBtmResponse(_btmRequest.token,status);
+    _btmOutcome.status=status;
+    _btmOutcome.responseSubmitted=sendBtmResponse(_btmRequest.token,status);
     _btmPhase=0;_btmStage=reason;
+    _btmOutcome.stage=reason;
 }
 
 void RTW88IEEE80211::queueBtm(const RTW88Roaming::BtmRequest &request,uint64_t nowMs)
 {
     if(_rm.phase){(void)sendBtmResponse(request.token,1);_btmStage="radio-measurement-busy";return;}
     if(_btmPhase){(void)sendBtmResponse(request.token,1);return;}
+    _btmOutcome=RTW88Lifecycle::BtmOutcome{};
+    _btmOutcome.requestMs=nowMs;_btmOutcome.token=request.token;_btmOutcome.mode=request.mode;
+    memcpy(_btmOutcome.source,_targetBSS.bssid,6);_btmOutcome.stage="received";
     _btmRequest=request;memcpy(_btmSource,_targetBSS.bssid,6);memset(_btmTarget,0,6);
     _btmDeadline=0;_btmScanned=false;_btmScanGeneration=0;_btmLastStatus=255;
     // Termination schedules and ESS-leaving requests are parsed but are not
     // implemented by this first intra-ESS BTM path. Do not fetch remote URLs.
     if(request.mode&24) {
-        (void)sendBtmResponse(request.token,1);_btmStage="unsupported-termination-or-ess-mode";return;
+        rejectBtm(1,"unsupported-termination-or-ess-mode");return;
     }
     if(!(request.mode&1) || !request.candidates.count) {
-        (void)sendBtmResponse(request.token,7);_btmStage="no-candidates";return;
+        rejectBtm(7,"no-candidates");return;
     }
     pauseAutoRoaming(nowMs);
     const uint64_t lifetime=RTW88Roaming::btmLifetimeMs(request,_targetBSS.beacon_interval);
@@ -4765,13 +4788,19 @@ void RTW88IEEE80211::btmTick(uint64_t nowMs)
     }
     if(_btmPhase==2) {
         if(__atomic_load_n(&_btmAckIdentity,__ATOMIC_ACQUIRE)==_btmReplyIdentity) {
+            _btmOutcome.ackMs=nowMs;
             uint8_t target[6];memcpy(target,_btmTarget,6);
             // Revalidate after ACK, before any destructive operation.
-            if(validateRoam(target,nowMs,false)!=kIOReturnSuccess){cancelBTM("target-invalid-after-ack");return;}
+            const IOReturn checked=validateRoam(target,nowMs,false);
+            _btmOutcome.reason=_roamReason;_btmOutcome.result=uint32_t(checked);
+            if(checked!=kIOReturnSuccess){cancelBTM("target-invalid-after-ack");return;}
             _btmPhase=0;_btmStage="switch-submitted";roamTrace("btm-response-acked");
+            _btmOutcome.switchMs=nowMs;
             if(requestRoam(target,nowMs)==kIOReturnSuccess)
                 __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmSwitchTx],1U,__ATOMIC_RELAXED);
             else _btmStage="switch-rejected-after-ack";
+            _btmOutcome.stage=_btmStage;
+            _btmOutcome.reason=_roamReason;_btmOutcome.result=_roamRequestReturn;
         } else if(nowMs>=_btmAckDeadline)cancelBTM("accept-not-acknowledged");
         return;
     }
@@ -4789,12 +4818,21 @@ void RTW88IEEE80211::btmTick(uint64_t nowMs)
     if(roamControlReady()!=kIOReturnSuccess){rejectBtm(1,"preflight-rejected");return;}
     uint8_t target[6]={};
     if(selectBtmTarget(nowMs,target)) {
-        if(validateRoam(target,nowMs,false)!=kIOReturnSuccess){rejectBtm(7,"target-rejected");return;}
+        memcpy(_btmOutcome.target,target,6);_btmOutcome.decisionMs=nowMs;
+        _btmOutcome.cooldownMs=_roamSwitchLast && nowMs>=_roamSwitchLast &&
+            nowMs-_roamSwitchLast<RTW88RoamSwitch::CooldownMs ?
+            RTW88RoamSwitch::CooldownMs-(nowMs-_roamSwitchLast):0;
+        const IOReturn checked=validateRoam(target,nowMs,false);
+        _btmOutcome.reason=_roamReason;_btmOutcome.result=uint32_t(checked);
+        if(checked!=kIOReturnSuccess){rejectBtm(7,"target-rejected");return;}
         memcpy(_btmTarget,target,6);
         _btmReplyIdentity=RTW88Roaming::btmIdentity(_txSeq,_btmSource);
         __atomic_store_n(&_btmAckIdentity,0ULL,__ATOMIC_RELEASE);
-        if(!sendBtmResponse(_btmRequest.token,0,target)){cancelBTM("accept-tx-failed");return;}
+        _btmOutcome.status=0;
+        _btmOutcome.responseSubmitted=sendBtmResponse(_btmRequest.token,0,target);
+        if(!_btmOutcome.responseSubmitted){cancelBTM("accept-tx-failed");return;}
         _btmPhase=2;_btmStage="waiting-accept-ack";_btmAckDeadline=nowMs+250;
+        _btmOutcome.stage=_btmStage;
         return;
     }
     if(!_btmScanned && _btmDeadline-nowMs>=4500) {
@@ -4843,8 +4881,32 @@ void RTW88IEEE80211::beginRoamTest(const uint8_t *bssid)
     }
 }
 
+void RTW88IEEE80211::beginWakeTrace()
+{
+    uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+    _wakeTrace.start(ns/1000000ULL);
+}
+
+void RTW88IEEE80211::wakeTrace(const char *stage)
+{
+    if(!_wakeTrace.active)return;
+    unsigned point=RTW88Lifecycle::WakePoints;
+    if(!strcmp(stage,"radio-ready"))point=RTW88Lifecycle::RadioReady;
+    else if(!strcmp(stage,"scan-start"))point=RTW88Lifecycle::ScanStart;
+    else if(!strcmp(stage,"scan-done"))point=RTW88Lifecycle::ScanDone;
+    else if(!strcmp(stage,"auth-worker-start"))point=RTW88Lifecycle::Connect;
+    else if(!strcmp(stage,"auth-response-ok"))point=RTW88Lifecycle::Auth;
+    else if(!strcmp(stage,"assoc-response-ok"))point=RTW88Lifecycle::Assoc;
+    else if(!strcmp(stage,"data-keys-installed"))point=RTW88Lifecycle::Keys;
+    else if(!strcmp(stage,"first-data"))point=RTW88Lifecycle::Data;
+    if(point==RTW88Lifecycle::WakePoints || _wakeTrace.points[point])return;
+    uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+    _wakeTrace.mark(point,ns/1000000ULL,_targetBSS.bssid,_targetBSS.channel);
+}
+
 void RTW88IEEE80211::roamTrace(const char *stage, uint32_t detail)
 {
+    wakeTrace(stage);
     uint64_t ns=0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
     __atomic_store_n(&_roamStage, stage, __ATOMIC_RELAXED);
     __atomic_store_n(&_roamStageMs, ns/1000000ULL, __ATOMIC_RELAXED);
@@ -5015,7 +5077,7 @@ void RTW88IEEE80211::autoRoamTick(uint64_t nowMs)
     }
     if(_autoScanPending) {
         if(roamScanActive() || _manualScanChannelCount ||
-           __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE))return;
+           __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE)){_autoStage="scanning";return;}
         _autoScanPending=false;_autoNextMs=nowMs+60000;
         if(_scanGeneration!=_autoScanGeneration ||
            __atomic_load_n(&_roamScanResult,__ATOMIC_RELAXED)!=2) {
@@ -5035,7 +5097,12 @@ void RTW88IEEE80211::autoRoamTick(uint64_t nowMs)
        __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE) ||
        __atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE))return;
     if(!_autoNextMs){_autoNextMs=nowMs+30000;_autoStage="warming-up";return;}
-    if(nowMs<_autoNextMs)return;
+    if(nowMs<_autoNextMs){
+        if(!strcmp(_autoStage,"neighbor-response-pending") ||
+           !strcmp(_autoStage,"radio-measurement-pending") || !strcmp(_autoStage,"btm-pending"))
+            _autoStage="waiting-next-scan";
+        return;
+    }
     if(_roamSwitchLast && (nowMs<_roamSwitchLast || nowMs-_roamSwitchLast<RTW88RoamSwitch::CooldownMs)) {
         _autoStage="cooldown";return;
     }
@@ -5170,6 +5237,32 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
     uint32_t used=0;
 #define ROAM_APPEND(...) do { if(used<capacity) { int n=snprintf(out+used,capacity-used,__VA_ARGS__); \
     if(n>0)used+=(uint32_t(n)<capacity-used)?uint32_t(n):capacity-used-1; } } while(0)
+    ROAM_APPEND("wake_generation=%u\nwake_begin_ms=%llu\nwake_active=%u\n",
+        _wakeTrace.generation,(unsigned long long)_wakeTrace.begin,unsigned(_wakeTrace.active));
+    static const char *const wakeNames[]={"radio_ready","scan_start","scan_done","connect","auth","assoc","keys","data"};
+    for(unsigned i=0;i<RTW88Lifecycle::WakePoints;++i)
+        ROAM_APPEND("wake_%s_ms=%lld\n",wakeNames[i],_wakeTrace.points[i]?
+            (long long)(_wakeTrace.points[i]-_wakeTrace.begin):-1LL);
+    ROAM_APPEND("wake_first_ap=%02x:%02x:%02x:%02x:%02x:%02x\nwake_first_channel=%u\n",
+        _wakeTrace.firstAP[0],_wakeTrace.firstAP[1],_wakeTrace.firstAP[2],_wakeTrace.firstAP[3],
+        _wakeTrace.firstAP[4],_wakeTrace.firstAP[5],_wakeTrace.firstChannel);
+    ROAM_APPEND("btm_outcome_stage=%s\nbtm_outcome_token=%u\nbtm_outcome_mode=%u\nbtm_outcome_request_ms=%llu\nbtm_outcome_decision_ms=%llu\nbtm_outcome_ack_ms=%llu\nbtm_outcome_switch_ms=%llu\nbtm_outcome_reason=%s\nbtm_outcome_result=0x%08x\nbtm_outcome_cooldown_ms=%llu\n",
+        _btmOutcome.stage,_btmOutcome.token,_btmOutcome.mode,(unsigned long long)_btmOutcome.requestMs,
+        (unsigned long long)_btmOutcome.decisionMs,(unsigned long long)_btmOutcome.ackMs,
+        (unsigned long long)_btmOutcome.switchMs,RTW88RoamSwitch::reasonName(_btmOutcome.reason),
+        _btmOutcome.result,(unsigned long long)_btmOutcome.cooldownMs);
+    ROAM_APPEND("btm_outcome_source=%02x:%02x:%02x:%02x:%02x:%02x\nbtm_outcome_target=%02x:%02x:%02x:%02x:%02x:%02x\n",
+        _btmOutcome.source[0],_btmOutcome.source[1],_btmOutcome.source[2],_btmOutcome.source[3],_btmOutcome.source[4],_btmOutcome.source[5],
+        _btmOutcome.target[0],_btmOutcome.target[1],_btmOutcome.target[2],_btmOutcome.target[3],_btmOutcome.target[4],_btmOutcome.target[5]);
+    ROAM_APPEND("btm_outcome_status=%u\nbtm_outcome_response_submitted=%u\n",_btmOutcome.status,unsigned(_btmOutcome.responseSubmitted));
+    ROAM_APPEND("queue_sample_ms=%llu\nqueue_drop_total=%llu\nqueue_stall_total=%llu\nqueue_drop_delta=%llu\nqueue_stall_delta=%llu\nqueue_depth=%u\nqueue_state=%u\n",
+        (unsigned long long)_queueTrace.sampleMs,(unsigned long long)_queueTrace.dropTotal,
+        (unsigned long long)_queueTrace.stallTotal,(unsigned long long)_queueTrace.dropDelta,
+        (unsigned long long)_queueTrace.stallDelta,_queueTrace.queued,_queueTrace.state);
+    static const char *const txNames[]={"stall_power","stall_scan","stall_awdl","stall_ring","drop_offline","drop_keys","drop_encap"};
+    for(unsigned i=0;i<RTW88Lifecycle::TxEvents;++i)
+        ROAM_APPEND("tx_%s=%u\n",txNames[i],__atomic_load_n(&_queueTrace.events[i],__ATOMIC_RELAXED));
+    ROAM_APPEND("neighbor_unknown_class_hints=%u\n",roamingStat(RTW88Roaming::NeighborUnknownClass));
     ROAM_APPEND("test_id=%u\nnow_ms=%llu\nstage=%s\nstage_age_ms=%lld\n",
         __atomic_load_n(&_roamTestID,__ATOMIC_RELAXED),(unsigned long long)nowMs,
         __atomic_load_n(&_roamStage,__ATOMIC_RELAXED),

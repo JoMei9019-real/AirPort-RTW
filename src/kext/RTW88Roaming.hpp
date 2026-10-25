@@ -26,6 +26,7 @@ struct Candidates {
     Candidate entries[MaxCandidates] = {};
     uint8_t count = 0;
     bool truncated = false;
+    uint8_t unknownClasses = 0; // Retained as untrusted RF lookup hints only.
 };
 enum ParseCode : unsigned {
     ParseOK, ParseBounds, ParseHeader, ParseToken, ParseIEHeader, ParseIELength,
@@ -108,7 +109,9 @@ inline bool candidateIEs(const uint8_t *p, size_t n, Candidates &out, ParseDiagn
             Candidate c;
             memcpy(c.bssid, v, 6);
             if(!unicast(c.bssid))return parseFail(diag,ParseBSSID,offset+2,52,len,n,result.count);
-            if(!v[10])return parseFail(diag,ParseOperatingClass,offset+12,52,len,n,result.count);
+            // Some FRITZ reports encode class 0 even with a real channel.
+            // Keep the BSSID/channel hint; every join still needs a fresh,
+            // matching RF observation and the regulatory/security preflight.
             if(!v[11])return parseFail(diag,ParseChannel,offset+13,52,len,n,result.count);
             c.info = uint32_t(v[6]) | (uint32_t(v[7]) << 8) |
                      (uint32_t(v[8]) << 16) | (uint32_t(v[9]) << 24);
@@ -127,7 +130,10 @@ inline bool candidateIEs(const uint8_t *p, size_t n, Candidates &out, ParseDiagn
             for (unsigned i = 0; i < result.count; ++i)
                 duplicate |= memcmp(result.entries[i].bssid, c.bssid, 6) == 0;
             if (!duplicate) {
-                if (result.count < MaxCandidates) result.entries[result.count++] = c;
+                if (result.count < MaxCandidates) {
+                    result.entries[result.count++] = c;
+                    if(!c.opClass)++result.unknownClasses;
+                }
                 else result.truncated = true;
             }
         }
@@ -231,6 +237,6 @@ enum Stat : unsigned {
     RequestTx, RequestTxFail, ResponseRx, ResponseInvalid, ResponseTimeout,
     NeighborCount, NeighborTruncated, BtmRx, BtmRejectTx, BtmTxFail,
     BtmInvalid, BtmRateLimited, BtmCandidates, BtmMode, BtmDisassocTimer,
-    BtmAcceptTx, BtmSwitchTx, BtmScanTx, BtmCanceled, Count
+    BtmAcceptTx, BtmSwitchTx, BtmScanTx, BtmCanceled, NeighborUnknownClass, Count
 };
 }

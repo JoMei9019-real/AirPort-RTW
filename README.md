@@ -1,5 +1,18 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 12: scan backpressure and persistent diagnostics
+
+Connected off-channel software scans now stall output without consuming the
+packet and resume the asynchronous queue in home-channel slots and at completion.
+FRITZ Neighbor Reports with operating class zero are retained as untrusted
+hints; fresh RF, security and regulatory validation still decide eligibility.
+Wake milestones, first keyed AP, BTM decision context and queue/drop deltas are
+preserved separately from the bounded log. Transient auto-roam status is cleared
+when the pending operation ends. The 60-second switch cooldown remains in place.
+See [Beta 12 scope and tests](BETA_1_1_0_12.md). Initial wake reconnect latency,
+BTM-accepted switches and Beacon Measurement interoperability still need RF tests.
+This is experimental roaming-related k/v support; FT/802.11r is not implemented.
+
 ## 1.1.0 Beta 11: 802.11k Beacon Reports and k/v diagnostics
 
 Compatible WPA2/CCMP associations advertise Neighbor Report plus passive,

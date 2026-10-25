@@ -115,7 +115,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.11-beacon-reports");
+    setProperty("DriverBuild", "1.1.0-beta.12-lifecycle-diagnostics");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -293,7 +293,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 1.1.0-beta.11 beacon measurements, controlled BTM and automatic roaming enabled\n");
+    IOLog("AirPortRTW: 1.1.0-beta.12 scan backpressure, persistent wake/BTM diagnostics and k/v roaming\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -334,7 +334,8 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
             "ROAM_K_NEIGHBOR_TRUNCATED", "ROAM_V_REQUEST_RX", "ROAM_V_REJECT_SUBMITTED",
             "ROAM_V_RESPONSE_FAILED", "ROAM_V_REQUEST_INVALID", "ROAM_V_RATE_LIMITED",
             "ROAM_V_CANDIDATE_COUNT", "ROAM_V_LAST_MODE", "ROAM_V_DISASSOC_TIMER_TBTT",
-            "ROAM_V_ACCEPT_SUBMITTED", "ROAM_V_SWITCH_SUBMITTED", "ROAM_V_SCAN_SUBMITTED", "ROAM_V_CANCELED"
+            "ROAM_V_ACCEPT_SUBMITTED", "ROAM_V_SWITCH_SUBMITTED", "ROAM_V_SCAN_SUBMITTED", "ROAM_V_CANCELED",
+            "ROAM_K_UNKNOWN_CLASS_HINTS"
         };
         static_assert(sizeof(names)/sizeof(names[0])==RTW88Roaming::Count,"roaming diagnostic names must match counters");
         for (unsigned i = 0; i < RTW88Roaming::Count; ++i)
@@ -358,6 +359,13 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
                       gates != self->_diagLastGateCount ||
                       self->_diagnosticsSamples - self->_diagLastRingSample >= kDiagHeartbeatSamples;
         self->_diagLastGateCount = gates;
+        {
+            IOOutputQueue *q = self->getOutputQueue();
+            IONetworkData *d = q ? q->getStatisticsData() : nullptr;
+            const IOOutputQueueStats *s = d && d->getSize() >= sizeof(IOOutputQueueStats) ?
+                (const IOOutputQueueStats *)d->getBuffer() : nullptr;
+            if(s)self->_ieee80211->sampleQueueTrace(nowNs/1000000ULL,s->dropCount,s->stallCount,q->getSize());
+        }
         if (toRing) {
             IOOutputQueue *oq = self->getOutputQueue();
             /* r11: the family queue's own drop/stall counters, so drops can
@@ -692,8 +700,16 @@ void AirPortRTW::resumeTxIfStalled()
     kickGatedOutput();
 }
 
+void AirPortRTW::scanTxReady()
+{
+    // Queue service is asynchronous; never recurse into IO80211 output here.
+    resumeTxIfStalled();
+}
+
 bool AirPortRTW::releaseTxStall()
 {
+    if (_ieee80211 && (_ieee80211->staTxBlockedByScan() || _ieee80211->staTxBlockedByAWDL()))
+        return false;
     if (!_txStalled || rtw88_be_tx_avail() < kRTW88TxResumeAvail)
         return false;
 
@@ -925,6 +941,7 @@ IOReturn AirPortRTW::restoreAfterSystemWake()
     waitForDiagnosticsIdle();
 
     ++_pmWakeCount;
+    if (_ieee80211) _ieee80211->beginWakeTrace();
     setProperty("PM_STATE", "waking");
     setProperty("PM_WAKE_COREWIFI_READY", kOSBooleanFalse);
     setProperty("PM_WAKE_COUNT", (uint64_t)_pmWakeCount, 32);
@@ -1015,6 +1032,7 @@ out:
 
     if (ret == kIOReturnSuccess) {
         _txStalled = false;
+        if (_ieee80211->isPowered()) _ieee80211->wakeTrace("radio-ready");
         // Advertise the restored, unassociated radio only after the PM fence
         // is open. Never announce a reconnect opportunity for Wi-Fi left OFF.
         if (_ieee80211->isPowered())
@@ -1241,6 +1259,7 @@ UInt32 AirPortRTW::outputPacket(mbuf_t m, void *param)
     (void)param;
     if (__atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
         _pmPowerState == kRTW88PowerStateOff) {
+        if (_ieee80211) _ieee80211->recordTxEvent(RTW88Lifecycle::StallPower);
         _txStalled = true;
         return kIOReturnOutputStall;
     }
@@ -1257,12 +1276,19 @@ UInt32 AirPortRTW::outputPacket(mbuf_t m, void *param)
      * the AP channel. Backpressure en0 instead of transmitting AP traffic on
      * the peer-to-peer channel. */
     if (_ieee80211->staTxBlockedByAWDL()) {
+        _ieee80211->recordTxEvent(RTW88Lifecycle::StallAWDL);
         _txStalled = true;
         return kIOReturnOutputStall;
     }
 
+    if (_ieee80211->staTxBlockedByScan()) {
+        _ieee80211->recordTxEvent(RTW88Lifecycle::StallScan);
+        _txStalled = true;
+        return kIOReturnOutputStall;
+    }
     const unsigned int avail = rtw88_be_tx_avail();
     if (_txStalled || avail < kRTW88TxStallAvail) {
+        _ieee80211->recordTxEvent(RTW88Lifecycle::StallRing);
         _txStalled = true;
         /* Do not consume m. IOBasicOutputQueue retries this exact packet when
          * resumeTxIfStalled() services the queue after descriptor reclamation. */
@@ -1272,6 +1298,7 @@ UInt32 AirPortRTW::outputPacket(mbuf_t m, void *param)
     /* The stack already accounts output bytes on this interface; add the
      * packet count only, so netstat/Activity Monitor are not stuck at zero. */
     UInt32 ret = _ieee80211->outputPacket(m);
+    if(ret == kIOReturnOutputStall) {_txStalled=true;return ret;}
     ifnet_t ifp = _netif ? _netif->getIfnet() : nullptr;
     if (ifp)
         ifnet_stat_increment_out(ifp, ret == kIOReturnOutputSuccess ? 1 : 0, 0,
@@ -3369,6 +3396,7 @@ IOReturn AirPortRTW::outputStartBatched(IONetworkInterface *interface, IOOptionB
 
 bool AirPortRTW::txGateWanted()
 {
+    if (_ieee80211 && _ieee80211->staTxBlockedByScan()) return true;
     /* A stalled queue cannot drain, so anything pulled now only waits in
      * (or tail-drops from) the 256-entry family queue. Open again only once
      * resumeTxIfStalled()/releaseTxStall() has cleared the stall at
@@ -3382,6 +3410,7 @@ bool AirPortRTW::txGateWanted()
 
 void AirPortRTW::kickGatedOutput()
 {
+    if (_ieee80211 && (_ieee80211->staTxBlockedByScan() || _ieee80211->staTxBlockedByAWDL())) return;
     if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||

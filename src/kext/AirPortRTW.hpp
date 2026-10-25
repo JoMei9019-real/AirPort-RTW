@@ -381,6 +381,7 @@ private:
     void   setBounceOrigVA(IOPhysicalAddress phys, void *orig_va) override;
     void   syncBounceForCpu(IOPhysicalAddress dma, size_t size) override;
     void   resumeTxIfStalled() override;
+    void   scanTxReady() override;
     void   drainPendingFree();
     IOReturn quiesceForSystemSleep();
     IOReturn restoreAfterSystemWake();
