@@ -33,8 +33,8 @@ assert '_roamingAssistEnabled = false' in header
 assert 'roaming && roaming->isTrue()' in controller
 assert 'setProperty("ROAM_R_FT_ENABLED", kOSBooleanFalse)' in controller
 assoc = method('bool RTW88IEEE80211::buildAssocReq(')
-assert 'if (requestRrm) cap |= 0x1000' in assoc
-assert '{70, 5, 2, 0, 0, 0, 0}' in assoc
+assert 'if (requestRrm || _rm.advertised) cap |= 0x1000' in assoc
+assert '(_rm.advertised?0x70:0)' in assoc
 assert 'roamCaps.neighborReport && !roamCaps.pmfRequired' in assoc
 assert 'WLAN_EID_MOBILITY_DOMAIN' not in assoc and 'WLAN_EID_FAST_BSS_TRANSITION' not in assoc
 diag = controller[controller.index('void AirPortRTW::diagnosticsTimerFired('):
@@ -43,6 +43,7 @@ assert diag.index('!__atomic_load_n(&self->_pmTransition') < diag.index('->roami
 assert diag.index('->roamingTick(') < diag.index('__atomic_store_n(&self->_diagnosticsInHardware, false')
 pre = r'''
 #include "RTW88Roaming.hpp"
+#include "RTW88RRM.hpp"
 #include <cassert>
 #include <cstdio>
 #include <vector>
@@ -54,6 +55,10 @@ struct Parent {bool allowed=true,btmAvailable=false;unsigned scheduled=0;
  bool roamingActionsAllowed(){return allowed;}bool btmControlAvailable(){return btmAvailable&&allowed;}
  bool scheduleBtmControl(unsigned delay){assert(delay>0&&delay<=100);++scheduled;return btmControlAvailable();}};
 struct RTW88IEEE80211 {
+ RTW88RRM::State _rm;
+ void rrmReceive(const uint8_t*,uint32_t,uint64_t){}
+ void rrmTick(uint64_t){}
+ void rrmCancel(const char*){_rm.phase=0;}
  bool _autoRoamEnabled=false,_autoScanPending=false,_stationNeighborReport=false;uint64_t _autoNextMs=0;
  uint32_t _autoScanGeneration=0,_autoScans=0,_autoSwitches=0;const char *_autoStage="disabled";
  ParseDiagnostic _neighborDiagnostic;const char *_neighborReject="none";

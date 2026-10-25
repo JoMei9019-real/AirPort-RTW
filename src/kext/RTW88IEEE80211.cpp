@@ -1100,7 +1100,7 @@ void RTW88IEEE80211::restoreSTAChannelAfterAWDL()
 IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
 {
     // Explicit roaming owns the single PHY until scan/switch completion.
-    if (roamScanActive() || _roamSwitch.phase || _btmPhase ||
+    if (roamScanActive() || _roamSwitch.phase || _btmPhase || _rm.phase ||
         __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE))
         return kIOReturnBusy;
     if (!_powered || !_hw || !_hw->wiphy || channel == 0)
@@ -1362,10 +1362,17 @@ void RTW88IEEE80211::processRxMgmt(struct sk_buff *skb)
     switch (stype) {
     case 0x0080: /* beacon */
     case 0x0050: /* probe response */
+        if(stype==0x0080 && skb->len>=36 && _associatedVisible &&
+           !memcmp(hdr->addr3,_targetBSS.bssid,6) && !memcmp(hdr->addr2,hdr->addr3,6) &&
+           IEEE80211_SKB_RXCB(skb)->freq==RTW88RoamSwitch::channelFrequency(_targetBSS.channel)) {
+            uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+            uint64_t tsf=0;for(unsigned i=0;i<8;++i)tsf|=uint64_t(skb->data[24+i])<<(8*i);
+            _rm.clockTSF=tsf;_rm.clockUs=ns/1000;
+        }
         if (_state == RTW88_STATE_SCANNING)
             processScanResult(skb);
         else if (stype == 0x0080 && _state == RTW88_STATE_CONNECTED &&
-                 !_curBssTim && skb->len >= sizeof(struct ieee80211_hdr_3addr) &&
+                 (!_curBssTim || _rm.advertised) && skb->len >= sizeof(struct ieee80211_hdr_3addr) &&
                  memcmp(((struct ieee80211_hdr_3addr *)skb->data)->addr3,
                         _targetBSS.bssid, 6) == 0)
             processScanResult(skb);   /* r10: refresh IE list with a TIM */
@@ -1765,6 +1772,39 @@ void RTW88IEEE80211::processScanResult(struct sk_buff *skb)
     if(RTW88RoamSwitch::beaconProof(scanFC,le16_to_cpu(hdr->seq_ctrl),bss->capabilities,
        bss->channel,rxs->freq,iesComplete && body==end,hdr->addr2,bss->bssid))
         bss->beaconObservedMs=bss->observedMs;
+
+    // Preserve exact fixed fields + IEs separately from the sanitized join
+    // cache. A report must never synthesize a received beacon/probe body.
+    const unsigned rawLength=skb->len-sizeof(struct ieee80211_hdr_3addr);
+    if(rawLength>RTW88RRM::MaxBody)++_rm.captureOversize;
+    if(iesComplete && body==end && rawLength<=RTW88RRM::MaxBody &&
+       !(rxs->flag&RX_FLAG_NO_SIGNAL_VAL) && rxs->freq==advertisedFrequency &&
+       !memcmp(hdr->addr2,bss->bssid,6) && RTW88Roaming::unicast(bss->bssid) &&
+       !(scanFC&0xc700) && !(le16_to_cpu(hdr->seq_ctrl)&15)) {
+        auto&o=_rm.capture;o={};o.seenMs=bss->observedMs;o.signal=rxs->signal;
+        o.channel=bss->channel;o.generation=_scanGeneration;o.parentTSF=uint32_t(rxs->mactime);
+        o.beacon=(scanFC&0xf0)==0x80;o.bodyLength=uint16_t(rawLength);
+        memcpy(o.body,skb->data+sizeof(struct ieee80211_hdr_3addr),rawLength);
+        o.phy=bss->freq>5000?4:6;
+        for(unsigned i=12;i+2<=rawLength;i+=unsigned(o.body[i+1])+2) {
+            if(o.body[i]==61)o.phy=7;
+            if(o.body[i]==192){o.phy=9;break;}
+        }
+        if(_rm.scanOwned && o.channel==__atomic_load_n(&_rm.scanChannel,__ATOMIC_ACQUIRE)) {
+            o.startTSF=__atomic_load_n(&_rm.scanStartTSF,__ATOMIC_ACQUIRE);
+            o.durationTU=uint16_t((_rm.dwellMs*1000)/1024);
+        }
+        auto*record=&_rm.cache[0];
+        for(auto &entry:_rm.cache) {
+            if(!memcmp(entry.bssid,bss->bssid,6)){record=&entry;break;}
+            if(entry.measurement.seenMs<record->measurement.seenMs)record=&entry;
+        }
+        if(!(_rm.scanOwned && record->measurement.generation==_scanGeneration &&
+             record->measurement.startTSF && !o.startTSF && !memcmp(record->bssid,bss->bssid,6))) {
+            memcpy(record->bssid,bss->bssid,6);record->measurement=o;
+            memcpy(record->ssid,bss->ssid,sizeof(record->ssid));record->ssid_len=bss->ssid_len;
+        }
+    }
 
     /* Add to BSS list (deduplicate by BSSID) */
     IOLockLock(_bssLock);
@@ -2296,6 +2336,14 @@ void RTW88IEEE80211::txStatus(struct sk_buff *skb)
     if (!(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS))
         return;
     observeBtmTx(skb->data,skb->len,(info->flags&IEEE80211_TX_STAT_ACK)!=0);
+    if(skb->len>=32 && skb->data[0]==0xd0 && skb->data[24]==5 && skb->data[25]==1 &&
+       !memcmp(skb->data+4,_targetBSS.bssid,6)) {
+        const bool acked=(info->flags&IEEE80211_TX_STAT_ACK)!=0;
+        if(acked)__atomic_add_fetch(&_rm.ack,1U,__ATOMIC_RELAXED);
+        else __atomic_add_fetch(&_rm.noack,1U,__ATOMIC_RELAXED);
+        if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED))
+            IOLog("rtw88: RM tx-status dialog=%u token=%u ack=%u\n",skb->data[26],skb->data[29],unsigned(acked));
+    }
 
     const char *frameName = "frame";
     if (skb->len >= sizeof(struct ieee80211_hdr_3addr)) {
@@ -2641,7 +2689,8 @@ IOReturn RTW88IEEE80211::cmdScan(uint16_t roamChannel)
                 if (n_chans < 256) {
                     /* Only scan enabled channels */
                     if (!(band->channels[j].flags & IEEE80211_CHAN_DISABLED) &&
-                        (!roamChannel ||
+                        (!_rm.scanOwned || [&](){for(unsigned k=0;k<_rm.planCount;++k)if(_rm.plan[k]==band->channels[j].hw_value)return true;return false;}()) &&
+                        (!roamChannel || _rm.scanOwned ||
                          ((discovery || band->channels[j].hw_value == roamChannel) &&
                           band->channels[j].center_freq>=2400 && band->channels[j].center_freq<=5900 &&
                           (!discovery || n_chans<int(RTW88RoamSwitch::MaxDiscoveryChannels))))) {
@@ -2661,7 +2710,8 @@ IOReturn RTW88IEEE80211::cmdScan(uint16_t roamChannel)
     }
 
     const bool firmwareScan = !targeted && _hw->ops->hw_scan && rtw88_hw_scan_supported(_hw);
-    _scanEngine = targeted ? (discovery?"roam-discovery":"roam-single-channel") : firmwareScan ? "firmware" : "software";
+    _scanEngine = _rm.scanOwned?(_rm.scanMode==0?"rm-passive":"rm-active"):
+        targeted ? (discovery?"roam-discovery":"roam-single-channel") : firmwareScan ? "firmware" : "software";
     _lastScanChannelCount = (uint32_t)n_chans;
     _scanVisited2GHz = _scanVisited5GHz = 0;
     if (!firmwareScan) {
@@ -2685,7 +2735,7 @@ IOReturn RTW88IEEE80211::cmdScan(uint16_t roamChannel)
         }
         thread_call_enter(_manualScanTC);
 
-        _timeoutMs = targeted ? (discovery?25000:3000) : 12000;
+        _timeoutMs = _rm.scanOwned?12000:targeted ? (discovery?25000:3000) : 12000;
         uint64_t d;
         clock_interval_to_deadline(_timeoutMs, kMillisecondScale, &d);
         _timer->wakeAtTime(d);
@@ -2736,9 +2786,13 @@ void RTW88IEEE80211::manualScanTCFn(thread_call_param_t self, thread_call_param_
 void RTW88IEEE80211::runManualScan()
 {
     const bool roamWorker=__atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE);
+    const bool rmWorker=_rm.scanOwned;
+    const unsigned rmMode=_rm.scanMode,rmDwell=_rm.dwellMs;
+    const uint64_t rmBaseTSF=_rm.baseTSF,rmBaseUs=_rm.baseUs;
     if (!_hw || !_vif) {
         scanDone(true);
         _manualScanChannelCount = 0;
+        if(rmWorker)_rm.scanOwned=false;
         if(roamWorker)__atomic_store_n(&_roamScanWorkerPending,false,__ATOMIC_RELEASE);
         return;
     }
@@ -2775,14 +2829,23 @@ void RTW88IEEE80211::runManualScan()
         rtw88_sw_scan_switch_channel(_hw);
         if(roamWorker)roamTrace("scan-channel-switch-complete",chan->hw_value);
 
-        bool passiveOnly = (chan->flags &
+        bool passiveOnly = (rmWorker&&rmMode==0) || (chan->flags &
             (IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_RADAR)) != 0;
+        if(rmWorker) {
+            uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+            const uint64_t us=ns/1000;
+            const uint64_t tsf=us>=rmBaseUs?rmBaseTSF+(us-rmBaseUs):0;
+            __atomic_store_n(&_rm.scanStartUs,us,__ATOMIC_RELAXED);
+            __atomic_store_n(&_rm.scanStartTSF,tsf,__ATOMIC_RELEASE);
+            __atomic_store_n(&_rm.scanChannel,unsigned(chan->hw_value),__ATOMIC_RELEASE);
+        }
         if (!passiveOnly)
             txProbeRequest();
 
         /* Active channels can use a short probe dwell. Passive/DFS channels
          * still need a beacon-listen dwell. */
-        IOSleep(passiveOnly ? (roamWorker?180:140) : 70);
+        IOSleep(rmWorker?rmDwell:passiveOnly ? (roamWorker?180:140) : 70);
+        if(rmWorker)__atomic_store_n(&_rm.scanChannel,0U,__ATOMIC_RELEASE);
         /* Software dwell completed; this is not proof of successful RF RX. */
         if (chan->band == NL80211_BAND_5GHZ) ++_scanVisited5GHz;
         else if (chan->band == NL80211_BAND_2GHZ) ++_scanVisited2GHz;
@@ -2806,6 +2869,7 @@ void RTW88IEEE80211::runManualScan()
     scanDone(_manualScanAbort);
     _manualScanAbort = false;
     _manualScanChannelCount = 0;
+    if(rmWorker)_rm.scanOwned=false;
     if(roamWorker)__atomic_store_n(&_roamScanWorkerPending,false,__ATOMIC_RELEASE);
 }
 
@@ -3421,7 +3485,9 @@ bool RTW88IEEE80211::buildAssocReq(uint8_t *buf, uint32_t *len)
     const bool requestRrm=roamSupported && roamCaps.neighborReport && !roamCaps.pmfRequired;
     _stationBTM=roamSupported && roamCaps.btm && !roamCaps.pmfRequired &&
         _roamSwitchEnabled && _autoRoamEnabled && _parent && _parent->btmControlAvailable();
-    if (requestRrm) cap |= 0x1000; // Radio Measurement capability
+    _rm.advertised=roamSupported && !roamCaps.pmfRequired && _manualScanTC &&
+        _parent && _parent->btmControlAvailable();
+    if (requestRrm || _rm.advertised) cap |= 0x1000; // Radio Measurement capability
     _stationNeighborReport=requestRrm;
     if (_wpa2)
         cap |= 0x0010;
@@ -3543,9 +3609,10 @@ bool RTW88IEEE80211::buildAssocReq(uint8_t *buf, uint32_t *len)
     };
     memcpy(body, wme_info, sizeof(wme_info));
     body += sizeof(wme_info);
-    if (requestRrm) {
-        // Only Neighbor Report, no beacon/link measurement capabilities.
-        static const uint8_t rrm[] = {70, 5, 2, 0, 0, 0, 0};
+    if (requestRrm || _rm.advertised) {
+        // Independent Neighbor Report and implemented Beacon Measurement bits.
+        // Link/channel-load/noise/location measurements remain unadvertised.
+        const uint8_t rrm[] = {70, 5, uint8_t((requestRrm?2:0)|(_rm.advertised?0x70:0)), 0, 0, 0, 0};
         memcpy(body, rrm, sizeof(rrm)); body += sizeof(rrm);
     }
     if(_stationBTM) {
@@ -4253,6 +4320,7 @@ bool RTW88IEEE80211::txMgmtFrame(const uint8_t *frame, uint32_t len)
 
 void RTW88IEEE80211::resetRoamingState()
 {
+    rrmCancel("link-reset");_rm.advertised=false;_rm.clockTSF=0;_rm.clockUs=0;
     cancelBTM("link-reset");_stationBTM=false;
     _autoScanPending=false;_autoNextMs=0;_autoStage="waiting-link";
     _stationNeighborReport=false;
@@ -4284,8 +4352,8 @@ bool RTW88IEEE80211::roamingActionsReady() const
 
 bool RTW88IEEE80211::sendRoamingAction(const uint8_t *body, uint32_t length)
 {
-    if (!roamingActionsReady() || !body || !length || length > 64) return false;
-    uint8_t frame[24 + 64] = {};
+    if (!roamingActionsReady() || !body || !length || length > 280) return false;
+    uint8_t frame[24 + 280] = {};
     frame[0] = 0xd0;
     memcpy(frame + 4, _targetBSS.bssid, 6);
     memcpy(frame + 10, _macAddr, 6);
@@ -4325,7 +4393,7 @@ void RTW88IEEE80211::roamingTick(uint64_t nowMs)
     if(_roaming.requested && !_roaming.pending && _roamRefreshLast &&
        nowMs>=_roamRefreshLast && nowMs-_roamRefreshLast>=60000)
         _roaming.requested=false;
-    if (!roamingActionsReady() || !_roaming.ap.neighborReport || _roaming.requested)
+    if (!roamingActionsReady() || _rm.phase || _btmPhase || !_roaming.ap.neighborReport || _roaming.requested)
         return;
     _roaming.requested = true; // Bounded to one attempt per minute, including TX failures.
     _roamRefreshLast=nowMs;
@@ -4350,10 +4418,20 @@ void RTW88IEEE80211::roamingTick(uint64_t nowMs)
 void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
                                        uint64_t nowMs)
 {
-    if (!roamingActionsReady() || !RTW88Roaming::actionFromAP(
-            frame, length, _macAddr, _targetBSS.bssid)) return;
+    if (!RTW88Roaming::actionFromAP(frame,length,_macAddr,_targetBSS.bssid))return;
+    if(!roamingActionsReady()) {
+        ++_rm.actionDropped;
+        if(frame[24]==10&&frame[25]==7)++_rm.btmReadyDrops;
+        if(frame[24]==5&&frame[25]==0)++_rm.rmReadyDrops;
+        if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED))
+            IOLog("rtw88: RM action-deferred-drop category=%u action=%u state=%u awdl=%u scan=%u powered=%u\n",
+                  frame[24],frame[25],unsigned(_state),unsigned(_awdlOffChannel),unsigned(roamScanActive()),unsigned(_powered));
+        return;
+    }
     const uint8_t *body = frame + 24;
     const size_t size = length - 24;
+    if(body[0]==5 && body[1]==0){rrmReceive(body,uint32_t(size),nowMs);return;}
+    if(body[0]==5 && body[1]==2){++_rm.linkUnsupported;roamTrace("rm-link-measurement-unadvertised");return;}
     if (body[0] == 5 && body[1] == 5) {
         RTW88Roaming::Candidates candidates;
         _neighborDiagnostic={};_neighborActionLength=unsigned(size);
@@ -4430,6 +4508,162 @@ void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
     }
 }
 
+void RTW88IEEE80211::rrmCancel(const char *reason)
+{
+    if(!_rm.phase)return;
+    _rm.phase=0;_rm.stage=reason;++_rm.canceled;roamTrace("rm-canceled");
+    if(!__atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE))_rm.scanOwned=false;
+    // A live scan worker owns its immutable plan until completion. PM uses
+    // the existing bounded scanner cancellation/join, never a second worker.
+}
+
+bool RTW88IEEE80211::rrmReply(const RTW88RRM::Request &r,uint8_t dialog,uint8_t status)
+{
+    uint8_t body[8];const size_t n=RTW88RRM::emptyReport(body,sizeof(body),dialog,r.token,r.type,status);
+    _rm.lastDialog=dialog;_rm.lastToken=r.token;_rm.lastMode=r.mode;_rm.lastChannel=r.channel;_rm.lastStatus=status;
+    if(status==2)++_rm.incapable;else if(status==4)++_rm.refused;else ++_rm.empty;
+    const bool sent=n&&sendRoamingAction(body,unsigned(n));
+    if(sent)++_rm.reports;else ++_rm.txFailed;
+    if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED))
+        IOLog("rtw88: RM reply dialog=%u token=%u type=%u mode=%u channel=%u status=%u submitted=%u stage=%s\n",
+              dialog,r.token,r.type,r.mode,r.channel,status,unsigned(sent),_rm.stage);
+    return sent;
+}
+
+void RTW88IEEE80211::rrmReceive(const uint8_t *body,uint32_t length,uint64_t nowMs)
+{
+    ++_rm.received;
+    if(!RTW88RRM::parse(body,length,_rm.incoming)) {
+        ++_rm.invalid;_rm.parseOffset=_rm.incoming.offset;_rm.stage="invalid-request";
+        if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED))
+            IOLog("rtw88: RM parse-invalid bytes=%u offset=%u\n",length,_rm.parseOffset);
+        if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED)>=2) {
+            IOLog("rtw88: RM invalid-body-prefix");
+            for(unsigned i=0;i<length&&i<32;++i)IOLog(" %02x",body[i]);
+            IOLog("\n");
+        }
+        return;
+    }
+    const bool busy=_rm.phase||_btmPhase||_roaming.pending||roamScanActive()||_autoScanPending||
+        __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE)||
+        (_rm.lastRequestMs&&(nowMs<_rm.lastRequestMs||nowMs-_rm.lastRequestMs<1000));
+    if(!_rm.advertised||busy) {
+        if(busy)++_rm.busy;
+        for(unsigned i=0;i<_rm.incoming.count;++i)
+            rrmReply(_rm.incoming.entries[i],_rm.incoming.dialog,_rm.advertised?4:2);
+        return;
+    }
+    _rm.lastRequestMs=nowMs;_rm.requests=_rm.incoming;_rm.index=0;_rm.scanOwned=false;
+    memcpy(_rm.source,_targetBSS.bssid,6);_rm.phase=1;_rm.deadline=nowMs+15000;
+    _rm.stage="queued";_autoNextMs=nowMs+60000;
+    if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED))
+        IOLog("rtw88: RM request dialog=%u measurements=%u deadline_ms=%llu\n",
+              _rm.requests.dialog,_rm.requests.count,(unsigned long long)_rm.deadline);
+    if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED))for(unsigned i=0;i<_rm.requests.count;++i) {
+        const auto&r=_rm.requests.entries[i];
+        IOLog("rtw88: RM element dialog=%u token=%u type=%u flags=0x%x opclass=%u channel=%u mode=%u duration_tu=%u random_tu=%u detail=%u ssid_length=%u unsupported=%u\n",
+              _rm.requests.dialog,r.token,r.type,r.flags,r.opClass,r.channel,r.mode,r.durationTU,
+              r.randomTU,r.detail,r.ssidLength,unsigned(r.unsupported));
+    }
+    if(!_parent->scheduleBtmControl(1))rrmCancel("control-unavailable");
+}
+
+void RTW88IEEE80211::rrmReport(const RTW88RRM::Request &r,uint64_t nowMs)
+{
+    using namespace RTW88RRM;
+    auto matches=[&](const RTW88RRM::Record *b) {
+        const auto &o=b->measurement;
+        return o.bodyLength>=12 && o.seenMs && nowMs>=o.seenMs && nowMs-o.seenMs<30000 &&
+            (r.mode==2||requestedChannel(r,o.channel)) &&
+            (broadcast(r.bssid)||!memcmp(r.bssid,b->bssid,6)) &&
+            (!r.ssidLength||(r.ssidLength==b->ssid_len&&!memcmp(r.ssid,b->ssid,r.ssidLength))) &&
+            (r.mode==2||(o.generation==_rm.generation&&(r.mode!=0||o.beacon))) &&
+            (r.mode==2||o.startTSF!=0);
+    };
+    unsigned total=0;
+    for(const auto &record:_rm.cache)if(matches(&record))++total;
+    if(total>MaxReports){++_rm.truncated;_rm.stage="too-many-results";rrmReply(r,_rm.requests.dialog,4);return;}
+    if(!total){_rm.stage="no-results";rrmReply(r,_rm.requests.dialog,0);return;}
+    for(unsigned index=0;index<total;++index) {
+        uint8_t mac[6]={};bool copied=false;unsigned found=0;
+        for(const auto &record:_rm.cache)if(matches(&record)&&found++==index) {
+            _rm.scratch=record.measurement;memcpy(mac,record.bssid,6);copied=true;break;
+        }
+        if(!copied){_rm.stage="cache-changed";rrmReply(r,_rm.requests.dialog,4);return;}
+        size_t offset=0;unsigned fragment=0;
+        do {
+            const size_t n=report(_rm.tx,sizeof(_rm.tx),r,_rm.requests.dialog,mac,_rm.scratch,
+                                  offset,index+1,fragment++,index+1==total);
+            if(!n){++_rm.truncated;_rm.stage="report-body-unrepresentable";rrmReply(r,_rm.requests.dialog,2);return;}
+            if(!sendRoamingAction(_rm.tx,unsigned(n))){++_rm.txFailed;_rm.stage="report-tx-failed";return;}
+            ++_rm.reports;
+        } while(offset<_rm.scratch.bodyLength&&fragment<8);
+        if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED))
+            IOLog("rtw88: RM report dialog=%u token=%u mode=%u bssid=%02x:%02x:%02x:%02x:%02x:%02x channel=%u rssi=%d age_ms=%llu fragments=%u tsf_source=%s\n",
+                  _rm.requests.dialog,r.token,r.mode,mac[0],mac[1],mac[2],mac[3],mac[4],mac[5],
+                  _rm.scratch.channel,_rm.scratch.signal,(unsigned long long)(nowMs-_rm.scratch.seenMs),
+                  fragment,r.mode==2?"table-zero":"ap-beacon-software-anchor");
+    }
+    _rm.lastDialog=_rm.requests.dialog;_rm.lastToken=r.token;_rm.lastMode=r.mode;
+    _rm.lastChannel=r.channel;_rm.lastStatus=0;_rm.stage="report-submitted";
+}
+
+void RTW88IEEE80211::rrmTick(uint64_t nowMs)
+{
+    using namespace RTW88RRM;
+    if(!_rm.phase)return;
+    const bool worker=__atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE);
+    if(!_parent||!_parent->roamingActionsAllowed()||!_powered||!_associatedVisible||
+       authenticationCancelled()||memcmp(_rm.source,_targetBSS.bssid,6)) {rrmCancel("link-or-power-changed");return;}
+    if(nowMs>=_rm.deadline){rrmCancel("request-deadline");return;}
+    if(_rm.phase==2) {
+        if(roamScanActive()||worker)return;
+        _rm.scanOwned=false;
+        const auto&r=_rm.requests.entries[_rm.index];
+        if(_scanGeneration!=_rm.generation||__atomic_load_n(&_roamScanResult,__ATOMIC_RELAXED)!=2) {
+            _rm.stage="measurement-scan-aborted";rrmReply(r,_rm.requests.dialog,4);
+        } else rrmReport(r,nowMs);
+        ++_rm.index;_rm.phase=1;
+    }
+    if(_rm.index>=_rm.requests.count){_rm.phase=0;return;}
+    const auto&r=_rm.requests.entries[_rm.index];
+    _rm.lastDialog=_rm.requests.dialog;_rm.lastToken=r.token;_rm.lastMode=r.mode;_rm.lastChannel=r.channel;
+    if(r.unsupported){_rm.stage="unsupported-measurement";rrmReply(r,_rm.requests.dialog,2);++_rm.index;return;}
+    if(r.mode==2){rrmReport(r,nowMs);++_rm.index;return;}
+    if(_btmPhase||_autoScanPending||roamScanActive()||worker) {
+        _rm.stage="radio-busy";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;
+    }
+    // TSF is derived from the requesting AP's real beacon plus elapsed host
+    // microseconds. Never invent a clock when no fresh anchor is available.
+    if(!_rm.clockTSF||!_rm.clockUs||nowMs*1000<_rm.clockUs||nowMs*1000-_rm.clockUs>2000000) {
+        _rm.stage="requesting-ap-clock-unavailable";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;
+    }
+    _rm.planCount=0;
+    if(_hw&&_hw->wiphy)for(int b=0;b<NL80211_NUM_BANDS;++b) {
+        const auto *band=_hw->wiphy->bands[b];if(!band)continue;
+        for(int c=0;c<band->n_channels;++c) {
+            const auto&ch=band->channels[c];
+            if((ch.flags&IEEE80211_CHAN_DISABLED)||!requestedChannel(r,ch.hw_value))continue;
+            // Active measurements cannot initiate probes on DFS/no-IR channels.
+            if(r.mode==1&&(ch.flags&(IEEE80211_CHAN_RADAR|IEEE80211_CHAN_NO_IR)))continue;
+            if(_rm.planCount==MaxChannels){_rm.planCount=0;break;}
+            _rm.plan[_rm.planCount++]=uint8_t(ch.hw_value);
+        }
+    }
+    if(!_rm.planCount){_rm.stage="no-legal-measurement-channel";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;}
+    if(roamControlReady()!=kIOReturnSuccess){_rm.stage="preflight-rejected";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;}
+    _rm.scanMode=r.mode;_rm.dwellMs=(unsigned(r.durationTU)*1024+999)/1000;
+    _rm.baseTSF=_rm.clockTSF;_rm.baseUs=_rm.clockUs;
+    _rm.scanOwned=true;
+    if(startRoamScan(_rm.plan[0],nowMs)!=kIOReturnSuccess) {
+        _rm.scanOwned=false;_rm.stage="measurement-scan-rejected";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;
+    }
+    _rm.generation=_scanGeneration;_rm.phase=2;_rm.stage="measuring";++_rm.scans;
+    if(__atomic_load_n(&_roamLogLevel,__ATOMIC_RELAXED))
+        IOLog("rtw88: RM scan dialog=%u token=%u mode=%u channels=%u dwell_ms=%u generation=%u\n",
+              _rm.requests.dialog,r.token,r.mode,_rm.planCount,_rm.dwellMs,_rm.generation);
+}
+
 void RTW88IEEE80211::cancelBTM(const char *reason)
 {
     if(!_btmPhase)return;
@@ -4458,6 +4692,7 @@ void RTW88IEEE80211::rejectBtm(uint8_t status,const char *reason)
 
 void RTW88IEEE80211::queueBtm(const RTW88Roaming::BtmRequest &request,uint64_t nowMs)
 {
+    if(_rm.phase){(void)sendBtmResponse(request.token,1);_btmStage="radio-measurement-busy";return;}
     if(_btmPhase){(void)sendBtmResponse(request.token,1);return;}
     _btmRequest=request;memcpy(_btmSource,_targetBSS.bssid,6);memset(_btmTarget,0,6);
     _btmDeadline=0;_btmScanned=false;_btmScanGeneration=0;_btmLastStatus=255;
@@ -4516,6 +4751,7 @@ void RTW88IEEE80211::observeBtmTx(const uint8_t *frame,uint32_t length,bool ackn
 
 void RTW88IEEE80211::btmTick(uint64_t nowMs)
 {
+    rrmTick(nowMs);
     using namespace RTW88RoamSwitch;
     if(!_btmPhase)return;
     if(!_autoRoamEnabled || !_parent || !_parent->roamingActionsAllowed() || !_powered ||
@@ -4767,6 +5003,8 @@ void RTW88IEEE80211::autoRoamTick(uint64_t nowMs)
     // No new timer, thread, polling loop or waits for an auth/scan worker.
     if(!_autoRoamEnabled){_autoStage="disabled";return;}
     if(_btmPhase){_autoStage="btm-pending";return;}
+    if(_rm.phase){_autoStage="radio-measurement-pending";return;}
+    if(_roaming.pending){_autoStage="neighbor-response-pending";return;}
     if(!_roamingAssistEnabled || !_roamSwitchEnabled || !_parent ||
        !_parent->roamingActionsAllowed() || !_powered) {
         _autoScanPending=false;_autoNextMs=0;_autoStage="waiting-link-or-power";return;
@@ -4955,6 +5193,20 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
         (unsigned long long)(_btmDeadline>nowMs?_btmDeadline-nowMs:0),_btmScanGeneration,
         _btmTarget[0],_btmTarget[1],_btmTarget[2],_btmTarget[3],_btmTarget[4],_btmTarget[5]);
     ROAM_APPEND("btm_last_response_token=%u\n",_btmLastResponseToken);
+    ROAM_APPEND("btm_not_ready_drops=%u\nrm_not_ready_drops=%u\nrm_link_requests_unsupported=%u\n",
+        _rm.btmReadyDrops,_rm.rmReadyDrops,_rm.linkUnsupported);
+    ROAM_APPEND("rm_capture_oversize=%u\n",_rm.captureOversize);
+    ROAM_APPEND("btm_requests_rx=%u\nbtm_invalid=%u\nbtm_rate_limited=%u\nbtm_accept_submitted=%u\nbtm_reject_submitted=%u\nbtm_response_failed=%u\nbtm_switch_submitted=%u\nbtm_canceled=%u\n",
+        roamingStat(RTW88Roaming::BtmRx),roamingStat(RTW88Roaming::BtmInvalid),
+        roamingStat(RTW88Roaming::BtmRateLimited),roamingStat(RTW88Roaming::BtmAcceptTx),
+        roamingStat(RTW88Roaming::BtmRejectTx),roamingStat(RTW88Roaming::BtmTxFail),
+        roamingStat(RTW88Roaming::BtmSwitchTx),roamingStat(RTW88Roaming::BtmCanceled));
+    ROAM_APPEND("rm_beacon_advertised=%u\nrm_beacon_passive=1\nrm_beacon_active=1\nrm_beacon_table=1\nrm_link_measurement=0\nrm_phase=%u\nrm_stage=%s\nrm_requests_rx=%u\nrm_invalid=%u\nrm_busy=%u\nrm_reports_submitted=%u\nrm_empty=%u\nrm_incapable=%u\nrm_refused=%u\nrm_tx_failed=%u\nrm_tx_ack=%u\nrm_tx_noack=%u\nrm_canceled=%u\nrm_scans=%u\nrm_truncated=%u\nrm_parse_offset=%u\nrm_last_dialog=%u\nrm_last_token=%u\nrm_last_mode=%u\nrm_last_channel=%u\nrm_last_status=%u\nrm_scan_generation=%u\nrm_action_not_ready_drops=%u\n",
+        unsigned(_rm.advertised),_rm.phase,_rm.stage,_rm.received,_rm.invalid,_rm.busy,
+        _rm.reports,_rm.empty,_rm.incapable,_rm.refused,_rm.txFailed,
+        __atomic_load_n(&_rm.ack,__ATOMIC_RELAXED),__atomic_load_n(&_rm.noack,__ATOMIC_RELAXED),
+        _rm.canceled,_rm.scans,_rm.truncated,_rm.parseOffset,_rm.lastDialog,_rm.lastToken,
+        _rm.lastMode,_rm.lastChannel,_rm.lastStatus,_rm.generation,_rm.actionDropped);
     ROAM_APPEND("neighbor_reject=%s\nneighbor_action_bytes=%u\nneighbor_actual_token=%u\nneighbor_response_age_ms=%lld\nneighbor_parse_reason=%s\nneighbor_parse_offset=%u\nneighbor_parse_id=%u\nneighbor_parse_length=%u\nneighbor_parse_remaining=%u\nneighbor_parse_candidate=%u\n",
         _neighborReject,_neighborActionLength,_neighborActualToken,(long long)_neighborResponseAge,
         RTW88Roaming::parseName(_neighborDiagnostic.code),_neighborDiagnostic.offset,_neighborDiagnostic.id,
@@ -5220,6 +5472,10 @@ bool RTW88IEEE80211::txProbeRequest()
     body[0] = WLAN_EID_SSID;
     body[1] = 0;
     body += 2;
+    if(_rm.scanOwned && _rm.scanMode==1) {
+        const auto&r=_rm.requests.entries[_rm.index];
+        body[-1]=r.ssidLength;memcpy(body,r.ssid,r.ssidLength);body+=r.ssidLength;
+    }
 
     static const uint8_t rates_2g[] = {
         0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24

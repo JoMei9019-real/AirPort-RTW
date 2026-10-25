@@ -1,5 +1,23 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 11: 802.11k Beacon Reports and k/v diagnostics
+
+Compatible WPA2/CCMP associations advertise Neighbor Report plus passive,
+active and table Beacon Measurements when the bounded control/scanner path is
+available. AP Radio Measurement requests now receive measured/cache results,
+explicit incapable/refused responses, or a logged lifecycle cancellation.
+Reports preserve received frame bodies, tokens and frame fragmentation; passive
+measurements never send probes and active measurements exclude DFS/no-IR.
+The measurement cache is bounded and stored on the backend heap, keeping BSS
+copies on native IOCTL stacks unchanged. Measurement and roaming transactions
+share the existing PM-fenced control timer and single scan worker.
+Diagnostics now include BTM reception/drop counters and measurement request,
+scan, report, ACK/failure and cancellation details. Automatic discovery waits
+for outstanding Neighbor Report replies instead of starting a conflicting scan.
+This is experimental roaming-related 802.11k/v support, not every optional
+802.11k/v service. Hardware interoperability remains to be validated.
+See [Beta 11 scope, limitations and test commands](BETA_1_1_0_11.md).
+
 ## 1.1.0 Beta 10: active 802.11v BSS Transition Management
 
 Compatible WPA2/CCMP associations now advertise BTM when automatic roaming and

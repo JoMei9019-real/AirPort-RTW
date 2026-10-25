@@ -115,7 +115,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.10-controlled-btm");
+    setProperty("DriverBuild", "1.1.0-beta.11-beacon-reports");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -293,7 +293,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 1.1.0-beta.10 controlled 802.11v BTM and automatic roaming enabled\n");
+    IOLog("AirPortRTW: 1.1.0-beta.11 beacon measurements, controlled BTM and automatic roaming enabled\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -437,6 +437,8 @@ void AirPortRTW::publishRoamDiagnostics()
     setProperty("ROAM_SCAN_ACTIVE",_ieee80211->roamScanActive()?kOSBooleanTrue:kOSBooleanFalse);
     setProperty("ROAM_AUTO_ENABLED",_ieee80211->autoRoamingEnabled()?kOSBooleanTrue:kOSBooleanFalse);
     setProperty("ROAM_K_ADVERTISED",_ieee80211->neighborReportAdvertised()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_K_BEACON_ADVERTISED",_ieee80211->beaconReportAdvertised()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_K_BEACON_MODES",_ieee80211->beaconReportAdvertised()?"passive,active,table":"disabled");
     setProperty("ROAM_V_ADVERTISED",_ieee80211->btmAdvertised()?kOSBooleanTrue:kOSBooleanFalse);
     setProperty("ROAM_V_MODE",_ieee80211->btmAdvertised()?"controlled-btm":"reject-only");
     setProperty("ROAM_K_PENDING",_ieee80211->roamNeighborPending()?kOSBooleanTrue:kOSBooleanFalse);

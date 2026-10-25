@@ -25,6 +25,7 @@ jobs:
           python3 tests/check_roam_switch.py
           python3 tests/check_roam_diagnostics.py
           python3 tests/check_btm.py
+          python3 tests/check_rrm.py
           python3 tests/check_stack_budget.py --self-test
       - name: Bootstrap dependencies
         run: ./scripts/bootstrap-deps.sh
@@ -40,12 +41,14 @@ jobs:
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
-          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.10" in p["CFBundleGetInfoString"]; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAssistEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingSwitchEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAutoEnabled"] is True'
-          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.10-controlled-btm"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.11" in p["CFBundleGetInfoString"]; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAssistEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingSwitchEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAutoEnabled"] is True'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.11-beacon-reports"
           build/out/rtw88-roam --help
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_K_REQUEST_SUBMITTED"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_R_FT_ENABLED"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "btm-response-acked"
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_K_BEACON_ADVERTISED"
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "rm_reports_submitted"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "TX_BATCH_DEFERRED_FRAMES"
           nm build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -E ' [SD] _rtw8814a_hw_spec$'
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "rtw8814a_fw.bin"
@@ -58,10 +61,10 @@ jobs:
         run: |
           mkdir -p build/package
           cp -R build/out/AirPortRTW.kext build/package/
-          cp build/out/rtw88-roam BETA_1_1_0_10.md build/package/
+          cp build/out/rtw88-roam BETA_1_1_0_11.md build/package/
           python3 -c 'from pathlib import Path; p=Path("build/package"); assert (p/"AirPortRTW.kext/Contents/Info.plist").is_file(); assert not any(f.suffix in (".zip", ".tar", ".gz") for f in p.rglob("*") if f.is_file())'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-1.1.0-beta.10
+          name: AirPortRTW-1.1.0-beta.11
           path: build/package/

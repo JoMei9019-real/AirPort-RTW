@@ -19,6 +19,7 @@
 #include <net/ethernet.h>
 #include <kern/thread_call.h>
 #include "RTW88Roaming.hpp"
+#include "RTW88RRM.hpp"
 #include "RTW88RoamSwitch.hpp"
 
 /* Opaque C driver handle */
@@ -257,12 +258,18 @@ public:
     bool autoRoamingEnabled() const { return _autoRoamEnabled; }
     bool neighborReportAdvertised() const { return _stationNeighborReport; }
     bool btmAdvertised() const { return _stationBTM; }
-    bool btmPending() const { return _btmPhase!=0; }
+    bool btmPending() const { return _btmPhase!=0 || _rm.phase!=0; }
     unsigned btmPollMs() const { return _btmPhase==2?20:100; }
     void btmTick(uint64_t nowMs);
     void cancelBTM(const char *reason);
     void setAutoRoamingEnabled(bool enabled) { _autoRoamEnabled=enabled; _autoScanPending=false; _autoNextMs=0; _autoStage=enabled?"warming-up":"disabled"; }
-    void pauseAutoRoaming(uint64_t nowMs) { cancelBTM("manual-command"); _autoScanPending=false; _autoNextMs=nowMs+60000; _autoStage="manual-command-pause"; }
+    void pauseAutoRoaming(uint64_t nowMs) { rrmCancel("manual-command"); cancelBTM("manual-command"); _autoScanPending=false; _autoNextMs=nowMs+60000; _autoStage="manual-command-pause"; }
+    bool beaconReportAdvertised() const { return _rm.advertised; }
+    void rrmReceive(const uint8_t*,uint32_t,uint64_t);
+    void rrmTick(uint64_t);
+    void rrmCancel(const char*);
+    bool rrmReply(const RTW88RRM::Request&,uint8_t,uint8_t);
+    void rrmReport(const RTW88RRM::Request&,uint64_t);
     IOReturn requestRoam(const uint8_t *bssid,uint64_t nowMs);
     IOReturn checkRoam(const uint8_t *bssid, uint64_t nowMs);
     IOReturn refreshRoamNeighbors(uint64_t nowMs);
@@ -562,6 +569,7 @@ private:
     bool _autoRoamEnabled=false, _autoScanPending=false;
     bool _stationNeighborReport=false;
     bool _stationBTM=false;
+    RTW88RRM::State _rm;
     unsigned _btmPhase=0;
     RTW88Roaming::BtmRequest _btmRequest;
     uint8_t _btmSource[6]={},_btmTarget[6]={};
