@@ -579,6 +579,8 @@ private:
     bool _stationBTM=false;
     RTW88Lifecycle::Wake _wakeTrace;
     RTW88Lifecycle::BtmOutcome _btmOutcome;
+    RTW88Lifecycle::BtmOutcome _btmIngress;
+    uint32_t _btmDeferred=0;
     RTW88Lifecycle::Queue _queueTrace;
     RTW88RRM::State _rm;
     unsigned _btmPhase=0;

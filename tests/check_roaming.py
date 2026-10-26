@@ -59,6 +59,7 @@ struct Parent {bool allowed=true,btmAvailable=false;unsigned scheduled=0;
 struct RTW88IEEE80211 {
  RTW88Lifecycle::Wake _wakeTrace;
  RTW88Lifecycle::BtmOutcome _btmOutcome;
+ RTW88Lifecycle::BtmOutcome _btmIngress;uint32_t _btmDeferred=0;
  RTW88Lifecycle::Queue _queueTrace;
  void wakeTrace(const char*){}
  RTW88RRM::State _rm;

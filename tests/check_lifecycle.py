@@ -33,6 +33,10 @@ int main(){
  assert(strstr(out,"queue_drop_delta=4\n"));
  b._queueTrace.sample(9000,1,2,0,5);assert(!b._queueTrace.dropDelta&&!b._queueTrace.stallDelta);
  b._autoRoamEnabled=b._roamingAssistEnabled=b._roamSwitchEnabled=true;b._autoNextMs=20000;b._autoStage="neighbor-response-pending";
+ b.copyRoamDiagnostics(out,sizeof(out),9000);
+ assert(strstr(out,"auto_stage=waiting-next-scan\n")); // no five-second timer tick needed
+ b._roaming.pending=true;b.copyRoamDiagnostics(out,sizeof(out),9000);
+ assert(strstr(out,"auto_stage=neighbor-response-pending\n"));b._roaming.pending=false;
  b.autoRoamTick(9000);assert(!strcmp(b._autoStage,"waiting-next-scan"));
  b.beginWakeTrace();assert(b._wakeTrace.generation==2&&!b._wakeTrace.points[RTW88Lifecycle::Keys]);
  puts("PASS: production wake milestones survive later roaming, bounded snapshots, counter reset/deltas and transient status");

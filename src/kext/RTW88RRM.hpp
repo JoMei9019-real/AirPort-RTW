@@ -29,6 +29,12 @@ struct Record {
     Observation measurement;
 };
 struct State {
+    struct Failure {
+        uint64_t ms=0;
+        uint8_t dialog=0,token=0,type=0,opClass=0,channel=0,mode=0,status=0,flags=0;
+        uint16_t durationTU=0;
+        const char *reason="none";
+    } failure;
     Requests incoming, requests;
     Observation scratch;
     Observation capture;
@@ -45,6 +51,9 @@ struct State {
     uint8_t lastDialog=0,lastToken=0,lastMode=0,lastChannel=0,lastStatus=0;
     unsigned parseOffset=0;
     uint32_t btmReadyDrops=0,rmReadyDrops=0,linkUnsupported=0,captureOversize=0;
+    uint8_t lastOpClass=0,lastType=0,lastFlags=0;
+    uint16_t lastDurationTU=0;
+    unsigned planRequested=0,planDisabled=0,planPassiveOnly=0;
 };
 inline uint16_t le16(const uint8_t*p){return uint16_t(p[0])|(uint16_t(p[1])<<8);}
 inline void put16(uint8_t*p,uint16_t n){p[0]=uint8_t(n);p[1]=uint8_t(n>>8);}
@@ -61,6 +70,9 @@ inline bool channelInClass(unsigned op,unsigned ch) {
     case 125:return ch>=149&&ch<=177&&(ch%4)==1;
     default:return false; // No guessed country-specific or wide-band mapping.
     }
+}
+inline bool supportedClass(unsigned op) {
+    return op==81||op==82||op==115||op==118||op==121||op==124||op==125;
 }
 inline uint8_t operatingClass(unsigned ch) {
     const uint8_t classes[]={81,82,115,118,121,125};

@@ -1,5 +1,18 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 13: measurement/BTM coordination
+
+BTM can wait within the AP's deadline for an existing measurement/scan instead
+of immediately rejecting a busy radio. The single scanner is preserved; after
+the active measurement finishes, pending additional measurements may be refused
+to give the BTM decision priority. ACK, security, regulatory and cooldown checks
+still precede any switch. Ingress retries are recorded separately from the active
+BTM transaction. Snapshots derive pending auto-roam labels from live flags.
+Measurement failures retain operating class, channel, token, mode and reason
+across later reports. Unsupported classes are answered explicitly rather than
+guessed. See [Beta 13 scope and RC test procedure](BETA_1_1_0_13.md).
+This is a candidate final beta, not a guarantee of complete k/v interoperability.
+
 ## 1.1.0 Beta 12: scan backpressure and persistent diagnostics
 
 Connected off-channel software scans now stall output without consuming the

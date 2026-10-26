@@ -78,6 +78,22 @@ int main(){
  RTW88IEEE80211 dfs;init(dfs,hw,candidate,300000);
  receive(dfs,request(1,116,121),300000);dfs.rrmTick(300001);
  assert(dfs._rm.refused==1&&!dfs._rm.scans); // never probe DFS/no-IR
+ assert(!strcmp(dfs._rm.failure.reason,"active-measurement-on-passive-only-channel"));
+ assert(dfs._rm.failure.opClass==121&&dfs._rm.failure.channel==116&&dfs._rm.planPassiveOnly==1);
+ RTW88IEEE80211 unknown;init(unknown,hw,candidate,310000);
+ receive(unknown,request(1,5,4),310000);unknown.rrmTick(310001);
+ assert(unknown._rm.incapable==1&&!unknown._rm.scans&&unknown._rm.failure.opClass==4);
+ assert(!strcmp(unknown._rm.failure.reason,"unsupported-operating-class"));
+ RTW88IEEE80211 mismatch;init(mismatch,hw,candidate,320000);
+ receive(mismatch,request(1,5,115),320000);mismatch.rrmTick(320001);
+ assert(mismatch._rm.refused==1&&!mismatch._rm.scans);
+ assert(!strcmp(mismatch._rm.failure.reason,"channel-outside-operating-class"));
+ RTW88IEEE80211 absent;init(absent,hw,candidate,330000);
+ receive(absent,request(1,5,81),330000);absent.rrmTick(330001);
+ assert(absent._rm.refused==1&&!strcmp(absent._rm.failure.reason,"channel-not-in-regulatory-table"));
+ // A later successful report does not erase a failed request's wire context.
+ unknown._rm.phase=0;receive(unknown,req,312000);unknown.rrmTick(312001);
+ assert(unknown._rm.failure.opClass==4&&unknown._rm.failure.channel==5&&unknown._rm.lastOpClass==115);
  RTW88IEEE80211 listen;init(listen,hw,candidate,400000);
  receive(listen,request(0,116,121),400000);listen.rrmTick(400001);before=probes;
  assert(listen._manualScanChannelCount==1);listen.runManualScan();assert(probes==before);

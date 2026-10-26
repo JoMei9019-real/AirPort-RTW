@@ -4502,6 +4502,11 @@ void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
         }
         __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmRx], 1U, __ATOMIC_RELAXED);
         roamTrace("btm-request-received",request.mode);
+        // Independent ingress record: retries/busy requests must not overwrite
+        // the active transaction's ACK identity, deadline or decision.
+        _btmIngress=RTW88Lifecycle::BtmOutcome{};
+        _btmIngress.requestMs=nowMs;_btmIngress.token=request.token;_btmIngress.mode=request.mode;
+        memcpy(_btmIngress.source,_targetBSS.bssid,6);_btmIngress.stage="received";
         __atomic_store_n(&_roamingStats[RTW88Roaming::BtmCandidates],
                          uint32_t(request.candidates.count), __ATOMIC_RELAXED);
         __atomic_store_n(&_roamingStats[RTW88Roaming::BtmMode], uint32_t(request.mode), __ATOMIC_RELAXED);
@@ -4510,6 +4515,7 @@ void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
         if (_roaming.btmReplied && (nowMs < _roaming.lastBtmMs ||
                                    nowMs - _roaming.lastBtmMs < 1000)) {
             __atomic_add_fetch(&_roamingStats[RTW88Roaming::BtmRateLimited], 1U, __ATOMIC_RELAXED);
+            _btmIngress.stage="rate-limited";
             return;
         }
         _roaming.btmReplied = true; _roaming.lastBtmMs = nowMs;
@@ -4519,6 +4525,7 @@ void RTW88IEEE80211::handleRoamingAction(const uint8_t *frame, uint32_t length,
         uint8_t response[5] = {};
         const size_t size = RTW88Roaming::btmReject(response, sizeof(response), request.token);
         const bool sent = sendRoamingAction(response, uint32_t(size));
+        _btmIngress.stage="policy-disabled";_btmIngress.status=1;_btmIngress.responseSubmitted=sent;
         __atomic_add_fetch(&_roamingStats[sent ? RTW88Roaming::BtmRejectTx :
                                                 RTW88Roaming::BtmTxFail], 1U, __ATOMIC_RELAXED);
         // Never accept, disconnect, channel-hop, rekey, or obey a remote URL.
@@ -4538,6 +4545,13 @@ bool RTW88IEEE80211::rrmReply(const RTW88RRM::Request &r,uint8_t dialog,uint8_t 
 {
     uint8_t body[8];const size_t n=RTW88RRM::emptyReport(body,sizeof(body),dialog,r.token,r.type,status);
     _rm.lastDialog=dialog;_rm.lastToken=r.token;_rm.lastMode=r.mode;_rm.lastChannel=r.channel;_rm.lastStatus=status;
+    _rm.lastOpClass=r.opClass;_rm.lastType=r.type;_rm.lastFlags=r.flags;_rm.lastDurationTU=r.durationTU;
+    if(status) {
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+        auto &f=_rm.failure;f.ms=ns/1000000ULL;f.dialog=dialog;f.token=r.token;
+        f.type=r.type;f.opClass=r.opClass;f.channel=r.channel;f.mode=r.mode;
+        f.status=status;f.flags=r.flags;f.durationTU=r.durationTU;f.reason=_rm.stage;
+    }
     if(status==2)++_rm.incapable;else if(status==4)++_rm.refused;else ++_rm.empty;
     const bool sent=n&&sendRoamingAction(body,unsigned(n));
     if(sent)++_rm.reports;else ++_rm.txFailed;
@@ -4566,8 +4580,11 @@ void RTW88IEEE80211::rrmReceive(const uint8_t *body,uint32_t length,uint64_t now
         (_rm.lastRequestMs&&(nowMs<_rm.lastRequestMs||nowMs-_rm.lastRequestMs<1000));
     if(!_rm.advertised||busy) {
         if(busy)++_rm.busy;
+        const char *savedStage=_rm.stage;
+        _rm.stage=busy?"request-busy":"measurement-not-advertised";
         for(unsigned i=0;i<_rm.incoming.count;++i)
             rrmReply(_rm.incoming.entries[i],_rm.incoming.dialog,_rm.advertised?4:2);
+        _rm.stage=savedStage;
         return;
     }
     _rm.lastRequestMs=nowMs;_rm.requests=_rm.incoming;_rm.index=0;_rm.scanOwned=false;
@@ -4623,6 +4640,7 @@ void RTW88IEEE80211::rrmReport(const RTW88RRM::Request &r,uint64_t nowMs)
     }
     _rm.lastDialog=_rm.requests.dialog;_rm.lastToken=r.token;_rm.lastMode=r.mode;
     _rm.lastChannel=r.channel;_rm.lastStatus=0;_rm.stage="report-submitted";
+    _rm.lastOpClass=r.opClass;_rm.lastType=r.type;_rm.lastFlags=r.flags;_rm.lastDurationTU=r.durationTU;
 }
 
 void RTW88IEEE80211::rrmTick(uint64_t nowMs)
@@ -4645,8 +4663,16 @@ void RTW88IEEE80211::rrmTick(uint64_t nowMs)
     if(_rm.index>=_rm.requests.count){_rm.phase=0;return;}
     const auto&r=_rm.requests.entries[_rm.index];
     _rm.lastDialog=_rm.requests.dialog;_rm.lastToken=r.token;_rm.lastMode=r.mode;_rm.lastChannel=r.channel;
+    _rm.lastOpClass=r.opClass;_rm.lastType=r.type;_rm.lastFlags=r.flags;_rm.lastDurationTU=r.durationTU;
     if(r.unsupported){_rm.stage="unsupported-measurement";rrmReply(r,_rm.requests.dialog,2);++_rm.index;return;}
     if(r.mode==2){rrmReport(r,nowMs);++_rm.index;return;}
+    _rm.planRequested=_rm.planDisabled=_rm.planPassiveOnly=0;
+    if(!supportedClass(r.opClass)) {
+        _rm.stage="unsupported-operating-class";rrmReply(r,_rm.requests.dialog,2);++_rm.index;return;
+    }
+    if(r.channel && r.channel!=255 && !channelInClass(r.opClass,r.channel)) {
+        _rm.stage="channel-outside-operating-class";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;
+    }
     if(_btmPhase||_autoScanPending||roamScanActive()||worker) {
         _rm.stage="radio-busy";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;
     }
@@ -4656,18 +4682,25 @@ void RTW88IEEE80211::rrmTick(uint64_t nowMs)
         _rm.stage="requesting-ap-clock-unavailable";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;
     }
     _rm.planCount=0;
+    _rm.planRequested=_rm.planDisabled=_rm.planPassiveOnly=0;
     if(_hw&&_hw->wiphy)for(int b=0;b<NL80211_NUM_BANDS;++b) {
         const auto *band=_hw->wiphy->bands[b];if(!band)continue;
         for(int c=0;c<band->n_channels;++c) {
             const auto&ch=band->channels[c];
-            if((ch.flags&IEEE80211_CHAN_DISABLED)||!requestedChannel(r,ch.hw_value))continue;
+            if(!requestedChannel(r,ch.hw_value))continue;
+            ++_rm.planRequested;
+            if(ch.flags&IEEE80211_CHAN_DISABLED){++_rm.planDisabled;continue;}
             // Active measurements cannot initiate probes on DFS/no-IR channels.
-            if(r.mode==1&&(ch.flags&(IEEE80211_CHAN_RADAR|IEEE80211_CHAN_NO_IR)))continue;
+            if(r.mode==1&&(ch.flags&(IEEE80211_CHAN_RADAR|IEEE80211_CHAN_NO_IR))){++_rm.planPassiveOnly;continue;}
             if(_rm.planCount==MaxChannels){_rm.planCount=0;break;}
             _rm.plan[_rm.planCount++]=uint8_t(ch.hw_value);
         }
     }
-    if(!_rm.planCount){_rm.stage="no-legal-measurement-channel";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;}
+    if(!_rm.planCount){
+        _rm.stage=!_rm.planRequested?"channel-not-in-regulatory-table":
+            _rm.planPassiveOnly?"active-measurement-on-passive-only-channel":"measurement-channel-disabled";
+        rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;
+    }
     if(roamControlReady()!=kIOReturnSuccess){_rm.stage="preflight-rejected";rrmReply(r,_rm.requests.dialog,4);++_rm.index;return;}
     _rm.scanMode=r.mode;_rm.dwellMs=(unsigned(r.durationTU)*1024+999)/1000;
     _rm.baseTSF=_rm.clockTSF;_rm.baseUs=_rm.clockUs;
@@ -4712,8 +4745,10 @@ void RTW88IEEE80211::rejectBtm(uint8_t status,const char *reason)
 
 void RTW88IEEE80211::queueBtm(const RTW88Roaming::BtmRequest &request,uint64_t nowMs)
 {
-    if(_rm.phase){(void)sendBtmResponse(request.token,1);_btmStage="radio-measurement-busy";return;}
-    if(_btmPhase){(void)sendBtmResponse(request.token,1);return;}
+    if(_btmPhase){
+        _btmIngress.stage="btm-transaction-busy";_btmIngress.status=1;
+        _btmIngress.responseSubmitted=sendBtmResponse(request.token,1);return;
+    }
     _btmOutcome=RTW88Lifecycle::BtmOutcome{};
     _btmOutcome.requestMs=nowMs;_btmOutcome.token=request.token;_btmOutcome.mode=request.mode;
     memcpy(_btmOutcome.source,_targetBSS.bssid,6);_btmOutcome.stage="received";
@@ -4722,16 +4757,22 @@ void RTW88IEEE80211::queueBtm(const RTW88Roaming::BtmRequest &request,uint64_t n
     // Termination schedules and ESS-leaving requests are parsed but are not
     // implemented by this first intra-ESS BTM path. Do not fetch remote URLs.
     if(request.mode&24) {
+        _btmOutcome.decisionMs=nowMs;
         rejectBtm(1,"unsupported-termination-or-ess-mode");return;
     }
     if(!(request.mode&1) || !request.candidates.count) {
+        _btmOutcome.decisionMs=nowMs;
         rejectBtm(7,"no-candidates");return;
     }
-    pauseAutoRoaming(nowMs);
+    // Let the sole scanner finish its current ownership. Do not cancel an
+    // in-flight RM scan or launch a competing worker from this RX callback.
+    _autoScanPending=false;_autoNextMs=nowMs+60000;
     const uint64_t lifetime=RTW88Roaming::btmLifetimeMs(request,_targetBSS.beacon_interval);
     _btmDeadline=nowMs+lifetime;
-    if(lifetime<1000){rejectBtm(7,"deadline-too-short");return;}
+    if(lifetime<1000){_btmOutcome.decisionMs=nowMs;rejectBtm(7,"deadline-too-short");return;}
     _btmPhase=1;_btmStage="queued";
+    if(_rm.phase){_btmStage="waiting-radio-measurement";++_btmDeferred;}
+    _btmOutcome.stage=_btmStage;_btmIngress.stage=_btmStage;
     if(!_parent->scheduleBtmControl(1)){rejectBtm(1,"control-unavailable");return;}
     roamTrace("btm-control-queued",request.token);
 }
@@ -4782,6 +4823,7 @@ void RTW88IEEE80211::btmTick(uint64_t nowMs)
         cancelBTM("link-or-power-changed");return;
     }
     if(nowMs>=_btmDeadline) {
+        _btmOutcome.decisionMs=nowMs;
         if(_btmPhase==1)rejectBtm(7,"request-expired");
         else cancelBTM("request-expired-after-accept");
         return;
@@ -4806,10 +4848,17 @@ void RTW88IEEE80211::btmTick(uint64_t nowMs)
     }
     const bool scanning=roamScanActive() || _manualScanChannelCount ||
         __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE);
-    if(scanning) {
-        if(!_btmScanned)rejectBtm(1,"radio-busy");
+    if(_rm.phase || (scanning && !_btmScanned)) {
+        if(_btmDeadline-nowMs<1000) {
+            _btmOutcome.decisionMs=nowMs;rejectBtm(1,"radio-busy-until-deadline");
+        } else {
+            _btmStage=_rm.phase?"waiting-radio-measurement":"waiting-existing-scan";
+            _btmOutcome.stage=_btmStage;
+        }
         return;
     }
+    if(scanning)return;
+    _btmOutcome.decisionMs=nowMs;
     if(_btmScanned && (_scanGeneration!=_btmScanGeneration ||
        __atomic_load_n(&_roamScanResult,__ATOMIC_RELAXED)!=2)) {
         rejectBtm(7,"target-scan-failed-or-replaced");return;
@@ -5277,8 +5326,19 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
         _targetBSS.channel,_rssi);
     ROAM_APPEND("last_gate_flags=0x%08x\nauth_cancelled=%u\nawdl_off_channel=%u\nmanual_scan_channels=%u\n",
         _roamGateSnapshot,unsigned(authenticationCancelled()),unsigned(_awdlOffChannel),_manualScanChannelCount);
+    // Snapshots arrive every second; the control timer runs every five seconds.
+    // Describe pending work from live flags, not the previous timer's label.
+    const char *autoStage=_autoStage;
+    if(_autoRoamEnabled) {
+        if(_btmPhase)autoStage="btm-pending";
+        else if(_rm.phase)autoStage="radio-measurement-pending";
+        else if(_roaming.pending)autoStage="neighbor-response-pending";
+        else if((!strcmp(autoStage,"neighbor-response-pending") ||
+                 !strcmp(autoStage,"radio-measurement-pending") || !strcmp(autoStage,"btm-pending")))
+            autoStage=_autoScanPending?"scanning":"waiting-next-scan";
+    }
     ROAM_APPEND("auto_enabled=%u\nauto_stage=%s\nauto_next_ms=%llu\nauto_scan_pending=%u\nauto_scans=%u\nauto_switches=%u\n",
-        unsigned(_autoRoamEnabled),_autoStage,(unsigned long long)_autoNextMs,unsigned(_autoScanPending),_autoScans,_autoSwitches);
+        unsigned(_autoRoamEnabled),autoStage,(unsigned long long)_autoNextMs,unsigned(_autoScanPending),_autoScans,_autoSwitches);
     ROAM_APPEND("assoc_neighbor_report_advertised=%u\nassoc_btm_advertised=%u\nbtm_mode=%s\n",
         unsigned(_stationNeighborReport),unsigned(_stationBTM),_stationBTM?"controlled-btm":"reject-only");
     ROAM_APPEND("btm_phase=%u\nbtm_stage=%s\nbtm_token=%u\nbtm_last_status=%u\nbtm_deadline_ms=%llu\nbtm_remaining_ms=%llu\nbtm_scan_generation=%u\nbtm_target=%02x:%02x:%02x:%02x:%02x:%02x\n",
@@ -5286,9 +5346,20 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
         (unsigned long long)(_btmDeadline>nowMs?_btmDeadline-nowMs:0),_btmScanGeneration,
         _btmTarget[0],_btmTarget[1],_btmTarget[2],_btmTarget[3],_btmTarget[4],_btmTarget[5]);
     ROAM_APPEND("btm_last_response_token=%u\n",_btmLastResponseToken);
+    ROAM_APPEND("btm_deferred_measurements=%u\nbtm_ingress_stage=%s\nbtm_ingress_token=%u\nbtm_ingress_mode=%u\nbtm_ingress_ms=%llu\nbtm_ingress_status=%u\nbtm_ingress_response_submitted=%u\n",
+        _btmDeferred,_btmIngress.stage,_btmIngress.token,_btmIngress.mode,
+        (unsigned long long)_btmIngress.requestMs,_btmIngress.status,unsigned(_btmIngress.responseSubmitted));
+    ROAM_APPEND("btm_ingress_source=%02x:%02x:%02x:%02x:%02x:%02x\n",
+        _btmIngress.source[0],_btmIngress.source[1],_btmIngress.source[2],_btmIngress.source[3],_btmIngress.source[4],_btmIngress.source[5]);
     ROAM_APPEND("btm_not_ready_drops=%u\nrm_not_ready_drops=%u\nrm_link_requests_unsupported=%u\n",
         _rm.btmReadyDrops,_rm.rmReadyDrops,_rm.linkUnsupported);
     ROAM_APPEND("rm_capture_oversize=%u\n",_rm.captureOversize);
+    ROAM_APPEND("rm_last_opclass=%u\nrm_last_type=%u\nrm_last_flags=0x%02x\nrm_last_duration_tu=%u\nrm_plan_requested=%u\nrm_plan_disabled=%u\nrm_plan_passive_only=%u\n",
+        _rm.lastOpClass,_rm.lastType,_rm.lastFlags,_rm.lastDurationTU,_rm.planRequested,_rm.planDisabled,_rm.planPassiveOnly);
+    ROAM_APPEND("rm_failure_reason=%s\nrm_failure_ms=%llu\nrm_failure_dialog=%u\nrm_failure_token=%u\nrm_failure_type=%u\nrm_failure_opclass=%u\nrm_failure_channel=%u\nrm_failure_mode=%u\nrm_failure_status=%u\nrm_failure_flags=0x%02x\nrm_failure_duration_tu=%u\n",
+        _rm.failure.reason,(unsigned long long)_rm.failure.ms,_rm.failure.dialog,_rm.failure.token,
+        _rm.failure.type,_rm.failure.opClass,_rm.failure.channel,_rm.failure.mode,_rm.failure.status,
+        _rm.failure.flags,_rm.failure.durationTU);
     ROAM_APPEND("btm_requests_rx=%u\nbtm_invalid=%u\nbtm_rate_limited=%u\nbtm_accept_submitted=%u\nbtm_reject_submitted=%u\nbtm_response_failed=%u\nbtm_switch_submitted=%u\nbtm_canceled=%u\n",
         roamingStat(RTW88Roaming::BtmRx),roamingStat(RTW88Roaming::BtmInvalid),
         roamingStat(RTW88Roaming::BtmRateLimited),roamingStat(RTW88Roaming::BtmAcceptTx),

@@ -115,7 +115,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0-beta.12-lifecycle-diagnostics");
+    setProperty("DriverBuild", "1.1.0-beta.13-control-coordination");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -293,7 +293,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 1.1.0-beta.12 scan backpressure, persistent wake/BTM diagnostics and k/v roaming\n");
+    IOLog("AirPortRTW: 1.1.0-beta.13 bounded measurement/BTM coordination and retained request diagnostics\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
