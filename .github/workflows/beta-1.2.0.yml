@@ -1,0 +1,72 @@
+name: AirPortRTW 1.2.0 beta
+on:
+  push:
+    branches: [beta-1.2.0]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    if: github.ref == 'refs/heads/beta-1.2.0' || github.head_ref == 'beta-1.2.0'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: SAE, handshake, frame integrity and replay tests
+        env:
+          SAE_HOST_SANITIZE: '1'
+        run: python3 experimental/wpa3/test_host.py
+      - name: Existing regression checks
+        run: |
+          for test in tests/check_*.py; do
+            if [[ "$test" == tests/check_stack_budget.py ]]; then
+              python3 "$test" --self-test
+            else
+              python3 "$test"
+            fi
+          done
+      - name: Build driver
+        run: |
+          ./scripts/bootstrap-deps.sh
+          make airport
+      - name: Verify linked bundle
+        run: |
+          plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
+          lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
+          python3 tests/check_stack_budget.py build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
+          python3 - <<'PY'
+          import plistlib, subprocess
+          from pathlib import Path
+          p=plistlib.loads(Path('build/out/AirPortRTW.kext/Contents/Info.plist').read_bytes())
+          assert p['CFBundleVersion']=='1.2.0b3' and p['CFBundleShortVersionString']=='1.2.0'
+          assert 'com.apple.iokit.IO80211FamilyLegacy' in p['OSBundleLibraries']
+          binary='build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW'
+          output=subprocess.check_output(['nm','-u',binary],text=True)
+          assert not any(s in output for s in ['_rtw_sae_', '_airport_sae_', '_mbedtls_', 'RTW88WPA3'])
+          defined=subprocess.check_output(['nm',binary],text=True)
+          assert '_rtw_sae_begin' in defined
+          import re
+          assembly=subprocess.check_output(['xcrun','otool','-tvV','build/airport/RTW88WPA3Crypto.o'],text=True)
+          assert not re.search(r'%(?:xmm|ymm|zmm)[0-9]+',assembly), 'SIMD register in scalar kernel crypto'
+          print('PASS: optimized scalar CCMP object, no SIMD registers')
+          PY
+      - name: Assemble beta package
+        run: |
+          mkdir -p build/package/Notices
+          cp -R build/out/AirPortRTW.kext build/package/
+          cp RELEASE_1_2_0_BETA_3.md NOTICE.md LICENSE build/package/
+          cp experimental/wpa3/rtw80211/sae/NOTICE.txt build/package/Notices/SAE-NOTICE.txt
+          cp experimental/wpa3/rtw80211/sae/third_party/hostap/COPYING build/package/Notices/hostap-COPYING
+          cp experimental/wpa3/rtw80211/sae/third_party/mbedtls/LICENSE build/package/Notices/mbedtls-LICENSE
+          cp docs/INSTALLATION.md build/package/
+          mkdir -p build/package/AirPortRTW.kext/Contents/Resources
+          cp build/package/Notices/* build/package/AirPortRTW.kext/Contents/Resources/
+          ditto -c -k --sequesterRsrc build/package build/AirPortRTW-1.2.0-beta.3.zip
+          shasum -a 256 build/AirPortRTW-1.2.0-beta.3.zip > build/AirPortRTW-1.2.0-beta.3.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AirPortRTW-1.2.0-beta.3
+          path: |
+            build/AirPortRTW-1.2.0-beta.3.zip
+            build/AirPortRTW-1.2.0-beta.3.zip.sha256

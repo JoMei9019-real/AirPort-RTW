@@ -27,6 +27,7 @@
 #include <kern/thread.h>
 
 #include "RTW88IEEE80211.hpp"   /* for RTW88EventDelegate, RTW88BSS, RTW88State */
+#include "RTW88AssocWire.hpp"
 #include "RTW88UserClient.hpp"  /* for struct RTW88StateResult */
 #include "RTW88AWDLManager.hpp"
 
@@ -234,6 +235,7 @@ public:
                                UInt64 speed, OSData *data) override;
     virtual void setLinkStatus(UInt32 status) override;
 
+    IOReturn handleMenuSAE(const RTW88AssocWire::Personal &request);
 private:
     /* IO80211 payload adapters. Protected STA authentication is delegated to Apple RSN. */
     __attribute__((__noinline__)) SInt32 handleNativeRequest(unsigned int request_type, int request_number, IO80211Interface *interface, void *data);

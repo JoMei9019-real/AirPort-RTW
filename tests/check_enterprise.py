@@ -59,7 +59,7 @@ int mbuf_copyback(mbuf_t p,size_t o,size_t n,const void* src,int){
  memcpy(p->bytes.data()+o,src,n);return 0;}
 struct Parent { int injected=0; mbuf_t allocateInputPacket(size_t n){return new Packet{std::vector<uint8_t>(n)};}
  void injectRxFrame(mbuf_t p){++injected;delete p;} void setLinkStatus(unsigned){} };
-struct ieee80211_key_conf { uint8_t key[32]; uint8_t keyidx=0,keylen=0; };
+struct ieee80211_key_conf { uint8_t key[32]; uint8_t keyidx=0,keylen=0,hw_key_idx=0; };
 constexpr uint32_t WLAN_CIPHER_SUITE_CCMP=0x000fac04,WLAN_CIPHER_SUITE_TKIP=0x000fac02;
 constexpr int kMillisecondScale=1,kRTW88EventHandshakeDone=6;
 struct Timer { void cancelTimeout(){} void wakeAtTime(uint64_t){} };
@@ -82,6 +82,7 @@ struct RTW88IEEE80211 {
  void recordTxEvent(unsigned i){++_queueTrace.events[i];}
  bool staTxBlockedByScan()const{return _state==RTW88_STATE_SCANNING&&_scanReturnState==RTW88_STATE_CONNECTED&&_manualScanChannelCount&&!_manualScanOnHomeChannel;}
  uint32_t _roamDataRx=0;void roamTrace(const char*,uint32_t=0){}
+ bool _saeMode=false;struct {bool authorized=false;} _sae;void clearWPA3(){}void wpa3Eapol(const uint8_t*,uint32_t){}
  bool _powered=true,_associatedVisible=true,_enterprise=true,_enterpriseAuthorized=false;
  bool _externalSupplicant=true,_wpa2=true,_externalPTKInstalled=false,_externalGTKInstalled=false;
  bool _pmkProvided=false,_internalEapolTx=false,_rxCcmpIvSkipLogged=false,_snonceValid=false;

@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   build:
+    if: github.head_ref != 'beta-1.2.0'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

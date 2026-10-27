@@ -1,4 +1,14 @@
-# AirPort-RTW
+# AirPort-RTW — 1.2.0 Beta 3
+
+This development branch tests WPA3-Personal through the normal macOS Wi-Fi
+menu, using the existing IO80211 frontend. Read the
+[Beta 3 instructions](RELEASE_1_2_0_BETA_3.md) before installation.
+No connection helper is included in this package. Native password delivery
+and hardware interoperability still require a real menu-join test.
+Existing legacy Wi-Fi dependencies remain required; the frontend rebuild is
+reserved for 2.0.0.
+
+The stable-release instructions below describe **1.1.0**, not this beta.
 
 A Wi-Fi driver for supported Realtek PCIe cards on x86_64 Hackintosh systems.
 It works with the normal macOS Wi-Fi menu.

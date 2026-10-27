@@ -115,7 +115,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.1.0");
+    setProperty("DriverBuild", "1.2.0-beta.3");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -297,7 +297,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 1.1.0 automatic roaming and connection diagnostics\n");
+    IOLog("AirPortRTW: 1.2.0-beta.3 experimental WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -441,6 +441,15 @@ void AirPortRTW::btmTimerFired(OSObject *owner,IOTimerEventSource *timer)
 
 void AirPortRTW::publishRoamDiagnostics()
 {
+    if(_ieee80211) {
+        setProperty("WPA3Stage",uint64_t(_ieee80211->saeStage()),32);
+        setProperty("WPA3Error",uint64_t(_ieee80211->saeError()),32);
+        setProperty("WPA3Active",_ieee80211->saeActive()?kOSBooleanTrue:kOSBooleanFalse);
+        setProperty("WPA3CCMP","software-cached-scalar-aes");
+        setProperty("WPA3TxAggregation",_ieee80211->txAggregationActive()?kOSBooleanTrue:kOSBooleanFalse);
+        setProperty("WPA3ChannelWidthMHz",uint64_t(_ieee80211->channelWidthMHz()),32);
+    }
+
     if(!_ieee80211 || !_diagnosticsBuffer)return;
     uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
     _ieee80211->copyRoamDiagnostics(_diagnosticsBuffer,32768,ns/1000000ULL);
@@ -468,6 +477,34 @@ void AirPortRTW::publishRoamDiagnostics()
 IOReturn AirPortRTW::setProperties(OSObject *properties)
 {
     auto *dict=OSDynamicCast(OSDictionary,properties);
+    if (dict && dict->getObject("WPA3Connect")) {
+        if(IOUserClient::clientHasPrivilege(current_task(),kIOClientPrivilegeAdministrator)!=kIOReturnSuccess)
+            return kIOReturnNotPrivileged;
+        auto*r=OSDynamicCast(OSDictionary,dict->getObject("WPA3Connect"));
+        auto*ssid=r?OSDynamicCast(OSData,r->getObject("SSID")):nullptr;
+        auto*password=r?OSDynamicCast(OSData,r->getObject("Password")):nullptr;
+        auto*bssid=r?OSDynamicCast(OSData,r->getObject("BSSID")):nullptr;
+        if(!ssid||!password||!bssid||ssid->getLength()<1||ssid->getLength()>32||
+           password->getLength()<1||password->getLength()>63||bssid->getLength()!=6||!_workLoop||!_ieee80211)
+            return kIOReturnBadArgument;
+        struct WPA3Request { char ssid[33],password[64];uint8_t bssid[6]; } request={};
+        memcpy(request.ssid,ssid->getBytesNoCopy(),ssid->getLength());
+        memcpy(request.password,password->getBytesNoCopy(),password->getLength());
+        memcpy(request.bssid,bssid->getBytesNoCopy(),6);
+        if(strlen(request.ssid)!=ssid->getLength()||strlen(request.password)!=password->getLength()||
+           !RTW88Roaming::unicast(request.bssid)){RTW88WPA3::wipe(&request,sizeof(request));return kIOReturnBadArgument;}
+        IOReturn result=_workLoop->runAction([](OSObject*owner,void*context,void*,void*,void*)->IOReturn {
+            auto*self=static_cast<AirPortRTW*>(owner);auto*r=static_cast<WPA3Request*>(context);
+            if(self->_shutdown||!self->roamingActionsAllowed())return kIOReturnNotReady;
+            self->_assocDoneReported=false;self->_rsnHandshakeReported=false;
+            __atomic_store_n(&self->_diagnosticsInHardware,true,__ATOMIC_SEQ_CST);
+            IOReturn ret=self->_ieee80211->cmdConnectSAE(r->ssid,r->password,r->bssid);
+            __atomic_store_n(&self->_diagnosticsInHardware,false,__ATOMIC_SEQ_CST);
+            return ret;
+        },this,&request);
+        RTW88WPA3::wipe(&request,sizeof(request));
+        return result; // Never call super::setProperties: credentials must not enter IORegistry.
+    }
     auto *target=dict?OSDynamicCast(OSData,dict->getObject("RoamToBSSID")):nullptr;
     auto *name=dict?OSDynamicCast(OSString,dict->getObject("RoamCommand")):nullptr;
     const char *command=name?name->getCStringNoCopy():nullptr;
@@ -1369,12 +1406,19 @@ static bool rtw88TryHostAssociation(AirPortRTW *self, IO80211Interface *interfac
                                     apple80211req *req, SInt32 *result)
 {
     if (!req->req_data || !RTW88AssocWire::supportedRequestSize(req->req_len)) return false;
-    uint8_t prefix[RTW88AssocWire::PrefixSize] = {};
+    uint8_t prefix[RTW88AssocWire::PasswordPrefixSize] = {};
     RTW88AssocWire::Personal fields = {};
     const int error = copyin((user_addr_t)req->req_data, prefix, sizeof(prefix));
     const bool valid = !error && RTW88AssocWire::decode(prefix, sizeof(prefix), fields);
     RTW88AssocWire::wipe(prefix, sizeof(prefix));
     if (!valid) { RTW88AssocWire::wipe(&fields, sizeof(fields)); return false; }
+    if(fields.cipher==10) {
+        self->setProperty("WPA3_MENU_HOST_PASSWORD",kOSBooleanTrue);
+        *result=self->handleMenuSAE(fields);
+        RTW88AssocWire::wipe(&fields,sizeof(fields));
+        if(*result<0 || *result>=256){int e=self->errnoFromReturn(*result);*result=e?e:EIO;}
+        return true;
+    }
     apple80211_assoc_data assoc = {};
     assoc.version = APPLE80211_VERSION;
     assoc.ad_mode = fields.mode; assoc.ad_auth_lower = fields.lower; assoc.ad_auth_upper = fields.upper;
@@ -1725,6 +1769,9 @@ static bool rtw88AssocPayloadLooksValid(const apple80211_assoc_data *d)
     }
     if (!nonzero) return false;
 
+    if(d->ad_auth_lower==1 && d->ad_key.key_cipher_type==10 &&
+       (d->ad_auth_upper==8 || d->ad_auth_upper==4096 || d->ad_auth_upper==(4096|8)))
+        return d->ad_key.key_len>=1 && d->ad_key.key_len<=sizeof(d->ad_key.key);
     const auto auth = RTW88Enterprise::auth(d->ad_auth_lower, d->ad_auth_upper,
                          d->ad_key.key_len, d->ad_rsn_ie, sizeof(d->ad_rsn_ie));
     if (auth == RTW88Enterprise::Auth::Invalid) return false;
@@ -2122,6 +2169,9 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         d->capabilities[5] = 0x8C;
         d->capabilities[6] = 0x8C;
         d->capabilities[7] = 0x84;
+        d->capabilities[6] |= 0x01; // PMF
+        d->capabilities[9] |= 0x18; // SAE authentication/key management
+        setProperty("WPA3_MENU_CAPABILITIES",kOSBooleanTrue);
         static bool capsLogged = false;
         if (!capsLogged) {
             capsLogged = true;
@@ -2334,7 +2384,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.1.0-beta.5)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.2.0-beta.3)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -2855,6 +2905,30 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
     const uint8_t *bssid = memcmp(d->ad_bssid.octet, emptyBssid,
                                   APPLE80211_ADDR_LEN) ? d->ad_bssid.octet : nullptr;
 
+    setProperty("WPA3_MENU_KEY_CIPHER",uint64_t(d->ad_key.key_cipher_type),32);
+    if(d->ad_key.key_cipher_type==10 && d->ad_auth_lower==1 &&
+       (d->ad_auth_upper==8 || d->ad_auth_upper==4096 || d->ad_auth_upper==(4096|8))) {
+        if(!d->ad_key.key_len || d->ad_key.key_len>sizeof(d->ad_key.key))return kIOReturnUnsupported;
+        RTW88AssocWire::Personal request={};request.mode=d->ad_mode;request.lower=1;
+        request.upper=d->ad_auth_upper;request.ssidLength=d->ad_ssid_len;request.keyLength=d->ad_key.key_len;request.cipher=10;
+        memcpy(request.ssid,d->ad_ssid,request.ssidLength);memcpy(request.bssid,d->ad_bssid.octet,6);memcpy(request.key,d->ad_key.key,request.keyLength);
+        IOReturn ret=handleMenuSAE(request);RTW88AssocWire::wipe(&request,sizeof(request));return ret;
+    }
+    if(d->ad_auth_upper & 4096) {
+        setProperty("WPA3_MENU_STATUS","password-not-delivered");
+        return kIOReturnUnsupported; // Never treat a PMK as an SAE password.
+    }
+    // A helper-selected SAE join must not be replaced by an automatic legacy
+    // PSK request for the same transition-mode AP. An explicit disconnect ends
+    // this lock; choosing another network still uses the normal WPA2 path.
+    if (_ieee80211->matchesSAETarget(ssid,bssid)) {
+        setProperty("WPA3_LEGACY_PSK_JOIN_IGNORED",kOSBooleanTrue);
+        return kIOReturnSuccess;
+    }
+    if((d->ad_auth_upper&8) && _ieee80211->bssOffersSAE(ssid,bssid)) {
+        setProperty("WPA3_MENU_STATUS","pmk-only-transition-refused");
+        return kIOReturnUnsupported; // Transition mode must not silently downgrade.
+    }
     const auto auth = RTW88Enterprise::auth(d->ad_auth_lower, d->ad_auth_upper,
                          d->ad_key.key_len, d->ad_rsn_ie, sizeof(d->ad_rsn_ie));
     if (auth == RTW88Enterprise::Auth::Invalid) return kIOReturnUnsupported;
@@ -3868,4 +3942,30 @@ void AirPortRTW::rtw88Event(RTW88Event ev, void *data)
     case kRTW88EventRSSIChanged:   _netif->postMessage(APPLE80211_M_LINK_QUALITY); break;
     default: break;
     }
+}
+
+// Native menu credential entry. No helper, Keychain reader or saved plaintext.
+IOReturn AirPortRTW::handleMenuSAE(const RTW88AssocWire::Personal &request)
+{
+    if(!_ieee80211 || _shutdown || !roamingActionsAllowed())return kIOReturnNotReady;
+    if(request.lower!=1 || request.cipher!=10 || !request.ssidLength || request.ssidLength>32 ||
+       !request.keyLength || request.keyLength>63 ||
+       (request.upper!=8 && request.upper!=4096 && request.upper!=(4096|8)))return kIOReturnBadArgument;
+    struct Credentials {char ssid[33],password[64];uint8_t bssid[6];} c={};
+    RTW88WPA3::ScopeWipe guard{&c,sizeof(c)};
+    memcpy(c.ssid,request.ssid,request.ssidLength);memcpy(c.password,request.key,request.keyLength);memcpy(c.bssid,request.bssid,6);
+    if(strlen(c.ssid)!=request.ssidLength || strlen(c.password)!=request.keyLength)return kIOReturnUnsupported;
+    const uint8_t zero[6]={};const uint8_t*bssid=memcmp(c.bssid,zero,6)?c.bssid:nullptr;
+    if(bssid && !RTW88Roaming::unicast(bssid))return kIOReturnBadArgument;
+    if(_ieee80211->matchesSAETarget(c.ssid,bssid))return kIOReturnSuccess;
+    RTW88StateResult state={};IOReturn ret=_ieee80211->cmdGetState(&state);if(ret)return ret;
+    if(state.state==RTW88_STATE_CONNECTED || state.state==RTW88_STATE_AUTHENTICATING ||
+       state.state==RTW88_STATE_ASSOCIATING || state.state==RTW88_STATE_HANDSHAKING) {
+        ret=_ieee80211->cmdDisconnect();if(ret)return ret;
+    }
+    _authLower=1;_authUpper=4096;_assocDoneReported=false;_rsnHandshakeReported=false;
+    ret=_ieee80211->cmdConnectSAE(c.ssid,c.password,bssid);
+    setProperty("WPA3_MENU_STATUS",ret==kIOReturnSuccess?"sae-request-accepted":"sae-request-rejected");
+    setProperty("WPA3_MENU_RESULT",uint64_t(uint32_t(ret)),32);
+    return ret;
 }
