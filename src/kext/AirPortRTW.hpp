@@ -111,15 +111,25 @@ class AirPortRTW : public IO80211Controller, public RTW88EventDelegate, public R
 
 public:
     static void diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *timer);
+    static void btmTimerFired(OSObject *owner,IOTimerEventSource *timer);
+    bool btmControlAvailable() const override { return _btmTimer && roamingActionsAllowed(); }
+    bool scheduleBtmControl(unsigned delayMs) override;
     static void awdlTimerFired(OSObject *owner, IOTimerEventSource *timer);
     static void deferredRxReady(OSObject *owner, IOInterruptEventSource *source, int count);
     bool deferRxFrame(struct sk_buff *skb) override;
     bool rxProcessingDeferred() const override { return true; }
+    bool roamingActionsAllowed() const override {
+        return !__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE);
+    }
     void setRxQueueEnabled(bool enabled) override;
     void radioPowerChanged(bool powered) override;
     /* IOService */
     bool     init(OSDictionary *props) override;
     bool     start(IOService *provider) override;
+    IOReturn setProperties(OSObject *properties) override;
+    void publishRoamDiagnostics();
     void     stop(IOService *provider) override;
     void     free() override;
     void     systemWillShutdown(IOOptionBits specifier) override;
@@ -201,6 +211,7 @@ public:
     virtual UInt32 hardwareOutputQueueDepth(IO80211Interface*) override;
     virtual UInt32 getDataQueueDepth(OSObject *) override;
     virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options) override;
+    IOReturn outputStartBatched(IONetworkInterface *interface, IOOptionBits options);
     void kickGatedOutput();
     virtual SInt32 performCountryCodeOperation(IO80211Interface*, IO80211CountryCodeOp) override;
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
@@ -290,6 +301,7 @@ private:
     RTW88IEEE80211         *_ieee80211   = nullptr;  /* reused as-is from rtw88 core */
 
     IOTimerEventSource *_diagnosticsTimer = nullptr;
+    IOTimerEventSource *_btmTimer = nullptr;
     char *_diagnosticsBuffer = nullptr;
     uint64_t _diagnosticsSamples = 0;
     /* Last periodic sample written to the diagnostic ring (r8 throttle). */
@@ -369,6 +381,7 @@ private:
     void   setBounceOrigVA(IOPhysicalAddress phys, void *orig_va) override;
     void   syncBounceForCpu(IOPhysicalAddress dma, size_t size) override;
     void   resumeTxIfStalled() override;
+    void   scanTxReady() override;
     void   drainPendingFree();
     IOReturn quiesceForSystemSleep();
     IOReturn restoreAfterSystemWake();

@@ -6,6 +6,8 @@
 #include "AirPortRTWInterface.hpp"
 #include "RTW88AssocWire.hpp"
 #include "RTW88LinkEventWire.hpp"
+#include "RTW88Enterprise.hpp"
+#include "RTW88TxBatchScope.hpp"
 #include "RTW88UserClient.hpp"
 
 extern "C" {
@@ -22,6 +24,11 @@ extern "C" void rtw88_trigger_interrupt(void);  /* esta si es la unica con exter
 #include <sys/errno.h>                    /* EINVAL/EFAULT/ENOMEM */
 #include <libkern/version.h>              /* scan-cache bootstrap compatibility only */
 #include <net/kpi_interface.h>            /* ifnet_stat_increment_in/out */
+#include <kern/clock.h>
+#include <mach/mach_time.h>
+#include <IOKit/IOUserClient.h>
+#include <kern/task.h>
+#include <pexpert/pexpert.h>
 
 #define IOLog rtw88_candidate_log
 
@@ -108,7 +115,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.0.2-release");
+    setProperty("DriverBuild", "1.1.0");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -192,6 +199,30 @@ bool AirPortRTW::start(IOService *provider)
     }
     _ieee80211->setEventDelegate(this);
     _ieee80211->setRxDelegate(this);
+    OSBoolean *batch = OSDynamicCast(OSBoolean, getProperty("TxBatchingEnabled"));
+    const bool batchEnabled = !batch || batch->isTrue();
+    _ieee80211->setTxBatchEnabled(batchEnabled);
+    setProperty("TX_BATCH_ENABLED", batchEnabled ? kOSBooleanTrue : kOSBooleanFalse);
+    setProperty("TX_BATCH_LIMIT", (uint64_t)32, 32);
+    OSBoolean *roaming = OSDynamicCast(OSBoolean, getProperty("RoamingAssistEnabled"));
+    const bool roamingEnabled = roaming && roaming->isTrue();
+    _ieee80211->setRoamingAssistEnabled(roamingEnabled);
+    setProperty("ROAM_ASSIST_ENABLED", roamingEnabled ? kOSBooleanTrue : kOSBooleanFalse);
+    setProperty("ROAM_V_MODE", "reject-only");
+    setProperty("ROAM_R_FT_ENABLED", kOSBooleanFalse);
+    OSBoolean *switching=OSDynamicCast(OSBoolean,getProperty("RoamingSwitchEnabled"));
+    const bool switchEnabled=switching && switching->isTrue();
+    _ieee80211->setRoamSwitchEnabled(switchEnabled);
+    OSBoolean *automatic=OSDynamicCast(OSBoolean,getProperty("RoamingAutoEnabled"));
+    int noAutoRoam=0;
+    const bool autoDisabled=PE_parse_boot_argn("-rtwnoautoroam",&noAutoRoam,sizeof(noAutoRoam));
+    _ieee80211->setAutoRoamingEnabled(automatic && automatic->isTrue() && !autoDisabled);
+    setProperty("ROAM_AUTO_DISABLED_BY_BOOT_ARG",autoDisabled?kOSBooleanTrue:kOSBooleanFalse);
+    int noAWDLHop=0;
+    const bool hopsDisabled=PE_parse_boot_argn("-rtwnoawdlhop",&noAWDLHop,sizeof(noAWDLHop));
+    _ieee80211->setAWDLHopsDisabled(hopsDisabled);
+    setProperty("AWDL_HOPS_DISABLED_BY_BOOT_ARG",hopsDisabled?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_SWITCH_ENABLED",switchEnabled?kOSBooleanTrue:kOSBooleanFalse);
 
     rtw88_force_wifi_only();
 
@@ -262,7 +293,11 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("DiagnosticLogging", kOSBooleanTrue);
     setProperty("DiagnosticLogCapacity", (uint64_t)32767, 32);
     _diagnosticsTimer->setTimeoutMS(1000);
-    IOLog("AirPortRTW: 1.0.2 diagnostics enabled; skb cb=80; fixes=memory,wpa,gtk,peer,station,firmware,scan-ies,ap-ie-list,link-reason,rx-filter\n");
+    _btmTimer=IOTimerEventSource::timerEventSource(this,&AirPortRTW::btmTimerFired);
+    if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
+        _btmTimer->release();_btmTimer=nullptr;
+    }
+    IOLog("AirPortRTW: 1.1.0 automatic roaming and connection diagnostics\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -272,6 +307,11 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     AirPortRTW *self = OSDynamicCast(AirPortRTW, owner);
     if (!self || self->_shutdown || !self->_diagnosticsBuffer) return;
     self->_diagnosticsSamples++;
+    if (self->_ieee80211) {
+        self->setProperty("TX_BATCH_DEFERRED_FRAMES", (uint64_t)self->_ieee80211->txBatchFrames(), 32);
+        self->setProperty("TX_BATCH_FLUSHES", (uint64_t)self->_ieee80211->txBatchFlushes(), 32);
+        self->setProperty("TX_BATCH_PENDING", (uint64_t)self->_ieee80211->txBatchPending(), 32);
+    }
     self->setProperty("RX_DEFER_QUEUED", (uint64_t)__atomic_load_n(&self->_deferredRxQueued, __ATOMIC_RELAXED), 32);
     self->setProperty("RX_DEFER_DROPPED", (uint64_t)__atomic_load_n(&self->_deferredRxDropped, __ATOMIC_RELAXED), 32);
     self->setProperty("RX_DEFER_PROCESSED", (uint64_t)self->_deferredRxProcessed, 32);
@@ -282,6 +322,28 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     if (!__atomic_load_n(&self->_pmTransition, __ATOMIC_SEQ_CST) &&
         !__atomic_load_n(&self->_dmaStopped, __ATOMIC_SEQ_CST) && self->_ieee80211 &&
         self->_ieee80211->isPowered()) {
+        uint64_t nowNs = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time(), &nowNs);
+        self->_ieee80211->roamingTick(nowNs / 1000000ULL);
+        self->_ieee80211->autoRoamTick(nowNs / 1000000ULL);
+        self->setProperty("ROAM_SWITCH_RESULT",(uint64_t)self->_ieee80211->roamSwitchResult(),32);
+        uint8_t neighbors[RTW88Roaming::MaxCandidates*6]={};
+        unsigned neighborCount=self->_ieee80211->copyRoamNeighbors(neighbors);
+        self->setProperty("ROAM_K_CANDIDATES",neighbors,neighborCount*6);
+        static const char *const names[] = {
+            "ROAM_AP_NEIGHBOR_REPORT", "ROAM_AP_BTM", "ROAM_AP_MOBILITY_DOMAIN",
+            "ROAM_AP_MDID", "ROAM_AP_FT_POLICY", "ROAM_AP_FT_AKMS",
+            "ROAM_K_REQUEST_SUBMITTED", "ROAM_K_REQUEST_FAILED", "ROAM_K_RESPONSE_RX",
+            "ROAM_K_RESPONSE_INVALID", "ROAM_K_RESPONSE_TIMEOUT", "ROAM_K_NEIGHBOR_COUNT",
+            "ROAM_K_NEIGHBOR_TRUNCATED", "ROAM_V_REQUEST_RX", "ROAM_V_REJECT_SUBMITTED",
+            "ROAM_V_RESPONSE_FAILED", "ROAM_V_REQUEST_INVALID", "ROAM_V_RATE_LIMITED",
+            "ROAM_V_CANDIDATE_COUNT", "ROAM_V_LAST_MODE", "ROAM_V_DISASSOC_TIMER_TBTT",
+            "ROAM_V_ACCEPT_SUBMITTED", "ROAM_V_SWITCH_SUBMITTED", "ROAM_V_SCAN_SUBMITTED", "ROAM_V_CANCELED",
+            "ROAM_K_UNKNOWN_CLASS_HINTS"
+        };
+        static_assert(sizeof(names)/sizeof(names[0])==RTW88Roaming::Count,"roaming diagnostic names must match counters");
+        for (unsigned i = 0; i < RTW88Roaming::Count; ++i)
+            self->setProperty(names[i], (uint64_t)self->_ieee80211->roamingStat(i), 32);
         unsigned state = self->_ieee80211->rawState();
         bool visible = self->_ieee80211->associatedVisible();
         bool agg = self->_ieee80211->txAggregationActive();
@@ -301,6 +363,13 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
                       gates != self->_diagLastGateCount ||
                       self->_diagnosticsSamples - self->_diagLastRingSample >= kDiagHeartbeatSamples;
         self->_diagLastGateCount = gates;
+        {
+            IOOutputQueue *q = self->getOutputQueue();
+            IONetworkData *d = q ? q->getStatisticsData() : nullptr;
+            const IOOutputQueueStats *s = d && d->getSize() >= sizeof(IOOutputQueueStats) ?
+                (const IOOutputQueueStats *)d->getBuffer() : nullptr;
+            if(s)self->_ieee80211->sampleQueueTrace(nowNs/1000000ULL,s->dropCount,s->stallCount,q->getSize());
+        }
         if (toRing) {
             IOOutputQueue *oq = self->getOutputQueue();
             /* r11: the family queue's own drop/stall counters, so drops can
@@ -341,15 +410,123 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     self->setProperty("DiagnosticSamples", self->_diagnosticsSamples, 64);
     self->setProperty("DiagnosticLogWrapped", bytes > 32767 ? kOSBooleanTrue : kOSBooleanFalse);
     self->setProperty("DiagnosticLogSnapshotLength", (uint64_t)n, 32);
+    self->publishRoamDiagnostics();
     timer->setTimeoutMS(5000);
+}
+
+bool AirPortRTW::scheduleBtmControl(unsigned delayMs)
+{
+    if(!btmControlAvailable())return false;
+    _btmTimer->setTimeoutMS(delayMs);
+    if(!btmControlAvailable()){_btmTimer->cancelTimeout();return false;}
+    return true;
+}
+
+void AirPortRTW::btmTimerFired(OSObject *owner,IOTimerEventSource *timer)
+{
+    auto *self=OSDynamicCast(AirPortRTW,owner);
+    if(!self || self->_shutdown)return;
+    __atomic_store_n(&self->_diagnosticsInHardware,true,__ATOMIC_SEQ_CST);
+    if(self->roamingActionsAllowed() && self->_ieee80211 && self->_ieee80211->isPowered()) {
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+        self->_ieee80211->btmTick(ns/1000000ULL);
+    }
+    __atomic_store_n(&self->_diagnosticsInHardware,false,__ATOMIC_SEQ_CST);
+    if(self->_shutdown)return;
+    self->publishRoamDiagnostics();
+    if(self->btmControlAvailable() && self->_ieee80211 && self->_ieee80211->isPowered() && self->_ieee80211->btmPending())
+        self->scheduleBtmControl(self->_ieee80211->btmPollMs());
+    else timer->cancelTimeout();
+}
+
+void AirPortRTW::publishRoamDiagnostics()
+{
+    if(!_ieee80211 || !_diagnosticsBuffer)return;
+    uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+    _ieee80211->copyRoamDiagnostics(_diagnosticsBuffer,32768,ns/1000000ULL);
+    setProperty("ROAM_DIAGNOSTICS",_diagnosticsBuffer);
+    setProperty("ROAM_SWITCH_RESULT",uint64_t(_ieee80211->roamSwitchResult()),32);
+    setProperty("ROAM_SCAN_ACTIVE",_ieee80211->roamScanActive()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_AUTO_ENABLED",_ieee80211->autoRoamingEnabled()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_K_ADVERTISED",_ieee80211->neighborReportAdvertised()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_K_BEACON_ADVERTISED",_ieee80211->beaconReportAdvertised()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_K_BEACON_MODES",_ieee80211->beaconReportAdvertised()?"passive,active,table":"disabled");
+    setProperty("ROAM_V_ADVERTISED",_ieee80211->btmAdvertised()?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("ROAM_V_MODE",_ieee80211->btmAdvertised()?"controlled-btm":"reject-only");
+    setProperty("ROAM_K_PENDING",_ieee80211->roamNeighborPending()?kOSBooleanTrue:kOSBooleanFalse);
+    uint8_t neighbors[RTW88Roaming::MaxCandidates*6]={};
+    unsigned count=_ieee80211->copyRoamNeighbors(neighbors);
+    setProperty("ROAM_K_CANDIDATES",neighbors,count*6);
+    uint64_t bytes=0;
+    uint32_t length=rtw88_copy_log(_diagnosticsBuffer,32768,&bytes);
+    setProperty("DiagnosticLog",_diagnosticsBuffer);
+    setProperty("DiagnosticLogBytes",bytes,64);
+    setProperty("DiagnosticLogWrapped",bytes>32767?kOSBooleanTrue:kOSBooleanFalse);
+    setProperty("DiagnosticLogSnapshotLength",uint64_t(length),32);
+}
+
+IOReturn AirPortRTW::setProperties(OSObject *properties)
+{
+    auto *dict=OSDynamicCast(OSDictionary,properties);
+    auto *target=dict?OSDynamicCast(OSData,dict->getObject("RoamToBSSID")):nullptr;
+    auto *name=dict?OSDynamicCast(OSString,dict->getObject("RoamCommand")):nullptr;
+    const char *command=name?name->getCStringNoCopy():nullptr;
+    unsigned operation=target&&!command?3:0;
+    static const char *const commands[]={"refresh","check","switch","scan","snapshot","log-off","log-normal","log-verbose","discover","select","awdl-hops-off","awdl-hops-on"};
+    for(unsigned i=0;command && i<sizeof(commands)/sizeof(commands[0]);++i)
+        if(!strcmp(command,commands[i]))operation=i+1;
+    if(!operation)return kIOReturnUnsupported;
+    if(IOUserClient::clientHasPrivilege(current_task(),kIOClientPrivilegeAdministrator)!=kIOReturnSuccess)
+        return kIOReturnNotPrivileged;
+    if(!_ieee80211 || !_workLoop || ((operation>=2 && operation<=4) && (!target || target->getLength()!=6)))
+        return kIOReturnBadArgument;
+    struct Control { unsigned operation; uint8_t bssid[6]; } control={operation,{}};
+    if(target && target->getLength()==6)memcpy(control.bssid,target->getBytesNoCopy(),6);
+    return _workLoop->runAction([](OSObject *owner,void *context,void*,void*,void*)->IOReturn{
+        auto *self=static_cast<AirPortRTW*>(owner);
+        auto *request=static_cast<Control*>(context);
+        if(self->_shutdown || !self->_ieee80211)return kIOReturnNotReady;
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+        IOReturn result=kIOReturnSuccess;
+        if(request->operation>=6 && request->operation<=8) {
+            self->_ieee80211->setRoamLogLevel(request->operation-6);
+            self->_ieee80211->roamTrace("log-level-changed",request->operation-6);
+        } else if(request->operation==11 || request->operation==12) {
+            __atomic_store_n(&self->_diagnosticsInHardware,true,__ATOMIC_SEQ_CST);
+            if(!self->roamingActionsAllowed())result=kIOReturnNotReady;
+            else result=self->_ieee80211->configureAWDLHops(request->operation==11);
+            __atomic_store_n(&self->_diagnosticsInHardware,false,__ATOMIC_SEQ_CST);
+        } else if(request->operation!=5) {
+            self->_ieee80211->pauseAutoRoaming(ns/1000000ULL);
+            // Same PM interlock as periodic diagnostics. Never sleep on the
+            // controller workloop while a scanner/authentication worker runs.
+            __atomic_store_n(&self->_diagnosticsInHardware,true,__ATOMIC_SEQ_CST);
+            if(!self->roamingActionsAllowed())result=self->_ieee80211->roamPowerBlocked();
+            else switch(request->operation) {
+                case 1: result=self->_ieee80211->refreshRoamNeighbors(ns/1000000ULL);break;
+                case 2: result=self->_ieee80211->checkRoam(request->bssid,ns/1000000ULL);break;
+                case 3: result=self->_ieee80211->requestRoam(request->bssid,ns/1000000ULL);break;
+                case 4: result=self->_ieee80211->scanRoamTarget(request->bssid,ns/1000000ULL);break;
+                case 9: result=self->_ieee80211->discoverRoamAPs(ns/1000000ULL);break;
+                case 10: result=self->_ieee80211->selectRoamTarget(ns/1000000ULL);break;
+            }
+            __atomic_store_n(&self->_diagnosticsInHardware,false,__ATOMIC_SEQ_CST);
+        }
+        self->setProperty("ROAM_CONTROL_RESULT",uint64_t(uint32_t(result)),64);
+        if(request->operation==3)self->setProperty("ROAM_SWITCH_REQUEST_RESULT",uint64_t(uint32_t(result)),64);
+        self->publishRoamDiagnostics();
+        return result;
+    },this,&control);
 }
 
 void AirPortRTW::waitForDiagnosticsIdle()
 {
+    if(_btmTimer)_btmTimer->cancelTimeout();
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     for (int i = 0; i < 1000 &&
          __atomic_load_n(&_diagnosticsInHardware, __ATOMIC_SEQ_CST); i++)
         IOSleep(1);
+    if(_btmTimer)_btmTimer->cancelTimeout();
 }
 
 bool AirPortRTW::failStart(IOService *provider, const char *reason)
@@ -532,15 +709,25 @@ void AirPortRTW::resumeTxIfStalled()
     kickGatedOutput();
 }
 
+void AirPortRTW::scanTxReady()
+{
+    // Queue service is asynchronous; never recurse into IO80211 output here.
+    resumeTxIfStalled();
+}
+
 bool AirPortRTW::releaseTxStall()
 {
+    if (_ieee80211 && (_ieee80211->staTxBlockedByScan() || _ieee80211->staTxBlockedByAWDL()))
+        return false;
     if (!_txStalled || rtw88_be_tx_avail() < kRTW88TxResumeAvail)
         return false;
 
     _txStalled = false;
     IOOutputQueue *q = getOutputQueue();
-    if (q)
+    if (q) {
+        if(_ieee80211)_ieee80211->recordTxEvent(RTW88Lifecycle::QueueResumes);
         q->service(IOBasicOutputQueue::kServiceAsync);
+    }
     return true;
 }
 
@@ -587,6 +774,11 @@ void AirPortRTW::teardown()
     if (_deferredRxSource) {
         _deferredRxSource->disable();
         if (_workLoop) _workLoop->removeEventSource(_deferredRxSource);
+    }
+    if(_btmTimer) {
+        _btmTimer->disable();_btmTimer->cancelTimeout();
+        if(_workLoop)_workLoop->removeEventSource(_btmTimer);
+        _btmTimer->cancelTimeout();_btmTimer->release();_btmTimer=nullptr;
     }
     if (_diagnosticsTimer) {
         /* A callback already running may re-arm after the first cancel;
@@ -760,6 +952,7 @@ IOReturn AirPortRTW::restoreAfterSystemWake()
     waitForDiagnosticsIdle();
 
     ++_pmWakeCount;
+    if (_ieee80211) _ieee80211->beginWakeTrace();
     setProperty("PM_STATE", "waking");
     setProperty("PM_WAKE_COREWIFI_READY", kOSBooleanFalse);
     setProperty("PM_WAKE_COUNT", (uint64_t)_pmWakeCount, 32);
@@ -850,6 +1043,7 @@ out:
 
     if (ret == kIOReturnSuccess) {
         _txStalled = false;
+        if (_ieee80211->isPowered()) _ieee80211->wakeTrace("radio-ready");
         // Advertise the restored, unassociated radio only after the PM fence
         // is open. Never announce a reconnect opportunity for Wi-Fi left OFF.
         if (_ieee80211->isPowered())
@@ -1076,6 +1270,7 @@ UInt32 AirPortRTW::outputPacket(mbuf_t m, void *param)
     (void)param;
     if (__atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
         _pmPowerState == kRTW88PowerStateOff) {
+        if (_ieee80211) _ieee80211->recordTxEvent(RTW88Lifecycle::StallPower);
         _txStalled = true;
         return kIOReturnOutputStall;
     }
@@ -1092,12 +1287,19 @@ UInt32 AirPortRTW::outputPacket(mbuf_t m, void *param)
      * the AP channel. Backpressure en0 instead of transmitting AP traffic on
      * the peer-to-peer channel. */
     if (_ieee80211->staTxBlockedByAWDL()) {
+        _ieee80211->recordTxEvent(RTW88Lifecycle::StallAWDL);
         _txStalled = true;
         return kIOReturnOutputStall;
     }
 
+    if (_ieee80211->staTxBlockedByScan()) {
+        _ieee80211->recordTxEvent(RTW88Lifecycle::StallScan);
+        _txStalled = true;
+        return kIOReturnOutputStall;
+    }
     const unsigned int avail = rtw88_be_tx_avail();
     if (_txStalled || avail < kRTW88TxStallAvail) {
+        _ieee80211->recordTxEvent(RTW88Lifecycle::StallRing);
         _txStalled = true;
         /* Do not consume m. IOBasicOutputQueue retries this exact packet when
          * resumeTxIfStalled() services the queue after descriptor reclamation. */
@@ -1107,6 +1309,7 @@ UInt32 AirPortRTW::outputPacket(mbuf_t m, void *param)
     /* The stack already accounts output bytes on this interface; add the
      * packet count only, so netstat/Activity Monitor are not stuck at zero. */
     UInt32 ret = _ieee80211->outputPacket(m);
+    if(ret == kIOReturnOutputStall) {_txStalled=true;return ret;}
     ifnet_t ifp = _netif ? _netif->getIfnet() : nullptr;
     if (ifp)
         ifnet_stat_increment_out(ifp, ret == kIOReturnOutputSuccess ? 1 : 0, 0,
@@ -1522,18 +1725,10 @@ static bool rtw88AssocPayloadLooksValid(const apple80211_assoc_data *d)
     }
     if (!nonzero) return false;
 
-    const uint32_t personal = APPLE80211_AUTHTYPE_WPA_PSK |
-                              APPLE80211_AUTHTYPE_WPA2_PSK |
-                              APPLE80211_AUTHTYPE_SHA256_PSK;
-    const bool secure = (d->ad_auth_upper & personal) != 0;
-    if (d->ad_auth_lower != APPLE80211_AUTHTYPE_OPEN)
-        return false;
-    if (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure)
-        return false;
-    if (secure && d->ad_key.key_len != 32)
-        return false;
-    if (!secure && d->ad_key.key_len != 0)
-        return false;
+    const auto auth = RTW88Enterprise::auth(d->ad_auth_lower, d->ad_auth_upper,
+                         d->ad_key.key_len, d->ad_rsn_ie, sizeof(d->ad_rsn_ie));
+    if (auth == RTW88Enterprise::Auth::Invalid) return false;
+    const bool secure = auth != RTW88Enterprise::Auth::Open;
 
     if (secure && d->ad_rsn_ie[0] != 0) {
         if (d->ad_rsn_ie[0] != 48)
@@ -2139,7 +2334,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.0.2)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.1.0-beta.5)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -2636,8 +2831,7 @@ IOReturn AirPortRTW::handleAUTH_TYPE(bool set, struct apple80211_authtype_data *
 
 IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
 {
-    setProperty("STA_INTERNAL_RSN_MODE", kOSBooleanTrue);
-    kprintf("AirPortRTW: handleASSOCIATE ENTER data=%p (internal RSN)\n", d);
+    IOLog("AirPortRTW: handleASSOCIATE ENTER\n");
     // Metadata only: never publish SSID, BSSID, PMK or password bytes.
     if (d) {
         setProperty("STA_ASSOC_INPUT_VERSION", (uint64_t)d->version, 32);
@@ -2661,33 +2855,14 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
     const uint8_t *bssid = memcmp(d->ad_bssid.octet, emptyBssid,
                                   APPLE80211_ADDR_LEN) ? d->ad_bssid.octet : nullptr;
 
-    const uint32_t personalMask =
-        APPLE80211_AUTHTYPE_WPA_PSK |
-        APPLE80211_AUTHTYPE_WPA2_PSK |
-        APPLE80211_AUTHTYPE_SHA256_PSK;
-    const bool secure = (d->ad_auth_upper & personalMask) != 0;
-
-    if (d->ad_auth_lower != APPLE80211_AUTHTYPE_OPEN ||
-        (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure))
-        return kIOReturnUnsupported;
-
-    /* Proven Ventura path (0.4.0 -> 1.0.0): IO80211 supplies the 32-byte
-     * association PMK in ad_key.  Keep the 4-way handshake inside rtw88.
-     * Do not enable Apple RSN here: that experimental path changed the join
-     * transport and was never the known-good RTL8822BE path. */
-    const uint8_t *pmk = nullptr;
-    if (secure) {
-        if (d->ad_key.key_len != 32) {
-            setProperty("STA_ASSOCIATE_BAD_PMK_LEN", (uint64_t)d->ad_key.key_len, 32);
-            return kIOReturnUnsupported;
-        }
-        pmk = d->ad_key.key;
-
-    }
-
-    // Validate the open-network key before tearing down an existing link.
-    if (!secure && d->ad_key.key_len != 0)
-        return kIOReturnUnsupported;
+    const auto auth = RTW88Enterprise::auth(d->ad_auth_lower, d->ad_auth_upper,
+                         d->ad_key.key_len, d->ad_rsn_ie, sizeof(d->ad_rsn_ie));
+    if (auth == RTW88Enterprise::Auth::Invalid) return kIOReturnUnsupported;
+    const bool enterprise = auth == RTW88Enterprise::Auth::Enterprise;
+    const bool secure = auth != RTW88Enterprise::Auth::Open;
+    const uint8_t *pmk = auth == RTW88Enterprise::Auth::Personal ? d->ad_key.key : nullptr;
+    setProperty("STA_ENTERPRISE_EXPERIMENTAL", enterprise ? kOSBooleanTrue : kOSBooleanFalse);
+    setProperty("STA_INTERNAL_RSN_MODE", enterprise ? kOSBooleanFalse : kOSBooleanTrue);
 
     RTW88StateResult current = {};
     if (_ieee80211->cmdGetState(&current) == kIOReturnSuccess &&
@@ -2695,7 +2870,7 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
          current.state == RTW88_STATE_ASSOCIATING ||
          current.state == RTW88_STATE_HANDSHAKING ||
          current.state == RTW88_STATE_CONNECTED)) {
-        bool same = _ieee80211->matchesPendingJoin(ssid, bssid, pmk);
+        bool same = _ieee80211->matchesPendingJoin(ssid, bssid, pmk, enterprise);
         setProperty("ASSOCIATE_COALESCED", same ? kOSBooleanTrue : kOSBooleanFalse);
         if (same) return kIOReturnSuccess;
         // A valid new ASSOCIATE supersedes the old attempt/link. Drain its
@@ -2728,14 +2903,14 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
     _assocDoneReported = false;
     _rsnHandshakeReported = false;
     setProperty("STA_ASSOCIATE_BEFORE_RAW_STATE", (uint64_t)_ieee80211->rawState(), 32);
-    IOReturn ret = _ieee80211->cmdConnect(ssid, nullptr, pmk, bssid, false);
+    IOReturn ret = _ieee80211->cmdConnect(ssid, nullptr, pmk, bssid, enterprise);
     setProperty("STA_ASSOCIATE_CMD_RET", (uint64_t)(uint32_t)ret, 32);
     setProperty("STA_ASSOCIATE_AFTER_RAW_STATE", (uint64_t)_ieee80211->rawState(), 32);
     if (ret == kIOReturnSuccess)
         setProperty("STA_ASSOCIATE_ACCEPTED", kOSBooleanTrue);
 
-    IOLog("AirPortRTW: ASSOCIATE internal-RSN ssid=%s secure=%d keylen=%u ret=0x%x\n",
-          ssid, secure, d->ad_key.key_len, ret);
+    IOLog("AirPortRTW: ASSOCIATE enterprise=%d secure=%d keylen=%u ret=0x%x\n",
+          enterprise, secure, d->ad_key.key_len, ret);
     return ret;
 }
 
@@ -2787,6 +2962,15 @@ IOReturn AirPortRTW::handleCIPHER_KEY(struct apple80211_key *key)
 
     if (key->key_cipher_type == APPLE80211_CIPHER_NONE)
         return kIOReturnSuccess;
+
+    if (key->key_cipher_type == RTW88Enterprise::AppleMsk ||
+        key->key_cipher_type == APPLE80211_CIPHER_PMK) {
+        // No cache/preauthentication in beta 1. Bind material to the current STA.
+        IOReturn ret = _ieee80211->cmdInstallEnterprisePMK(key->key, key->key_len,
+                                                         key->key_ea.octet);
+        setProperty("STA_ENTERPRISE_PMK_RET", (uint64_t)(uint32_t)ret, 32);
+        return ret;
+    }
 
     uint32_t cipher = 0;
     switch (key->key_cipher_type) {
@@ -3155,6 +3339,7 @@ IOReturn AirPortRTW::handlePOWER(bool set, struct apple80211_power_data *d)
 
 SInt32 AirPortRTW::stopDMA()
 {
+    if (_ieee80211 && !_dmaStopped) _ieee80211->flushTxBatch();
     /* This callback can run with the IO80211 command gate held. Do not join
      * workers or recursively disable the interface here: they may need that
      * same gate. Fence device DMA before acknowledging the request. Rings stay
@@ -3194,6 +3379,21 @@ UInt32 AirPortRTW::getDataQueueDepth(OSObject *)
 
 IOReturn AirPortRTW::outputStart(IONetworkInterface *interface, IOOptionBits options)
 {
+    if (interface != _netif || !getCommandGate())
+        return super::outputStart(interface, options);
+    return getCommandGate()->runAction(
+        [](OSObject *owner, void *iface, void *opts, void *, void *) -> IOReturn {
+            return static_cast<AirPortRTW *>(owner)->outputStartBatched(
+                static_cast<IONetworkInterface *>(iface), (IOOptionBits)(uintptr_t)opts);
+        }, interface, (void *)(uintptr_t)options);
+}
+
+IOReturn AirPortRTW::outputStartBatched(IONetworkInterface *interface, IOOptionBits options)
+{
+    if(_ieee80211)_ieee80211->recordTxEvent(RTW88Lifecycle::StartCalls);
+    if (_shutdown || _pmTransition || _dmaStopped || !_ieee80211 || !_ieee80211->isPowered())
+        return kIOReturnNotReady;
+    RTW88TxBatchScope<RTW88IEEE80211> batch(_ieee80211);
     if (interface && interface == _netif && txGateWanted()) {
         __atomic_store_n(&_txGated, true, __ATOMIC_SEQ_CST);
         _txGateCount++;
@@ -3208,19 +3408,32 @@ IOReturn AirPortRTW::outputStart(IONetworkInterface *interface, IOOptionBits opt
 
 bool AirPortRTW::txGateWanted()
 {
+    if (_ieee80211 && _ieee80211->staTxBlockedByAWDL()) {
+        _ieee80211->recordTxEvent(RTW88Lifecycle::GateAWDLChecks);return true;
+    }
+    if (_ieee80211 && _ieee80211->staTxBlockedByScan()) {
+        _ieee80211->recordTxEvent(RTW88Lifecycle::GateScanChecks);return true;
+    }
     /* A stalled queue cannot drain, so anything pulled now only waits in
      * (or tail-drops from) the 256-entry family queue. Open again only once
      * resumeTxIfStalled()/releaseTxStall() has cleared the stall at
      * kRTW88TxResumeAvail, which gives the gate the stall's hysteresis. */
     if (__atomic_load_n(&_txStalled, __ATOMIC_SEQ_CST) ||
-        rtw88_be_tx_avail() < kRTW88TxStallAvail)
+        rtw88_be_tx_avail() < kRTW88TxStallAvail) {
+        if(_ieee80211)_ieee80211->recordTxEvent(RTW88Lifecycle::GateRingChecks);
         return true;
+    }
     IOOutputQueue *q = getOutputQueue();
-    return q && q->getSize() >= kRTW88TxQueueHigh;
+    if(q && q->getSize() >= kRTW88TxQueueHigh) {
+        if(_ieee80211)_ieee80211->recordTxEvent(RTW88Lifecycle::GateDepthChecks);
+        return true;
+    }
+    return false;
 }
 
 void AirPortRTW::kickGatedOutput()
 {
+    if (_ieee80211 && (_ieee80211->staTxBlockedByScan() || _ieee80211->staTxBlockedByAWDL())) return;
     if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
@@ -3645,6 +3858,12 @@ void AirPortRTW::rtw88Event(RTW88Event ev, void *data)
     case kRTW88EventDisconnected:
         setProperty("STA_DISCONNECTED_EVENT", kOSBooleanTrue);
         postSTALinkChanged(false, _ieee80211 ? _ieee80211->deauthReason() : 0);
+        break;
+    case kRTW88EventHandshakeDone:
+        if (!_rsnHandshakeReported && _ieee80211 && _ieee80211->externalKeysReady()) {
+            _rsnHandshakeReported = true;
+            _netif->postMessage(APPLE80211_M_RSN_HANDSHAKE_DONE);
+        }
         break;
     case kRTW88EventRSSIChanged:   _netif->postMessage(APPLE80211_M_LINK_QUALITY); break;
     default: break;

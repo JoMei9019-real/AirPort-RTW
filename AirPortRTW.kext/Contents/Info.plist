@@ -15,13 +15,13 @@
 	<key>CFBundleDisplayName</key>
 	<string>AirPortRTW for RTL88xx</string>
 	<key>CFBundleGetInfoString</key>
-	<string>AirPortRTW 1.0.2 — experimental RTL8814AE, link-event ABI and sleep/wake fixes</string>
+	<string>AirPortRTW 1.1.0 — automatic roaming and connection diagnostics; experimental k/v roaming; no Fast Transition</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.2</string>
+	<string>1.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.2</string>
+	<string>1.1.0</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>MacOSX</string>
@@ -33,7 +33,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>GPL-2.0 OR BSD-3-Clause</string>
 	<key>OSBundleCompatibleVersion</key>
-	<string>1.0.2</string>
+	<string>1.1.0</string>
 	<key>OSBundleRequired</key>
 	<string>Network-Root</string>
 	<key>OSBundleLibraries</key>
@@ -118,6 +118,12 @@
 			<string>IOPCIDevice</string>
 			<key>IOPCIMatch</key>
 			<string>0xC82110EC 0xB82110EC</string>
+			<key>RoamingAssistEnabled</key>
+			<true/>
+			<key>RoamingSwitchEnabled</key>
+			<true/>
+			<key>RoamingAutoEnabled</key>
+			<true/>
 		</dict>
 	</dict>
 </dict>

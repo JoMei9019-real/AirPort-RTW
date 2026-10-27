@@ -47,6 +47,7 @@ struct Map { uint64_t getLength(){return 4096;} };
 struct Compat { uint64_t resource[3]={},resource_len[3]={}; };
 struct RTW88StateResult { int state=0,rssi=-55; };
 struct Backend { bool powered=false,visible=false,voluntary=true; int powerResult=0;
+ void beginWakeTrace(){} void wakeTrace(const char*){}
  IOReturn cmdPowerOn(){if (!powerResult)powered=true;return powerResult;}
  bool isPowered(){return powered;} bool associatedVisible(){return visible;}
  bool disconnectIsVoluntary(){return voluntary;}
