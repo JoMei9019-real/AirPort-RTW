@@ -1,0 +1,21 @@
+name: WPA3 experimental backend
+on:
+  push:
+    branches: [1.0.0-beta]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sae:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify provenance, crypto vectors, exchanges and memory safety
+        env:
+          SAE_HOST_SANITIZE: '1'
+        run: python3 experimental/wpa3/test_host.py

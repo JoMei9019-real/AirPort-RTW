@@ -85,6 +85,7 @@ struct RTW88IEEE80211 {
  void roamTrace(const char*,uint32_t=0){}
  bool _roamingAssistEnabled=false,_roamingCapsValid=false;
  bool _powered=true,_associatedVisible=true,_awdlOffChannel=false;
+ bool _saeMode=false;
  bool _wpa2=true,_enterprise=false,_externalSupplicant=false,canceled=false;
  int _state=RTW88_STATE_CONNECTED;
  Parent parent;Parent *_parent=&parent;

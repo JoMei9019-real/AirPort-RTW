@@ -15,13 +15,13 @@
 	<key>CFBundleDisplayName</key>
 	<string>AirPortRTW for RTL88xx</string>
 	<key>CFBundleGetInfoString</key>
-	<string>AirPortRTW 1.1.0 — automatic roaming and connection diagnostics; experimental k/v roaming; no Fast Transition</string>
+	<string>AirPortRTW 1.2.0-beta.4 — WPA3 software CCMP performance</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.0</string>
+	<string>1.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.0</string>
+	<string>1.2.0b4</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>MacOSX</string>
