@@ -36,6 +36,7 @@ assert 'key->key_cipher_type == RTW88Enterprise::AppleMsk' in controller
 assert 'RTW88Enterprise::auth(' in controller
 pre = r'''
 #include "RTW88Enterprise.hpp"
+#include "RTW88WPA3.hpp"
 #include "RTW88Lifecycle.hpp"
 #include <cassert>
 #include <cstring>
@@ -59,7 +60,7 @@ int mbuf_copyback(mbuf_t p,size_t o,size_t n,const void* src,int){
  memcpy(p->bytes.data()+o,src,n);return 0;}
 struct Parent { int injected=0; mbuf_t allocateInputPacket(size_t n){return new Packet{std::vector<uint8_t>(n)};}
  void injectRxFrame(mbuf_t p){++injected;delete p;} void setLinkStatus(unsigned){} };
-struct ieee80211_key_conf { uint8_t key[32]; uint8_t keyidx=0,keylen=0; };
+struct ieee80211_key_conf { uint8_t key[32]; uint8_t keyidx=0,keylen=0,hw_key_idx=0; };
 constexpr uint32_t WLAN_CIPHER_SUITE_CCMP=0x000fac04,WLAN_CIPHER_SUITE_TKIP=0x000fac02;
 constexpr int kMillisecondScale=1,kRTW88EventHandshakeDone=6;
 struct Timer { void cancelTimeout(){} void wakeAtTime(uint64_t){} };
@@ -82,6 +83,7 @@ struct RTW88IEEE80211 {
  void recordTxEvent(unsigned i){++_queueTrace.events[i];}
  bool staTxBlockedByScan()const{return _state==RTW88_STATE_SCANNING&&_scanReturnState==RTW88_STATE_CONNECTED&&_manualScanChannelCount&&!_manualScanOnHomeChannel;}
  uint32_t _roamDataRx=0;void roamTrace(const char*,uint32_t=0){}
+ bool _saeMode=false;struct {bool authorized=false;} _sae;void clearWPA3(){}void wpa3Eapol(const uint8_t*,uint32_t){}
  bool _powered=true,_associatedVisible=true,_enterprise=true,_enterpriseAuthorized=false;
  bool _externalSupplicant=true,_wpa2=true,_externalPTKInstalled=false,_externalGTKInstalled=false;
  bool _pmkProvided=false,_internalEapolTx=false,_rxCcmpIvSkipLogged=false,_snonceValid=false;
@@ -191,8 +193,9 @@ int main(){
  assert(b.externalKeysReady()&&b._state==RTW88_STATE_CONNECTED&&b.delegate.done==1);
  assert(b.outputPacket(packet(0x800))==0);
  b.deliverEthernet(zero,zero,0x800,identity,sizeof(identity));assert(parent.injected==2);
- b.clearKeys();
+ memset(b._password,0x5a,sizeof(b._password));b.clearKeys();
  for(auto x:b._pmk)assert(x==0);
+ for(auto x:b._password)assert(x==0);
  assert(!b._enterprise&&!b._enterpriseAuthorized&&!b._pmkProvided&&!b._ptkConf&&!b._gtkConf);
  assert(b.installEnterprisePMKGated(pmk,32,zero)==kIOReturnNotReady);
  // Existing Personal/open data behavior and external callback order preserved.

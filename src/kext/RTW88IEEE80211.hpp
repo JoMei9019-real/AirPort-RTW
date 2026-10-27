@@ -19,6 +19,7 @@
 #include <net/ethernet.h>
 #include <kern/thread_call.h>
 #include "RTW88Roaming.hpp"
+#include "RTW88WPA3.hpp"
 #include "RTW88RRM.hpp"
 #include "RTW88Lifecycle.hpp"
 #include "RTW88RoamSwitch.hpp"
@@ -230,7 +231,7 @@ public:
     bool associatedVisible() const { return _associatedVisible; }
     IOReturn  cmdScan(uint16_t roamChannel = 0);
     IOReturn  cmdConnect(const char *ssid, const char *password, const uint8_t *pmk = nullptr,
-                         const uint8_t *bssid = nullptr, bool externalSupplicant = false);
+                         const uint8_t *bssid = nullptr, bool externalSupplicant = false, bool sae = false);
     IOReturn  cmdInstallExternalKey(bool pairwise, uint8_t keyidx, uint32_t cipher,
                                     const uint8_t *key, uint8_t key_len);
     bool      externalKeysReady() const { return _enterprise ? _enterpriseAuthorized :
@@ -246,6 +247,13 @@ public:
     IOReturn copyScanBSS(uint32_t index, RTW88BSS *out);
     IOReturn copyCurrentBSS(RTW88BSS *out);
     IOReturn copyChannels(RTW88Channel *out, uint32_t capacity, uint32_t *count);
+    IOReturn cmdConnectSAE(const char *,const char *,const uint8_t *);
+    unsigned saeStage() const { return _sae.stage; }
+    unsigned saeError() const { return _sae.error; }
+    bool saeActive() const { return _saeMode; }
+    bool saeRoamingEnabled() const { return _saeMode && _roamingAssistEnabled && _roamSwitchEnabled && _autoRoamEnabled; }
+    bool matchesSAETarget(const char *,const uint8_t *) const;
+    bool bssOffersSAE(const char *,const uint8_t *);
     IOReturn  cmdDisconnect();
     IOReturn  cmdPowerOn();
     IOReturn  cmdPowerOff();
@@ -319,7 +327,7 @@ private:
     void resetRoamingState();
     bool roamingActionsReady() const;
     bool sendRoamingAction(const uint8_t *body, uint32_t length);
-    void handleRoamingAction(const uint8_t *frame, uint32_t length, uint64_t nowMs);
+    void handleRoamingAction(const uint8_t *frame, uint32_t length, uint64_t nowMs, bool pmfVerified=false);
     IOReturn roamDecision(unsigned reason, IOReturn result);
     IOReturn validateRoam(const uint8_t *bssid, uint64_t nowMs, bool scanOnly);
     unsigned roamBSSReason(const RTW88BSS &bss, uint64_t nowMs) const;
@@ -352,6 +360,14 @@ private:
     bool      buildAssocReq(uint8_t *buf, uint32_t *len);
     bool      buildAuthReq(uint8_t *buf, uint32_t *len);
 
+    bool wpa3Auth();
+    void wpa3ReceiveAuth(const uint8_t *, uint32_t);
+    void wpa3Eapol(const uint8_t *, uint32_t);
+    bool wpa3Mgmt(struct sk_buff *, bool &);
+    bool wpa3TxMgmt(const uint8_t *, uint32_t);
+    void clearWPA3();
+    RTW88WPA3::Session _sae;
+    bool _saeMode = false, _deferredSAE = false;
     /* WPA2 4-way handshake */
     void      handleEAPOL(const uint8_t *data, uint32_t len);
     bool      deriveKeys(const uint8_t *anonce, const uint8_t *snonce);
@@ -592,6 +608,7 @@ private:
     RTW88Roaming::BtmRequest _btmRequest;
     uint8_t _btmSource[6]={},_btmTarget[6]={};
     uint64_t _btmDeadline=0,_btmAckDeadline=0,_btmReplyIdentity=0,_btmAckIdentity=0;
+    RTW88Roaming::BtmProtectedReceipt _btmProtectedReceipt;
     uint32_t _btmScanGeneration=0,_btmLastStatus=255,_btmLastResponseToken=0;
     bool _btmScanned=false;
     const char *_btmStage="idle";

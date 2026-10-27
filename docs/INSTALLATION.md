@@ -1,3 +1,7 @@
+> For the experimental 1.2.0 Beta 5 menu test, follow
+> [the beta instructions](../RELEASE_1_2_0_BETA_5.md). The instructions below
+> describe the stable 1.1.0 setup and its legacy Wi-Fi dependencies.
+
 # Installation with OpenCore
 
 AirPort-RTW targets x86_64 Hackintosh systems using the Ventura-era Apple Wi-Fi

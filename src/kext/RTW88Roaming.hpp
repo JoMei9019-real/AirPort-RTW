@@ -206,6 +206,32 @@ inline uint64_t btmIdentity(uint16_t sequence,const uint8_t *ap) {
     for(unsigned i=0;i<6;++i)id|=uint64_t(ap[i])<<(8*i);
     return id;
 }
+// The TX completion contains ciphertext on a PMF link. Bind an acceptance
+// before submission, then match its header identity AND CCMP packet number;
+// never decrypt our own TX frame or parse ciphertext as an action body.
+struct BtmProtectedReceipt {
+    uint64_t identity=0,number=0;
+    void clear(){__atomic_store_n(&identity,0ULL,__ATOMIC_RELEASE);__atomic_store_n(&number,0ULL,__ATOMIC_RELAXED);}
+    bool record(const uint8_t*f,size_t n,uint64_t expected,uint64_t pn){
+        if(!f || n!=35 || (RTW88Enterprise::le16(f)&0xc7ff)!=0xd0 ||
+           f[24]!=10 || f[25]!=8 || f[27]!=0 || !pn || pn>0xffffffffffffULL ||
+           !expected || btmIdentity(RTW88Enterprise::le16(f+22)>>4,f+4)!=expected)return false;
+        __atomic_store_n(&identity,0ULL,__ATOMIC_RELEASE);
+        __atomic_store_n(&number,pn,__ATOMIC_RELAXED);
+        __atomic_store_n(&identity,expected,__ATOMIC_RELEASE);return true;
+    }
+    bool matches(const uint8_t*f,size_t n)const{
+        const uint64_t id=__atomic_load_n(&identity,__ATOMIC_ACQUIRE);
+        const uint64_t pn=__atomic_load_n(&number,__ATOMIC_RELAXED);
+        if(!f || n!=51 || !id || !pn ||
+           (RTW88Enterprise::le16(f)&0xc7ff)!=0x40d0 || (f[22]&15) ||
+           btmIdentity(RTW88Enterprise::le16(f+22)>>4,f+4)!=id ||
+           f[26] || f[27]!=0x20)return false;
+        const uint8_t p[]={f[24],f[25],f[28],f[29],f[30],f[31]};
+        uint64_t seen=0;for(unsigned i=0;i<6;++i)seen|=uint64_t(p[i])<<(8*i);
+        return seen==pn;
+    }
+};
 inline uint64_t btmLifetimeMs(const BtmRequest &request,unsigned beaconTU) {
     if(!beaconTU || !request.validity)return 0;
     uint64_t lifetime=uint64_t(request.validity)*beaconTU*1024/1000;

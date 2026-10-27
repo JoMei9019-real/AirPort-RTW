@@ -1,8 +1,15 @@
-# Roaming in AirPort-RTW 1.1.0
+# Roaming in AirPort-RTW 1.2.0 Beta 5
 
 Roaming means switching between access points on the same Wi-Fi network.
 For example, your laptop can move from one repeater to another as you walk
 through your home. No extra app is needed.
+
+WPA3 roaming is experimental in Beta 5. Every target must offer SAE,
+CCMP and PMF, including on transition networks. WPA2-only repeaters are
+skipped. Each switch performs fresh SAE authentication and key negotiation;
+it can interrupt traffic for several seconds. Hardware validation is pending.
+The password stays only in kernel memory while the profile is active so SAE
+can authenticate another AP; disconnect, power-off and teardown erase it.
 
 ## How it works
 
@@ -41,7 +48,7 @@ Open Terminal and run:
 ioreg -r -c AirPortRTW -l | grep DriverBuild
 ```
 
-For this release, the result should show `1.1.0`.
+For this release, the result should show `1.2.0-beta.5`.
 
 ## Try roaming
 
@@ -82,7 +89,7 @@ and Beacon Measurement replies still need testing with more hardware.
 - Reconnecting after sleep can be slow. Deep sleep and hibernation are not
   fully validated on all systems.
 - WPA2-Enterprise is experimental and has not been verified on hardware.
-  WPA3, PMF and 802.11r are not supported.
+  Enterprise roaming and 802.11r are not implemented.
 
-See the [release notes](../RELEASE_1_1_0.md) for the full release scope and
+See the [release notes](../RELEASE_1_2_0_BETA_5.md) for the full release scope and
 the [installation guide](INSTALLATION.md) for setup.

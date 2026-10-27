@@ -2,7 +2,7 @@ name: Native AirPort build
 
 on:
   push:
-    branches: [main, native-airport-integration, 1.0.0-beta]
+    branches: [main, native-airport-integration]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   build:
+    if: github.ref != 'refs/heads/1.0.0-beta' && github.head_ref != '1.0.0-beta'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

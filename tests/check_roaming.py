@@ -35,7 +35,8 @@ assert 'setProperty("ROAM_R_FT_ENABLED", kOSBooleanFalse)' in controller
 assoc = method('bool RTW88IEEE80211::buildAssocReq(')
 assert 'if (requestRrm || _rm.advertised) cap |= 0x1000' in assoc
 assert '(_rm.advertised?0x70:0)' in assoc
-assert 'roamCaps.neighborReport && !roamCaps.pmfRequired' in assoc
+assert 'roamCaps.neighborReport && managementSupported' in assoc
+assert 'managementSupported=_saeMode || !roamCaps.pmfRequired' in assoc
 assert 'WLAN_EID_MOBILITY_DOMAIN' not in assoc and 'WLAN_EID_FAST_BSS_TRANSITION' not in assoc
 diag = controller[controller.index('void AirPortRTW::diagnosticsTimerFired('):
                   controller.index('void AirPortRTW::waitForDiagnosticsIdle()')]
@@ -74,6 +75,7 @@ struct RTW88IEEE80211 {
  bool _stationBTM=false;unsigned _btmPhase=0;BtmRequest _btmRequest;
  uint8_t _btmSource[6]={},_btmTarget[6]={};
  uint64_t _btmDeadline=0,_btmAckDeadline=0,_btmReplyIdentity=0,_btmAckIdentity=0;
+ BtmProtectedReceipt _btmProtectedReceipt;
  uint32_t _btmScanGeneration=0,_btmLastStatus=255,_btmLastResponseToken=0;bool _btmScanned=false;const char *_btmStage="idle";
  void cancelBTM(const char*){_btmPhase=0;}
  void queueBtm(const BtmRequest&,uint64_t){}
@@ -85,6 +87,9 @@ struct RTW88IEEE80211 {
  void roamTrace(const char*,uint32_t=0){}
  bool _roamingAssistEnabled=false,_roamingCapsValid=false;
  bool _powered=true,_associatedVisible=true,_awdlOffChannel=false;
+ bool _saeMode=false;
+ struct {bool authorized=true,pending=false;} _sae;
+ char _password[64]={};
  bool _wpa2=true,_enterprise=false,_externalSupplicant=false,canceled=false;
  int _state=RTW88_STATE_CONNECTED;
  Parent parent;Parent *_parent=&parent;
@@ -102,7 +107,7 @@ struct RTW88IEEE80211 {
  }
  void resetRoamingState();bool roamingActionsReady()const;
  bool sendRoamingAction(const uint8_t*,uint32_t);
- void roamingTick(uint64_t);void handleRoamingAction(const uint8_t*,uint32_t,uint64_t);
+ void roamingTick(uint64_t);void handleRoamingAction(const uint8_t*,uint32_t,uint64_t,bool=false);
 };
 '''
 cases = r'''
