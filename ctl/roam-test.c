@@ -192,6 +192,7 @@ static void usage(void) {
          "sudo rtw88-roam --roam BSSID        (discover + switch to explicit target)\n"
          "sudo rtw88-roam BSSID               (switch using existing data)\n"
          "sudo rtw88-roam --log-level off|normal|verbose\n"
+         "sudo rtw88-roam --awdl-hops off|on  (live RF-hop policy; resets on reboot)\n"
          "Acceptance/local keys do not prove AP acceptance or working IP traffic.");
 }
 int main(int argc,char **argv) {
@@ -211,6 +212,9 @@ int main(int argc,char **argv) {
     else if(argc>=2&&!strcmp(argv[1],"--watch")) {
         char *end=NULL;unsigned long duration=argc==3?strtoul(argv[2],&end,10):60;
         if(duration>=1&&duration<=3600&&(argc==2||(*argv[2]&&!end[0])))result=watch((unsigned)duration);
+    } else if(argc==3&&!strcmp(argv[1],"--awdl-hops")) {
+        const char *name=!strcmp(argv[2],"off")?"awdl-hops-off":!strcmp(argv[2],"on")?"awdl-hops-on":NULL;
+        if(name)result=command(name,NULL,1);
     } else if(argc==3&&!strcmp(argv[1],"--log-level")) {
         const char *name=!strcmp(argv[2],"off")?"log-off":!strcmp(argv[2],"normal")?"log-normal":!strcmp(argv[2],"verbose")?"log-verbose":NULL;
         if(name)result=command(name,NULL,1);

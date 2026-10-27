@@ -1,5 +1,21 @@
 # AirPort-RTW
 
+## 1.1.0 Beta 14: TX flow control and live AWDL comparison
+
+The early native output gate now includes AWDL off-channel ownership, matching
+the per-packet stall and queue-restart guards. Ownership is published before
+the connected AWDL retune settling delay. Additional TX counters show whether
+the early gate is exercised and when the queue resumes; no queue enlargement
+or unvalidated timing reduction is applied.
+Use `sudo ./rtw88-roam --awdl-hops off` / `on` to compare load on the same
+build without rebooting. Switching policy is privileged and PM-fenced; a busy
+scan/join/measurement returns Busy rather than stealing the radio. Off restores
+the AP channel before restarting the queue and denies further AWDL retunes.
+This can impair AWDL discovery/data on another channel. Infrastructure scans
+and roaming remain available. See [Beta 14 test procedure](BETA_1_1_0_14.md).
+The high-load queue-drop cause and the effectiveness of these changes still
+need hardware validation; this is not an RC or a confirmed packet-loss fix.
+
 ## 1.1.0 Beta 13: measurement/BTM coordination
 
 BTM can wait within the AP's deadline for an existing measurement/scan instead

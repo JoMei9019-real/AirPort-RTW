@@ -28,6 +28,7 @@ jobs:
           python3 tests/check_rrm.py
           python3 tests/check_lifecycle.py
           python3 tests/check_control_coordination.py
+          python3 tests/check_tx_flow.py
           python3 tests/check_stack_budget.py --self-test
       - name: Bootstrap dependencies
         run: ./scripts/bootstrap-deps.sh
@@ -43,8 +44,8 @@ jobs:
           plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
           file build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
           lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
-          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.13" in p["CFBundleGetInfoString"]; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAssistEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingSwitchEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAutoEnabled"] is True'
-          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.13-control-coordination"
+          python3 -c 'import plistlib; p=plistlib.load(open("build/out/AirPortRTW.kext/Contents/Info.plist", "rb")); assert p["CFBundleVersion"] == p["CFBundleShortVersionString"] == "1.1.0"; assert "1.1.0-beta.14" in p["CFBundleGetInfoString"]; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAssistEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingSwitchEnabled"] is True; assert p["IOKitPersonalities"]["AirPortRTW_8821CE"]["RoamingAutoEnabled"] is True'
+          strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "1.1.0-beta.14-tx-flow-control"
           build/out/rtw88-roam --help
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_K_REQUEST_SUBMITTED"
           strings build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW | grep -F "ROAM_R_FT_ENABLED"
@@ -63,10 +64,10 @@ jobs:
         run: |
           mkdir -p build/package
           cp -R build/out/AirPortRTW.kext build/package/
-          cp build/out/rtw88-roam BETA_1_1_0_13.md build/package/
+          cp build/out/rtw88-roam BETA_1_1_0_14.md build/package/
           python3 -c 'from pathlib import Path; p=Path("build/package"); assert (p/"AirPortRTW.kext/Contents/Info.plist").is_file(); assert not any(f.suffix in (".zip", ".tar", ".gz") for f in p.rglob("*") if f.is_file())'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-1.1.0-beta.13
+          name: AirPortRTW-1.1.0-beta.14
           path: build/package/

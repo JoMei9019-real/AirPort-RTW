@@ -191,6 +191,8 @@ public:
     bool staAssociatedForAWDL() const { return _associatedVisible && _state == RTW88_STATE_CONNECTED; }
     uint16_t infrastructureChannel() const { return _targetBSS.channel; }
     bool staTxBlockedByAWDL() const { return _awdlOffChannel; }
+    void setAWDLHopsDisabled(bool disabled) { _awdlHopsDisabled=disabled; }
+    IOReturn configureAWDLHops(bool disabled);
     bool staTxBlockedByScan() const { return _state==RTW88_STATE_SCANNING &&
         _scanReturnState==RTW88_STATE_CONNECTED && _manualScanChannelCount && !_manualScanOnHomeChannel; }
     void beginWakeTrace();
@@ -453,6 +455,9 @@ private:
     uint16_t            _awdlChannel = 0;
     uint16_t            _awdlPreparedChannel = 0;
     bool                _awdlOffChannel = false;
+    bool _awdlHopsDisabled=false;
+    uint32_t _awdlHopsBlocked=0,_awdlHopsPerformed=0;
+    uint32_t _awdlHopPolicyChanges=0;
     uint8_t             _awdlAddress[6] = {};
     uint8_t             _macAddr[6]   = {};
     uint32_t            _timeoutMs    = 0;

@@ -192,7 +192,8 @@ int main() {
 controller=(root/'src/kext/AirPortRTW.cpp').read_text()
 control=controller[controller.index('IOReturn AirPortRTW::setProperties('):controller.index('void AirPortRTW::waitForDiagnosticsIdle()')]
 assert control.index('clientHasPrivilege(')<control.index('_workLoop->runAction(')
-assert control.index('_diagnosticsInHardware,true')<control.index('->scanRoamTarget(')<control.index('_diagnosticsInHardware,false')
+scoped=control[control.index('} else if(request->operation!=5)'):]
+assert scoped.index('_diagnosticsInHardware,true')<scoped.index('->scanRoamTarget(')<scoped.index('_diagnosticsInHardware,false')
 assert 'IOSleep(' not in control and 'thread_call_cancel_wait' not in control
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'test.cpp').write_text(pre+methods+cases)

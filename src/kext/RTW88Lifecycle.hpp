@@ -28,7 +28,10 @@ struct BtmOutcome {
     uint8_t status=255;bool responseSubmitted=false;
     const char *stage="none";
 };
-enum TxEvent : unsigned {StallPower,StallScan,StallAWDL,StallRing,DropOffline,DropKeys,DropEncap,TxEvents};
+enum TxEvent : unsigned {
+    StallPower,StallScan,StallAWDL,StallRing,DropOffline,DropKeys,DropEncap,
+    Submitted,StartCalls,GateAWDLChecks,GateScanChecks,GateRingChecks,GateDepthChecks,QueueResumes,TxEvents
+};
 struct Queue {
     uint32_t events[TxEvents]={};
     uint64_t sampleMs=0,dropTotal=0,stallTotal=0,dropDelta=0,stallDelta=0;

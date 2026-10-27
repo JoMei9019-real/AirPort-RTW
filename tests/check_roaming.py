@@ -61,6 +61,8 @@ struct RTW88IEEE80211 {
  RTW88Lifecycle::BtmOutcome _btmOutcome;
  RTW88Lifecycle::BtmOutcome _btmIngress;uint32_t _btmDeferred=0;
  RTW88Lifecycle::Queue _queueTrace;
+ bool _awdlHopsDisabled=false;uint32_t _awdlHopsBlocked=0,_awdlHopsPerformed=0;
+ uint32_t _awdlHopPolicyChanges=0;
  void wakeTrace(const char*){}
  RTW88RRM::State _rm;
  void rrmReceive(const uint8_t*,uint32_t,uint64_t){}

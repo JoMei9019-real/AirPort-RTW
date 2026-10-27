@@ -1097,6 +1097,34 @@ void RTW88IEEE80211::restoreSTAChannelAfterAWDL()
     (void)txNullFunc(false);
 }
 
+IOReturn RTW88IEEE80211::configureAWDLHops(bool disabled)
+{
+    // Called on the controller workloop with the PM hardware fence held.
+    // Do not steal the PHY from a scan, authentication, measurement or roam.
+    if(!_parent || !_parent->roamingActionsAllowed() || !_powered || !_hw)
+        return kIOReturnNotReady;
+    if(_state!=RTW88_STATE_IDLE && _state!=RTW88_STATE_CONNECTED)
+        return kIOReturnBusy;
+    if(roamScanActive() || _roamSwitch.phase || _btmPhase || _rm.phase ||
+       __atomic_load_n(&_roamScanWorkerPending,__ATOMIC_ACQUIRE) ||
+       __atomic_load_n(&_authenticationWorkerActive,__ATOMIC_ACQUIRE))
+        return kIOReturnBusy;
+    if(_awdlHopsDisabled!=disabled)++_awdlHopPolicyChanges;
+    _awdlHopsDisabled=disabled;
+    if(disabled && _awdlOffChannel) {
+        restoreSTAChannelAfterAWDL();
+        if(_associatedVisible && (!_hw->conf.chandef.chan ||
+           _hw->conf.chandef.chan->hw_value!=_targetBSS.channel)) {
+            _awdlOffChannel=true; // keep STA output gated after a failed restore
+            roamTrace("awdl-home-restore-failed");
+            return kIOReturnNotReady;
+        }
+    }
+    if(disabled)_parent->scanTxReady(); // asynchronous queue/gate restart only
+    roamTrace(disabled?"awdl-hops-disabled":"awdl-hops-enabled");
+    return kIOReturnSuccess;
+}
+
 IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
 {
     // Explicit roaming owns the single PHY until scan/switch completion.
@@ -1105,6 +1133,13 @@ IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
         return kIOReturnBusy;
     if (!_powered || !_hw || !_hw->wiphy || channel == 0)
         return kIOReturnNotReady;
+    // Diagnostic boot policy: no AWDL retune, including idle discovery.
+    // Same-channel operation still goes through normal regulatory/state checks.
+    if(_awdlHopsDisabled && (!_hw->conf.chandef.chan ||
+       _hw->conf.chandef.chan->hw_value!=channel)) {
+        __atomic_add_fetch(&_awdlHopsBlocked,1U,__ATOMIC_RELAXED);
+        return kIOReturnBusy;
+    }
 
     struct ieee80211_channel *target = nullptr;
     for (int b = 0; b < NL80211_NUM_BANDS && !target; ++b) {
@@ -1146,12 +1181,15 @@ IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
 
         if (!txNullFunc(true))
             return kIOReturnNotReady;
+        // Publish off-channel ownership before the settling delay and retune.
+        _awdlOffChannel = true;
         IOSleep(6);
 
         _hw->conf.chandef.chan = target;
         _hw->conf.chandef.width = NL80211_CHAN_WIDTH_20_NOHT;
         _hw->conf.chandef.center_freq1 = target->center_freq;
         rtw88_awdl_timeslice_switch_channel(_hw);
+        __atomic_add_fetch(&_awdlHopsPerformed,1U,__ATOMIC_RELAXED);
         _awdlPreparedChannel = channel;
         _awdlOffChannel = true;
         return kIOReturnSuccess;
@@ -1169,6 +1207,7 @@ IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
     _hw->conf.chandef.width = NL80211_CHAN_WIDTH_20_NOHT;
     _hw->conf.chandef.center_freq1 = target->center_freq;
     rtw88_awdl_switch_channel(_hw);
+    __atomic_add_fetch(&_awdlHopsPerformed,1U,__ATOMIC_RELAXED);
     _awdlPreparedChannel = channel;
     return kIOReturnSuccess;
 }
@@ -1318,7 +1357,7 @@ UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)
 
     /* txDataFrame() encapsulates the Ethernet frame as an 802.11 data frame
      * and consumes (frees) the mbuf in all paths. */
-    if (txDataFrame(m)) return kIOReturnOutputSuccess;
+    if (txDataFrame(m)) {recordTxEvent(RTW88Lifecycle::Submitted);return kIOReturnOutputSuccess;}
     recordTxEvent(RTW88Lifecycle::DropEncap);
     return kIOReturnOutputDropped;
 }
@@ -5308,10 +5347,16 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
         (unsigned long long)_queueTrace.sampleMs,(unsigned long long)_queueTrace.dropTotal,
         (unsigned long long)_queueTrace.stallTotal,(unsigned long long)_queueTrace.dropDelta,
         (unsigned long long)_queueTrace.stallDelta,_queueTrace.queued,_queueTrace.state);
-    static const char *const txNames[]={"stall_power","stall_scan","stall_awdl","stall_ring","drop_offline","drop_keys","drop_encap"};
+    static const char *const txNames[]={"stall_power","stall_scan","stall_awdl","stall_ring","drop_offline","drop_keys","drop_encap",
+        "submitted","start_calls","gate_awdl_checks","gate_scan_checks","gate_ring_checks","gate_depth_checks","queue_resumes"};
+    static_assert(sizeof(txNames)/sizeof(txNames[0])==RTW88Lifecycle::TxEvents,"TX counter names");
     for(unsigned i=0;i<RTW88Lifecycle::TxEvents;++i)
         ROAM_APPEND("tx_%s=%u\n",txNames[i],__atomic_load_n(&_queueTrace.events[i],__ATOMIC_RELAXED));
     ROAM_APPEND("neighbor_unknown_class_hints=%u\n",roamingStat(RTW88Roaming::NeighborUnknownClass));
+    ROAM_APPEND("awdl_hops_disabled=%u\nawdl_hops_blocked=%u\nawdl_hops_performed=%u\n",
+        unsigned(_awdlHopsDisabled),__atomic_load_n(&_awdlHopsBlocked,__ATOMIC_RELAXED),
+        __atomic_load_n(&_awdlHopsPerformed,__ATOMIC_RELAXED));
+    ROAM_APPEND("awdl_hop_runtime_changes=%u\n",_awdlHopPolicyChanges);
     ROAM_APPEND("test_id=%u\nnow_ms=%llu\nstage=%s\nstage_age_ms=%lld\n",
         __atomic_load_n(&_roamTestID,__ATOMIC_RELAXED),(unsigned long long)nowMs,
         __atomic_load_n(&_roamStage,__ATOMIC_RELAXED),
