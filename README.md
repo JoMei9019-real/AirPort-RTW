@@ -19,7 +19,6 @@ They are separate from the current stable release.
 
 ## Supported hardware
 
-Check the card's **PCI device ID**, not just its product name.
 
 | Card | PCI vendor:device IDs | Status |
 | --- | --- | --- |
@@ -28,7 +27,7 @@ Check the card's **PCI device ID**, not just its product name.
 | RTL8822CE | `10ec:c822`, `10ec:c82f` | Supported |
 | RTL8814AE | `10ec:8813` | Experimental; hardware validation pending |
 
-Some tools call RTL8814AE “RTL8813AE”. RTL8812AE, USB and SDIO adapters are not
+RTL8812AE, USB and SDIO adapters are not
 supported. A listed PCI ID does not guarantee that every laptop configuration
 will work.
 
