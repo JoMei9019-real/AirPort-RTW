@@ -36,6 +36,7 @@ assert 'key->key_cipher_type == RTW88Enterprise::AppleMsk' in controller
 assert 'RTW88Enterprise::auth(' in controller
 pre = r'''
 #include "RTW88Enterprise.hpp"
+#include "RTW88WPA3.hpp"
 #include "RTW88Lifecycle.hpp"
 #include <cassert>
 #include <cstring>
@@ -59,7 +60,7 @@ int mbuf_copyback(mbuf_t p,size_t o,size_t n,const void* src,int){
  memcpy(p->bytes.data()+o,src,n);return 0;}
 struct Parent { int injected=0; mbuf_t allocateInputPacket(size_t n){return new Packet{std::vector<uint8_t>(n)};}
  void injectRxFrame(mbuf_t p){++injected;delete p;} void setLinkStatus(unsigned){} };
-struct ieee80211_key_conf { uint8_t key[32]; uint8_t keyidx=0,keylen=0; };
+struct ieee80211_key_conf { uint8_t key[32]; uint8_t keyidx=0,keylen=0,hw_key_idx=0; };
 constexpr uint32_t WLAN_CIPHER_SUITE_CCMP=0x000fac04,WLAN_CIPHER_SUITE_TKIP=0x000fac02;
 constexpr int kMillisecondScale=1,kRTW88EventHandshakeDone=6;
 struct Timer { void cancelTimeout(){} void wakeAtTime(uint64_t){} };
@@ -82,6 +83,7 @@ struct RTW88IEEE80211 {
  void recordTxEvent(unsigned i){++_queueTrace.events[i];}
  bool staTxBlockedByScan()const{return _state==RTW88_STATE_SCANNING&&_scanReturnState==RTW88_STATE_CONNECTED&&_manualScanChannelCount&&!_manualScanOnHomeChannel;}
  uint32_t _roamDataRx=0;void roamTrace(const char*,uint32_t=0){}
+ bool _saeMode=false;struct {bool authorized=false;} _sae;void clearWPA3(){}void wpa3Eapol(const uint8_t*,uint32_t){}
  bool _powered=true,_associatedVisible=true,_enterprise=true,_enterpriseAuthorized=false;
  bool _externalSupplicant=true,_wpa2=true,_externalPTKInstalled=false,_externalGTKInstalled=false;
  bool _pmkProvided=false,_internalEapolTx=false,_rxCcmpIvSkipLogged=false,_snonceValid=false;
@@ -118,6 +120,12 @@ mbuf_t packet(uint16_t type){auto p=new Packet{std::vector<uint8_t>(18)};p->byte
 int main(){
  using namespace RTW88Enterprise;
  auto e=rsn(),p=rsn(2);
+ assert(pskOnly(p.data(),p.size()));assert(!pskOnly(e.data(),e.size()));
+ auto groupTkip=p;groupTkip[7]=2;assert(pskOnly(groupTkip.data(),groupTkip.size()));
+ auto pureTkip=groupTkip;pureTkip[13]=2;assert(!pskOnly(pureTkip.data(),pureTkip.size()));
+ auto requiredPmf=p;requiredPmf[20]=0x40;assert(!pskOnly(requiredPmf.data(),requiredPmf.size()));
+ auto saeOnly=rsn(8);assert(!pskOnly(saeOnly.data(),saeOnly.size()));
+ for(size_t n=0;n<p.size();++n)assert(!pskOnly(p.data(),n));
  assert(selectedDot1x(e.data(),e.size())); assert(!selectedDot1x(p.data(),p.size()));
  assert(auth(1,4,0,e.data(),e.size())==Auth::Enterprise);
  assert(auth(1,32,0,e.data(),e.size())==Auth::Enterprise);
@@ -191,8 +199,9 @@ int main(){
  assert(b.externalKeysReady()&&b._state==RTW88_STATE_CONNECTED&&b.delegate.done==1);
  assert(b.outputPacket(packet(0x800))==0);
  b.deliverEthernet(zero,zero,0x800,identity,sizeof(identity));assert(parent.injected==2);
- b.clearKeys();
+ memset(b._password,0x5a,sizeof(b._password));b.clearKeys();
  for(auto x:b._pmk)assert(x==0);
+ for(auto x:b._password)assert(x==0);
  assert(!b._enterprise&&!b._enterpriseAuthorized&&!b._pmkProvided&&!b._ptkConf&&!b._gtkConf);
  assert(b.installEnterprisePMKGated(pmk,32,zero)==kIOReturnNotReady);
  // Existing Personal/open data behavior and external callback order preserved.
@@ -201,6 +210,17 @@ int main(){
  assert(b.cmdInstallExternalKey(false,1,Ccmp,pmk,16)==0);assert(!b.externalKeysReady());
  assert(b.cmdInstallExternalKey(true,0,Ccmp,pmk,16)==0);assert(b.externalKeysReady());
  b.clearKeys();
+ // Internal WPA2-Personal must stay invisible through M1, invalid M3 and
+ // failed M4. Only a successfully submitted M4 may publish the new link.
+ RTW88IEEE80211 personal;personal._enterprise=false;personal._externalSupplicant=false;
+ personal._pmkProvided=true;personal._associatedVisible=false;personal._state=RTW88_STATE_HANDSHAKING;
+ personal._parent=&parent;micValid=false;
+ personal.handleEAPOL(m1.data(),m1.size());assert(!personal._associatedVisible);
+ personal.handleEAPOL(m3.data(),m3.size());assert(!personal._associatedVisible);
+ micValid=true;personal.m4Submit=false;personal.handleEAPOL(m3.data(),m3.size());
+ assert(!personal._associatedVisible&&personal._state==RTW88_STATE_HANDSHAKING);
+ personal.m4Submit=true;personal.handleEAPOL(m3.data(),m3.size());
+ assert(personal._associatedVisible&&personal._state==RTW88_STATE_CONNECTED);personal.clearKeys();
  std::cout<<"PASS: RSN/auth fixtures+fuzz, EAPOL bounds, bound PMK lifecycle, actual TX/RX port gates, M3/M4 authorization sequencing and cleanup\n";
 }
 '''

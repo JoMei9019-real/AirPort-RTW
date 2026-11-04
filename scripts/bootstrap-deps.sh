@@ -15,7 +15,7 @@ if [ ! -d rtw88-stable/.git ]; then
   git clone https://github.com/thegwchr/rtw88-stable.git rtw88-stable
 fi
 
-# Beta 4 uses the reviewed PCIe-capable RTL8814A core.
+# Use the reviewed PCIe-capable RTL8814A core.
 RTW88_REV=d029a677c49266fad86750714eb5612becd134d3
 git -C rtw88-stable checkout --detach "$RTW88_REV"
 

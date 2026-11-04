@@ -1,0 +1,46 @@
+AirPort-RTW 1.2.0 - supported boot arguments
+==========================================
+
+No AirPort-RTW boot argument is required for normal use.
+These are the four driver-specific arguments read by the released kext.
+
+How to use them
+---------------
+Open EFI/OC/config.plist in your usual OpenCore configuration editor.
+Go to NVRAM > Add > 7C436110-AB2A-4BBB-A880-FE41995C9F82 > boot-args.
+Append the desired argument, separated from your existing arguments by a
+space. Save and restart. Keep your existing boot arguments.
+To undo a change, remove that argument and restart.
+Use the spelling shown below; these switches do not need '=1'.
+
+-rtwnoautoroam
+  Turns off automatic AP switching. Normal Wi-Fi connections still work.
+  Default without this argument: automatic roaming is enabled.
+
+-rtwsaeswccmp
+  Uses software pairwise CCMP encryption for WPA3 instead of the card's
+  hardware. This is a diagnostic option for WPA3 data-connection problems;
+  it can reduce speed and increase CPU use. WPA3 and PMF remain selected.
+  Default: hardware pairwise CCMP; group traffic and PMF use software.
+  This option does not force WPA3 or change a WPA2 connection to WPA3.
+
+-rtwswscan
+  Forces software scanning instead of firmware scan offload.
+  Intended for diagnosing scan problems. A card already using software
+  scanning may behave the same with or without this switch. Connected
+  roaming scans already use the bounded software path.
+  Default: use the driver's normal scan selection and fallback.
+
+-rtwnoawdlhop
+  Disables AWDL off-channel hopping while the station is connected.
+  Intended for diagnosing traffic interruptions during AWDL activity.
+  It does not disable ordinary Wi-Fi or automatic roaming.
+  Default: the driver's normal AWDL channel-hop policy is allowed.
+  AirDrop and full Continuity are not supported by this release.
+
+Example: to turn off automatic roaming, add only -rtwnoautoroam to your
+existing boot-args. Avoid enabling all diagnostic switches together: change
+one option at a time so you can tell which one affects the problem.
+
+Other OpenCore, macOS and dependency-kext arguments are outside this list.
+There is no driver boot argument that guarantees WPA3 on every auto-join.

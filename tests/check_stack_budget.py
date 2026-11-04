@@ -9,7 +9,8 @@ import re
 import subprocess
 import sys
 
-BUDGETS = {'10AirPortRTW17apple80211Request': 256,
+BUDGETS = {'10AirPortRTW16apple80211_ioctlE': 640,
+           '10AirPortRTW17apple80211Request': 256,
            '10AirPortRTW25handleRequestCOUNTRY_CODE': 256}
 
 def frame_bytes(instructions):

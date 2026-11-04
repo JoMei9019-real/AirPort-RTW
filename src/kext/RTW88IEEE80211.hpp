@@ -19,6 +19,7 @@
 #include <net/ethernet.h>
 #include <kern/thread_call.h>
 #include "RTW88Roaming.hpp"
+#include "RTW88WPA3.hpp"
 #include "RTW88RRM.hpp"
 #include "RTW88Lifecycle.hpp"
 #include "RTW88RoamSwitch.hpp"
@@ -46,6 +47,8 @@ enum RTW88Event {
 class RTW88EventDelegate {
 public:
     virtual void rtw88Event(RTW88Event ev, void *data) = 0;
+    // Return true when consumed/deferred. Default preserves non-AirPort clients.
+    virtual bool deferWorkerEvent(RTW88Event, uint32_t, uint32_t) { return false; }
     virtual ~RTW88EventDelegate() {}
 };
 
@@ -222,6 +225,7 @@ public:
     void      rxFrame(struct sk_buff *skb);
     void      txStatus(struct sk_buff *skb);
     void      scanDone(bool aborted);
+    void resumeDeferredJoin();
 
     /* Control interface — called from RTW88UserClient */
     uint32_t deauthReason() const { return _deauthReason; }
@@ -230,7 +234,7 @@ public:
     bool associatedVisible() const { return _associatedVisible; }
     IOReturn  cmdScan(uint16_t roamChannel = 0);
     IOReturn  cmdConnect(const char *ssid, const char *password, const uint8_t *pmk = nullptr,
-                         const uint8_t *bssid = nullptr, bool externalSupplicant = false);
+                         const uint8_t *bssid = nullptr, bool externalSupplicant = false, bool sae = false);
     IOReturn  cmdInstallExternalKey(bool pairwise, uint8_t keyidx, uint32_t cipher,
                                     const uint8_t *key, uint8_t key_len);
     bool      externalKeysReady() const { return _enterprise ? _enterpriseAuthorized :
@@ -246,6 +250,22 @@ public:
     IOReturn copyScanBSS(uint32_t index, RTW88BSS *out);
     IOReturn copyCurrentBSS(RTW88BSS *out);
     IOReturn copyChannels(RTW88Channel *out, uint32_t capacity, uint32_t *count);
+    IOReturn cmdConnectSAE(const char *,const char *,const uint8_t *);
+    unsigned saeStage() const { return _sae.stage; }
+    unsigned saeError() const { return _sae.error; }
+    unsigned saeRejectionStatus() const;
+    bool saeActive() const { return _saeMode; }
+    bool joinCancelled() const { return authenticationCancelled(); }
+    bool saeHardwareCCMP() const;
+    void setSAESoftwareCCMP(bool enabled) { _saeSoftwareCCMP=enabled; }
+    void setSoftwareScan(bool enabled) { _forceSoftwareScan=enabled; }
+    void maintainTxAggregation(uint64_t nowMs);
+    bool saeRoamingEnabled() const { return _saeMode && _roamingAssistEnabled && _roamSwitchEnabled && _autoRoamEnabled; }
+    bool matchesSAETarget(const char *,const uint8_t *) const;
+    bool matchesSAEJoin(const char *,const char *,const uint8_t *) const;
+    bool matchesPSKPasswordJoin(const char *,const char *,const uint8_t *) const;
+    bool bssOffersSAE(const char *,const uint8_t *);
+    bool bssOffersPSKOnly(const char *,const uint8_t *);
     IOReturn  cmdDisconnect();
     IOReturn  cmdPowerOn();
     IOReturn  cmdPowerOff();
@@ -319,7 +339,7 @@ private:
     void resetRoamingState();
     bool roamingActionsReady() const;
     bool sendRoamingAction(const uint8_t *body, uint32_t length);
-    void handleRoamingAction(const uint8_t *frame, uint32_t length, uint64_t nowMs);
+    void handleRoamingAction(const uint8_t *frame, uint32_t length, uint64_t nowMs, bool pmfVerified=false);
     IOReturn roamDecision(unsigned reason, IOReturn result);
     IOReturn validateRoam(const uint8_t *bssid, uint64_t nowMs, bool scanOnly);
     unsigned roamBSSReason(const RTW88BSS &bss, uint64_t nowMs) const;
@@ -345,6 +365,7 @@ private:
     void      releaseSta();
     bool      abortActiveScan(bool waitForIdle);
     void      restoreConnectedChannel();
+    bool      cachedJoinTargetReady(const char *,const uint8_t *,bool);
     bool      installKey(struct ieee80211_key_conf **slot, bool pairwise,
                          uint8_t keyidx, uint32_t cipher,
                          const uint8_t *tk, uint8_t tk_len);
@@ -352,6 +373,16 @@ private:
     bool      buildAssocReq(uint8_t *buf, uint32_t *len);
     bool      buildAuthReq(uint8_t *buf, uint32_t *len);
 
+    bool wpa3Auth();
+    void wpa3ReceiveAuth(const uint8_t *, uint32_t);
+    void wpa3Eapol(const uint8_t *, uint32_t);
+    bool wpa3Mgmt(struct sk_buff *, bool &);
+    bool wpa3RxData(struct sk_buff*);
+    bool wpa3InstallPairwise();
+    bool wpa3TxMgmt(const uint8_t *, uint32_t);
+    void clearWPA3();
+    RTW88WPA3::Session _sae;
+    bool _saeMode = false, _deferredSAE = false;
     /* WPA2 4-way handshake */
     void      handleEAPOL(const uint8_t *data, uint32_t len);
     bool      deriveKeys(const uint8_t *anonce, const uint8_t *snonce);
@@ -427,11 +458,10 @@ private:
     IOLock             *_lock         = nullptr;
 
     RTW88State          _state        = RTW88_STATE_IDLE;
-    /* Persistent IO80211 RUN latch.  net80211 (the reference IO80211 driver) keeps its
-     * infrastructure state at IEEE80211_S_RUN from association completion
-     * until a real deauth/disconnect.  rtw88 has extra transient internal
-     * states, so keep that externally-visible RUN fact separately instead of
-     * making SSID/BSSID/CHANNEL queries depend on a momentary backend state. */
+    /* Persistent IO80211 RUN latch: internal WPA2/SAE sets it only after
+     * key installation and M4 submission; Apple RSN needs it at raw association
+     * for its EAPOL socket, and open links are immediately usable. Preserve
+     * it across connected scans, and clear it on a real disconnect/new join. */
     bool                _associatedVisible = false;
     bool                _connectCancelled = true;
     uint32_t            _deauthReason = 0;
@@ -539,6 +569,10 @@ private:
     uint8_t  _connChanWidth = 20;  /* negotiated operating width: 20/40/80 MHz */
     uint8_t  _baDialog   = 0;      /* rolling ADDBA-request dialog token       */
     bool     _txBaPending = false;
+    unsigned _txBaAttempts = 0, _txBaLastStatus = 0xffff;
+    uint64_t _txBaRetryMs = 0;
+    bool _saeSoftwareCCMP = false, _forceSoftwareScan = false;
+    uint32_t _saeHwTx = 0, _saeHwRx = 0, _saeSwRx = 0, _saeRxRejected = 0;
     uint16_t _baBufSize  = 64;     /* advertised BlockAck buffer/window size   */
 
     /* RX A-MPDU reorder buffer — one per TID with an active downlink BA.
@@ -592,6 +626,7 @@ private:
     RTW88Roaming::BtmRequest _btmRequest;
     uint8_t _btmSource[6]={},_btmTarget[6]={};
     uint64_t _btmDeadline=0,_btmAckDeadline=0,_btmReplyIdentity=0,_btmAckIdentity=0;
+    RTW88Roaming::BtmProtectedReceipt _btmProtectedReceipt;
     uint32_t _btmScanGeneration=0,_btmLastStatus=255,_btmLastResponseToken=0;
     bool _btmScanned=false;
     const char *_btmStage="idle";

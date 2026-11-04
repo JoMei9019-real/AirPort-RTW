@@ -27,6 +27,7 @@
 #include <kern/thread.h>
 
 #include "RTW88IEEE80211.hpp"   /* for RTW88EventDelegate, RTW88BSS, RTW88State */
+#include "RTW88AssocWire.hpp"
 #include "RTW88UserClient.hpp"  /* for struct RTW88StateResult */
 #include "RTW88AWDLManager.hpp"
 
@@ -116,6 +117,8 @@ public:
     bool scheduleBtmControl(unsigned delayMs) override;
     static void awdlTimerFired(OSObject *owner, IOTimerEventSource *timer);
     static void deferredRxReady(OSObject *owner, IOInterruptEventSource *source, int count);
+    bool deferWorkerEvent(RTW88Event, uint32_t generation, uint32_t result) override;
+    void drainWorkerEvents();
     bool deferRxFrame(struct sk_buff *skb) override;
     bool rxProcessingDeferred() const override { return true; }
     bool roamingActionsAllowed() const override {
@@ -234,7 +237,9 @@ public:
                                UInt64 speed, OSData *data) override;
     virtual void setLinkStatus(UInt32 status) override;
 
+    IOReturn handleMenuSAE(const RTW88AssocWire::Personal &request);
 private:
+    void postSTAJoinFailure();
     /* IO80211 payload adapters. Protected STA authentication is delegated to Apple RSN. */
     __attribute__((__noinline__)) SInt32 handleNativeRequest(unsigned int request_type, int request_number, IO80211Interface *interface, void *data);
     __attribute__((__noinline__)) IOReturn handleRequestCOUNTRY_CODE(bool isSet, void *data);
@@ -341,6 +346,9 @@ private:
     bool                    _assocDoneReported = false;
     uint32_t                _staLinkEventPosts = 0;
     void postSTALinkChanged(bool up, uint32_t reason);
+    bool                    _staIdentityUp = false;
+    uint32_t                _staIdentityEventPosts = 0;
+    void postSTAIdentityChanged(bool up);
     bool                    _rsnHandshakeReported = false;
 
     /* Acceso real a hardware -- antes esto se pasaba como nullptr a
@@ -352,6 +360,8 @@ private:
     struct pci_dev          *_compatPciDev = nullptr;
 
     /* NAPI only enqueues; protocol callbacks execute on the controller loop. */
+    struct WorkerEvent { bool pending=false;uint32_t generation=0,result=0; };
+    WorkerEvent _workerEvents[2] = {}; // scan completion, failed join
     IOSimpleLock *_deferredRxLock = nullptr;
     IOInterruptEventSource *_deferredRxSource = nullptr;
     struct sk_buff *_deferredRx[256] = {};

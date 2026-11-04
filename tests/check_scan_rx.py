@@ -66,7 +66,7 @@ struct AirPortRTW{
  IOReturn handleSCAN_REQ(void*);IOReturn scanMultiple(bool);
 };
 struct Hw;struct Ops{void(*cancel_hw_scan)(Hw*,void*);};struct Hw{Ops *ops;};
-constexpr unsigned RX_FLAG_FAILED_FCS_CRC=1,RX_FLAG_NO_SIGNAL_VAL=2;
+constexpr unsigned RX_FLAG_FAILED_FCS_CRC=1,RX_FLAG_NO_SIGNAL_VAL=2,RX_FLAG_RTW_INTEGRITY_FAILED=4;
 struct ieee80211_rx_status{unsigned flag=0;int signal=-42;};
 struct ieee80211_hdr{__le16 frame_control;};
 struct sk_buff{

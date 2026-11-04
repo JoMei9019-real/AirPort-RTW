@@ -673,6 +673,7 @@ struct ieee80211_rx_status {
 
 /* RX flags */
 #define RX_FLAG_DECRYPTED           (1 << 0)
+#include "../rtw88_rx_security.h"
 #define RX_FLAG_MMIC_STRIPPED       (1 << 1)
 #define RX_FLAG_IV_STRIPPED         (1 << 2)
 #define RX_FLAG_FAILED_FCS_CRC      (1 << 3)

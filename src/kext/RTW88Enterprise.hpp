@@ -55,6 +55,14 @@ inline bool selectedDot1x(const uint8_t *ie, size_t n) {
         r.group == Ccmp && r.pairwiseCount == 1 && r.akmCount == 1 &&
         !(r.caps & 0x00c0) && !r.pmkids && !r.groupMgmt;
 }
+/* Positive evidence for a WPA2-only password target. Never infer PSK from
+ * an absent/malformed scan record or downgrade a PSK/SAE transition AP. */
+inline bool pskOnly(const uint8_t *ie, size_t n) {
+    Rsn r;
+    return ie && n >= 2 && n <= 257 && ie[0] == 48 && size_t(ie[1]) + 2 == n &&
+        parse(ie + 2, n - 2, r) && r.ccmp && r.psk && r.akmCount == 1 &&
+        (r.group == Ccmp || r.group == Tkip) && !(r.caps & 0x0040);
+}
 inline bool eapol(const uint8_t *p, size_t n, uint8_t &type) {
     if (!p || n < 4 || p[0] < 1 || p[0] > 3 || p[1] > 3) return false;
     const size_t body = (size_t(p[2]) << 8) | p[3];

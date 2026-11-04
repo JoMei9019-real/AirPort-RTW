@@ -7,25 +7,34 @@
 // Validate the shared prefix independently; never interpret the unknown tail.
 // Mode and both auth fields use 32 bits rather than the Ventura controller ABI.
 // Never cast this wire prefix to apple80211_assoc_data.
-// Restricted to open/WPA2-PSK; the unknown tail is not interpreted as RSN.
+// The optional extended key slot is read only for explicitly typed passwords.
+// The unknown tail is never interpreted as RSN or credentials.
 namespace RTW88AssocWire {
-constexpr size_t RequestSize = 900, TahoeRequestSize = 908, PrefixSize = 108;
+constexpr size_t RequestSize = 900, TahoeRequestSize = 908, PrefixSize = 108, PasswordPrefixSize = 140;
 inline bool supportedRequestSize(size_t n) {
     return n == RequestSize || n == TahoeRequestSize;
 }
 struct Personal {
     uint32_t mode, lower, upper, ssidLength, keyLength, cipher;
-    uint8_t ssid[32], bssid[6], key[32];
+    uint8_t ssid[32], bssid[6], key[64];
 };
 inline uint32_t le32(const uint8_t *p) {
     return uint32_t(p[0]) | uint32_t(p[1])<<8 | uint32_t(p[2])<<16 | uint32_t(p[3])<<24;
 }
 inline bool decode(const uint8_t *p, size_t n, Personal &out) {
-    if (!p || n != PrefixSize || le32(p)!=1 || le32(p+4)!=2 || le32(p+8)!=1)
+    if (!p || (n != PrefixSize && n != PasswordPrefixSize) || le32(p)!=1 || le32(p+4)!=2 || le32(p+8)!=1)
         return false;
     const uint32_t upper=le32(p+12), ssidLength=le32(p+16), keyLength=le32(p+64);
-    if ((upper!=0 && upper!=8) || !ssidLength || ssidLength>32 || le32(p+60)!=1 ||
-        (upper==8 ? keyLength!=32 : keyLength!=0)) return false;
+    const uint32_t cipher=le32(p+68);
+    const bool password=cipher==10 && (upper==8 || upper==4096 || upper==(4096|8));
+    if (!ssidLength || ssidLength>32 || le32(p+60)!=1) return false;
+    if (password) {
+        if (!keyLength || keyLength>63 || keyLength>n-76) return false;
+        for(uint32_t i=0;i<keyLength;++i)if(!p[76+i])return false;
+    } else {
+        if ((upper!=0 && upper!=8) || (upper==8 ? keyLength!=32 : keyLength!=0)) return false;
+        if (upper==8 && cipher!=6 && cipher!=7) return false;
+    }
     for (uint32_t i=0;i<ssidLength;++i) if (!p[20+i]) return false;
     if (p[52]&1) return false; // A selected BSSID must be unicast (zero is allowed).
     out={};out.mode=2;out.lower=1;out.upper=upper;out.ssidLength=ssidLength;

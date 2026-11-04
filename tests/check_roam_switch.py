@@ -45,18 +45,21 @@ struct RTW88IEEE80211 {
  uint8_t _pmk[32]={7};void *_bssLock=nullptr;RTW88BSS *_bssList=nullptr;Hw *_hw=nullptr;
  unsigned disconnects=0,joins=0,drains=0;int joinResult=0;
  void cancelAuthentication(){++drains;}
- void doDisconnect(){++disconnects;_state=0;_associatedVisible=false;_ptkConf=_gtkConf=nullptr;memset(_pmk,0,32);resetRoamingState();}
- int cmdConnect(const char *ssid,const char*,const uint8_t *pmk,const uint8_t *ap,bool){
-  assert(!strcmp(ssid,"Test")&&pmk[0]==7);++joins;
-  memcpy(_targetBSS.bssid,ap,6);memcpy(_pmk,pmk,32);_state=2;return joinResult;
+ void doDisconnect(){++disconnects;_state=0;_associatedVisible=false;_ptkConf=_gtkConf=nullptr;memset(_pmk,0,32);memset(_password,0,64);_saeMode=false;_sae.authorized=false;_sae.pending=false;resetRoamingState();}
+ int cmdConnect(const char *ssid,const char*password,const uint8_t *pmk,const uint8_t *ap,bool external,bool sae=false){
+  assert(!strcmp(ssid,"Test")&&!external);
+  if(sae){assert(password&&!pmk);memcpy(_password,password,64);}
+  else{assert(pmk&&pmk[0]==7&&!password);memcpy(_pmk,pmk,32);}
+  _saeMode=sae;_sae.authorized=false;_sae.pending=sae;++joins;
+  memcpy(_targetBSS.bssid,ap,6);_state=2;return joinResult;
  }
  IOReturn requestRoam(const uint8_t*,uint64_t);void cancelRoamSwitch();
 ''')
 pre=pre.replace('void roamSwitchTick(uint64_t){}','void roamSwitchTick(uint64_t);')
 methods=''.join(method(n) for n in ('void RTW88IEEE80211::resetRoamingState()', 'bool RTW88IEEE80211::roamingActionsReady() const','void RTW88IEEE80211::beginRoamTest(','IOReturn RTW88IEEE80211::roamDecision(','unsigned RTW88IEEE80211::roamChannelReason(','unsigned RTW88IEEE80211::roamBSSReason(','IOReturn RTW88IEEE80211::roamControlReady(','IOReturn RTW88IEEE80211::validateRoam(','IOReturn RTW88IEEE80211::checkRoam(','void RTW88IEEE80211::cancelRoamSwitch()','IOReturn RTW88IEEE80211::requestRoam(','void RTW88IEEE80211::roamSwitchTick('))
 cases=r'''
-void keyed(RTW88IEEE80211 &b){b._state=5;b._associatedVisible=true;b._ptkConf=b._gtkConf=&b;}
-void erased(RTW88IEEE80211 &b){assert(!b._roamSwitch.phase);for(auto v:b._roamSwitch.pmk)assert(!v);}
+void keyed(RTW88IEEE80211 &b){b._state=5;b._associatedVisible=true;b._ptkConf=b._gtkConf=&b;b._sae.authorized=true;b._sae.pending=false;}
+void erased(RTW88IEEE80211 &b){assert(!b._roamSwitch.phase&&!b._roamSwitch.sae);for(auto v:b._roamSwitch.pmk)assert(!v);for(auto v:b._roamSwitch.password)assert(!v);}
 int main(){
  RTW88IEEE80211 b;Band band;Wiphy w{{&band}};Hw hw{&w};RTW88BSS candidate;
  uint8_t rsn[]={48,20,1,0,0,15,172,4,1,0,0,15,172,4,1,0,0,15,172,2,0,0};
@@ -108,7 +111,43 @@ int main(){
  b._roamSwitch.phase=1;b._roamSwitch.pmk[0]=8;b.parent.allowed=false;
  b.roamSwitchTick(160000);assert(b._roamSwitchResult==6);erased(b);
  assert(!RTW88RoamSwitch::security(rsn,sizeof(rsn)-1));
+ // SAE roaming never supplies a WPA2 PMK or falls back to a PSK-only AP.
+ uint8_t sae[]={48,26,1,0,0,15,172,4,1,0,0,15,172,4,1,0,0,15,172,8,0xc0,0,0,0,0,15,172,6};
+ uint8_t mixed[]={48,30,1,0,0,15,172,4,1,0,0,15,172,4,2,0,0,15,172,2,0,15,172,8,0x80,0,0,0,0,15,172,6};
+ assert(RTW88RoamSwitch::security(sae,sizeof(sae),true));
+ assert(RTW88RoamSwitch::security(mixed,sizeof(mixed),true));
+ assert(!RTW88RoamSwitch::security(rsn,sizeof(rsn),true));
+ assert(!RTW88RoamSwitch::security(sae,sizeof(sae),false));
+ auto duplicate=std::vector<uint8_t>(sae,sae+sizeof(sae));duplicate.insert(duplicate.end(),sae,sae+sizeof(sae));
+ assert(!RTW88RoamSwitch::security(duplicate.data(),duplicate.size(),true));
+ auto malformed=std::vector<uint8_t>(mixed,mixed+sizeof(mixed));malformed.push_back(244);
+ assert(!RTW88RoamSwitch::security(malformed.data(),malformed.size(),true));
+ malformed.assign(sae,sae+sizeof(sae));malformed[20]=0;assert(!RTW88RoamSwitch::security(malformed.data(),malformed.size(),true));
+ b.parent.allowed=true;b._saeMode=true;keyed(b);b._roamSwitchLast=0;b._connectCancelled=false;
+ memcpy(b._targetBSS.bssid,oldAP,6);memcpy(b._targetBSS.ies,sae,sizeof(sae));b._targetBSS.ies_len=sizeof(sae);
+ char password[64]={};for(unsigned i=0;i<63;++i)password[i]=char('A'+i%26);
+ memcpy(b._password,password,64);memset(b._pmk,0xa5,32);candidate.observedMs=300000;
+ memcpy(candidate.ies,rsn,sizeof(rsn));candidate.ies_len=sizeof(rsn);
+ unsigned before=b.disconnects;
+ assert(b.requestRoam(candidate.bssid,300001)==kIOReturnNotFound&&b._roamReason==RTW88RoamSwitch::TargetSecurity&&b.disconnects==before);
+ memcpy(candidate.ies,mixed,sizeof(mixed));candidate.ies_len=sizeof(mixed);
+ b._sae.pending=true;assert(b.checkRoam(candidate.bssid,300001)==kIOReturnNotReady);b._sae.pending=false;
+ assert(b.requestRoam(candidate.bssid,300001)==0&&b._roamSwitch.sae&&b._saeMode);
+ assert(!memcmp(b._roamSwitch.password,password,64)&&!memcmp(b._password,password,64));
+ for(auto x:b._roamSwitch.pmk)assert(!x);
+ b._state=5;b._associatedVisible=true;b._ptkConf=b._gtkConf=&b;
+ b.roamSwitchTick(300002);assert(b._roamSwitch.phase==1); // SAE/4-way authorization still pending
+ keyed(b);b.roamSwitchTick(300003);assert(b._roamSwitchResult==3);erased(b);
+ assert(!memcmp(b._password,password,64)); // retained only by the live profile
+ memcpy(b._targetBSS.bssid,oldAP,6);candidate.observedMs=361000;
+ assert(b.requestRoam(candidate.bssid,361001)==0);
+ b._state=0;b._saeMode=false;b._sae.authorized=false;memset(b._password,0,64);
+ b.roamSwitchTick(361002);assert(b._roamSwitch.phase==2&&b._saeMode&&!memcmp(b._password,password,64));
+ assert(!memcmp(b._targetBSS.bssid,oldAP,6));keyed(b);b.roamSwitchTick(361003);erased(b);
+ b._roamSwitch.phase=1;b._roamSwitch.sae=true;memcpy(b._roamSwitch.password,password,64);
+ b.parent.allowed=false;b.roamSwitchTick(400000);erased(b);
  puts("PASS: production AP-switch eligibility, fresh scan/security/regulatory gates, key snapshot, success, one fallback, deadlines and PM cancellation");
+ puts("PASS: SAE/PMF-only candidates, 63-byte credential snapshot, SAE target/fallback authorization and secret cleanup");
 }
 '''
 c=(root/'src/kext/AirPortRTW.cpp').read_text()
