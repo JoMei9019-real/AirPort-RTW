@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '1.2.0'
+VERSION = '1.2.1'
 NOTICES = {
     'LICENSE': 'GPL-2.0.txt',
     'NOTICE.md': 'NOTICE.md',
@@ -36,7 +36,8 @@ def verify(path):
         binary_name = 'AirPortRTW.kext/Contents/MacOS/AirPortRTW'
         binary = archive.read(binary_name)
         assert struct.unpack_from('<II', binary) == (0xfeedfacf, 0x1000007), 'Expected thin x86_64 Mach-O'
-        assert b'1.2.0-beta.' not in binary and b'1.2.0b15' not in binary
+        assert VERSION.encode() + b'\0' in binary
+        assert b'1.2.1-beta.1' not in binary and b'1.2.1b1' not in binary
         assert archive.getinfo(binary_name).external_attr >> 16 & 0o111, 'Missing executable mode'
         for name in NOTICES.values():
             assert archive.read('AirPortRTW.kext/Contents/Resources/Notices/' + name)

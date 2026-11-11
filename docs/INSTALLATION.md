@@ -69,7 +69,7 @@ After rebooting, run:
 ioreg -r -c AirPortRTW -l | grep DriverBuild
 ```
 
-For 1.2.0, the result should show `1.2.0`. A result shows the attached driver's build. If there is no result, first check
+For 1.2.1, the result should show `1.2.1`. A result shows the attached driver's build. If there is no result, first check
 the PCI ID, enabled OpenCore entry, duplicate drivers and required Apple Wi-Fi
 components. Then test Wi-Fi toggling, WPA2/WPA3 connections as available, Internet access,
 and sleep/wake. A successful boot alone is not a complete compatibility test.

@@ -216,6 +216,13 @@ $(OUT_KEXT_BIN): $(ALL_OBJS) | $(OUT_KEXT)/Contents/MacOS
 $(BUILD_DIR)/driver/rx.o: $(COMPAT_DIR)/rtw88_rx.c $(COMPAT_DIR)/rtw88_rx_security.h $(LINUX_SRC)/rx.c | $(BUILD_DIR)/driver
 	$(CC) $(DRIVER_CFLAGS) -c $(COMPAT_DIR)/rtw88_rx.c -o $@
 
+# Serialize every PCI producer (data, scan null, management) before slot selection.
+$(BUILD_DIR)/driver/pci-serialized.c: $(LINUX_SRC)/pci.c scripts/prepare-pci.py | $(BUILD_DIR)/driver
+	python3 scripts/prepare-pci.py $< $@
+
+$(BUILD_DIR)/driver/pci.o: $(BUILD_DIR)/driver/pci-serialized.c
+	$(CC) $(DRIVER_CFLAGS) -iquote $(LINUX_SRC) -c $< -o $@
+
 # Compile Linux driver C files with compat headers
 $(BUILD_DIR)/driver/%.o: $(LINUX_SRC)/%.c | $(BUILD_DIR)/driver
 	@echo "  CC   $(notdir $<)"

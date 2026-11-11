@@ -1,4 +1,4 @@
-# Roaming in AirPort-RTW 1.2.0
+# Roaming in AirPort-RTW 1.2.1
 
 Roaming means switching between access points on the same Wi-Fi network.
 For example, your laptop can move from one repeater to another as you walk
@@ -49,7 +49,7 @@ Open Terminal and run:
 ioreg -r -c AirPortRTW -l | grep DriverBuild
 ```
 
-For this release, the result should show `1.2.0`.
+For this release, the result should show `1.2.1`.
 
 ## Try roaming
 
