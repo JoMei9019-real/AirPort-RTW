@@ -181,6 +181,9 @@ int rtw88_be_tx_busy(void);
  * between rtw_pci_probe and the chip's start() op. See rtw88_compat.c. */
 void rtw88_force_wifi_only(void);
 
+/* Balance Wi-Fi priority after macOS-managed association success/failure. */
+void rtw88_coex_join_end(struct ieee80211_hw *hw, bool successful);
+
 /* TX flow control. rtw88_be_tx_avail() returns the BE ring's free-slot count
  * so the output path can stall (backpressure) instead of dropping when full.
  * rtw88_set_tx_resume_cb() registers a hook fired after each IRQ bottom-half
