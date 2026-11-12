@@ -50,6 +50,8 @@ struct AirPortRTW{
 };
 struct Timer{void cancelTimeout(){}};
 struct Ops{void(*cancel_hw_scan)(void*,void*)=nullptr;};struct Hw{Ops*ops=nullptr;};
+std::atomic<unsigned>coexAbortCount{0};
+void rtw88_coex_join_end(Hw*,bool success){assert(!success);++coexAbortCount;}
 struct RTW88BSS{RTW88BSS*next=nullptr;uint8_t bssid[6]={};unsigned last_seen_scan=0;};
 struct RTW88IEEE80211{
  AirPortRTW*_parent,*_delegate;
