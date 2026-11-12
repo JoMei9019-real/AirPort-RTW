@@ -93,6 +93,13 @@ struct Hw;struct Ops{int(*sta_add)(Hw*,Vif*,ieee80211_sta*)=nullptr;
 struct ieee80211_channel{unsigned hw_value=6,flags=0;};
 struct SupportedBand{ieee80211_channel*channels=nullptr;int n_channels=0;};
 struct Hw{Ops ops_;Ops*ops=&ops_;unsigned sta_data_size=0;struct Wiphy{SupportedBand*bands[2]={};}wiphy_;Wiphy*wiphy=&wiphy_;};
+/* Test fixture for Beta 2's association-completion coexistence hook.
+ * Production implementation lives in the rtw88 compatibility layer. */
+unsigned coexJoinSuccessNotifications = 0;
+void rtw88_coex_join_end(Hw*, bool successful) {
+ assert(successful);
+ ++coexJoinSuccessNotifications;
+}
 bool rtw88_hw_scan_supported(Hw*){return false;}
 struct rtw88_peer_caps{bool have_ht=false,have_vht=false;HT ht;VHT vht;};
 void rtw88_parse_peer_caps(const uint8_t*,unsigned,rtw88_peer_caps*){}
