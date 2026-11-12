@@ -55,6 +55,9 @@ struct Session{
 struct Timer{unsigned cancelled=0;void cancelTimeout(){++cancelled;}};
 struct Parent{void setLinkStatus(int){assert(!held);}};
 struct Delegate{unsigned pending=0;bool deferWorkerEvent(int,unsigned,unsigned){assert(!held);++pending;return true;}void rtw88Event(int,void*){assert(false);}};
+struct Hw {};
+static unsigned coexAbortCount=0;
+void rtw88_coex_join_end(Hw*,bool success){assert(!success);assert(!held);++coexAbortCount;}
 struct RTW88IEEE80211{
  IOLock lock;IOLock*_lock=&lock;Session _sae;bool _saeMode=true;
  bool _connectCancelled=false,_disconnectVoluntary=true,_associatedVisible=true;
@@ -63,6 +66,7 @@ struct RTW88IEEE80211{
  std::atomic<int>_state{RTW88_STATE_AUTHENTICATING};std::atomic<bool>cancelled{false};
  uint8_t _macAddr[6]={2,1,2,3,4,5};char _password[64]="password";unsigned _txSeq=0;
  struct{uint8_t bssid[6]={2,6,7,8,9,10};char ssid[33]="test";unsigned ssid_len=4;uint8_t ies[512]={};size_t ies_len=0;}_targetBSS;
+ Hw hw;Hw*_hw=&hw;
  Timer timer;Timer*_timer=&timer;unsigned tx=0,associations=0,failures=0;
  RTW88IEEE80211(){_sae.lock=_lock;}
  bool authenticationCancelled()const{return cancelled||__atomic_load_n(&_connectCancelled,__ATOMIC_ACQUIRE);}
@@ -104,6 +108,7 @@ int main(){
  RTW88IEEE80211 rejected;rejected._sae.active=rejected._sae.committed=true;
  rejected._sae.next=RTW88WPA3::AuthRejected;rejected.wpa3ReceiveAuth(frame,30);
  assert(rejected.failures==1&&rejected._state==RTW88_STATE_IDLE&&rejected.authenticationCancelled());
+ assert(coexAbortCount==1);
  assert(!rejected._associatedVisible&&!rejected._disconnectVoluntary&&!rejected._password[0]);
  assert(rejected.timer.cancelled==1&&rejected.delegate.pending==1&&!rejected.associations&&!rejected.tx);
  assert(rejected.wpa3Auth()&&!rejected._sae.active&&!rejected.tx);
