@@ -58,7 +58,6 @@ jobs:
           assert '_rtw_sae_begin' in defined and '_rtw8814a_hw_spec' in defined
           strings = subprocess.check_output(['strings', binary], text=True)
           assert '1.3.0-beta.2' in strings
-          assert '1.3.0-beta.2' in strings
           for name in ['-rtwnoautoroam', '-rtwsaeswccmp', '-rtwswscan', '-rtwnoawdlhop', 'btm-response-acked', 'ROAM_K_BEACON_ADVERTISED', 'TX_BATCH_DEFERRED_FRAMES', 'AWDL_POWER_SUSPENDED', 'RX_DEFER_MODE', 'STA_LINK_EVENT_TLV_BYTES', 'rtw8814a_fw.bin']:
               assert name in strings, name
           assembly = subprocess.check_output(['xcrun', 'otool', '-tvV', 'build/airport/RTW88WPA3Crypto.o'], text=True)
@@ -67,7 +66,7 @@ jobs:
           assert not any(name in symbols for name in ['__cxx_global_var_init', '_GLOBAL__sub_I', '__cxa_guard'])
           print('PASS: release version, native symbols, driver options and scalar kernel CCMP')
           CHECK
-      - name: Package minimal release and verify contents
+      - name: Package Beta 2 test artifact and verify contents
         run: python3 scripts/package-release.py
       - uses: actions/upload-artifact@v4
         with:
