@@ -22,6 +22,11 @@ constexpr int RTW88_STATE_IDLE=0,RTW88_STATE_SCANNING=1,RTW88_STATE_AUTHENTICATI
 constexpr int kIONetworkLinkValid=1,kRTW88EventDisconnected=1;
 constexpr bool kOSBooleanTrue=true,kOSBooleanFalse=false;
 void IOLog(const char*,...){}
+/* Isolated fixture: production failJoin() also notifies the coex helper.
+ * Model the hardware handle and assert failure releases Wi-Fi priority. */
+struct ieee80211_hw {};
+static unsigned coex_join_abort_count=0;
+void rtw88_coex_join_end(ieee80211_hw*,bool success){assert(!success);++coex_join_abort_count;}
 struct Timer{void cancelTimeout(){}};struct Parent{void setLinkStatus(int){}};struct Delegate{bool deferWorkerEvent(int,unsigned,unsigned){return false;}void rtw88Event(int,void*){}};
 struct RTW88StateResult{int state=0;};
 struct RTW88IEEE80211{
@@ -32,6 +37,7 @@ struct RTW88IEEE80211{
  int _state=RTW88_STATE_IDLE,_scanReturnState=RTW88_STATE_IDLE;
  char _password[64]={};uint8_t _pmk[32]={};
  struct{char ssid[33]={};uint8_t bssid[6]={2,1,2,3,4,5};}_targetBSS;
+ ieee80211_hw hw;ieee80211_hw*_hw=&hw;
  Timer timer;Timer*_timer=&timer;Parent*_parent=nullptr;Delegate*_delegate=nullptr;
  void roamTrace(const char*,unsigned=0){}
  bool authenticationCancelled()const{return _connectCancelled;}
@@ -70,7 +76,7 @@ int main(){
  assert(a.handleMenuSAE(r)==0&&b.starts==2&&b.disconnects==1&&!strcmp(b._password,"Password"));
  // Regression: failJoin left target metadata, and Beta6 reported success
  // without starting anything on this exact same request.
- b.failJoin("auth-retry-limit");assert(b._state==0&&b._connectCancelled);
+ b.failJoin("auth-retry-limit");assert(b._state==0&&b._connectCancelled&&coex_join_abort_count==1);
  assert(!b.matchesSAETarget("test",nullptr));assert(a.handleMenuSAE(r)==0&&b.starts==3);
  // Every incomplete state can be explicitly aborted, for WPA2 and WPA3.
  for(bool sae:{false,true})for(int state:{2,3,4}){
