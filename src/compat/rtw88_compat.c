@@ -1163,6 +1163,7 @@ void rtw88_compat_exit(void)
 #include "reg.h"
 #include "tx.h"
 #include "hci.h"
+#include "coex.h"
 
 uintptr_t rtw88_tx_thread_id(void) { return (uintptr_t)current_thread(); }
 
@@ -1483,6 +1484,30 @@ void rtw88_force_wifi_only(void)
  * (mostly MMIO *writes*, safe), then writes the BSSID register.
  * The caller must populate hw->conf.chandef before calling.
  */
+/* Beta 2: macOS bypasses Linux's managed-station prepare_tx callback.
+ * Coex scan notifications are already issued by the underlying rtw88 core.
+ * Track the association-start notification so aborted joins can release
+ * the firmware's temporary Wi-Fi priority. */
+static bool g_coex_join_pending = false;
+static bool g_coex_join_5g = false;
+
+void rtw88_coex_join_end(struct ieee80211_hw *hw, bool successful)
+{
+    if (!hw || !hw->priv) return;
+    struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
+    mutex_lock(&rtwdev->mutex);
+    if (g_coex_join_pending) {
+        if (!successful && rtwdev->efuse.btcoex) {
+            rtw_coex_connect_notify(rtwdev,
+                g_coex_join_5g ? COEX_ASSOCIATE_5G_FINISH : COEX_ASSOCIATE_FINISH);
+            rtw88_candidate_log("rtw88: coex beta2 aborted join 5g=%u\n",
+                                (unsigned)g_coex_join_5g);
+        }
+        g_coex_join_pending = false;
+    }
+    mutex_unlock(&rtwdev->mutex);
+}
+
 void rtw88_connect_hw_setup(struct ieee80211_hw *hw,
                              struct ieee80211_vif *vif,
                              const uint8_t *bssid)
@@ -1492,6 +1517,19 @@ void rtw88_connect_hw_setup(struct ieee80211_hw *hw,
     struct rtw_vif *rtwvif = (struct rtw_vif *)vif->drv_priv;
 
     mutex_lock(&rtwdev->mutex);
+
+    /* Prioritize the first post-boot Wi-Fi association (and later reconnects)
+     * through the existing firmware arbitration engine. This does NOT
+     * delay loading of the independent USB Bluetooth controller. */
+    if (rtwdev->efuse.btcoex && hw->conf.chandef.chan) {
+        const bool is5g = hw->conf.chandef.chan->hw_value > 14;
+        rtw_coex_connect_notify(rtwdev,
+            is5g ? COEX_ASSOCIATE_5G_START : COEX_ASSOCIATE_START);
+        g_coex_join_pending = true;
+        g_coex_join_5g = is5g;
+        rtw88_candidate_log("rtw88: coex beta2 join start 5g=%u\n",
+                            (unsigned)is5g);
+    }
 
     /* Switch to the AP's channel (uses hw->conf.chandef set by caller). */
     IOLog("rtw88: connect_hw_setup: rtw_set_channel\n");
