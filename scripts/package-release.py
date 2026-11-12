@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '1.2.1'
+VERSION = '1.3.0'
 NOTICES = {
     'LICENSE': 'GPL-2.0.txt',
     'NOTICE.md': 'NOTICE.md',
@@ -32,12 +32,12 @@ def verify(path):
         assert not any(name.lower().endswith(('.zip', '.tar', '.gz')) for name in names)
         info = plistlib.loads(archive.read('AirPortRTW.kext/Contents/Info.plist'))
         assert info['CFBundleVersion'] == info['CFBundleShortVersionString'] == VERSION
-        assert 'beta' not in info['CFBundleGetInfoString'].lower()
+        assert 'beta' in info['CFBundleGetInfoString'].lower()
         binary_name = 'AirPortRTW.kext/Contents/MacOS/AirPortRTW'
         binary = archive.read(binary_name)
         assert struct.unpack_from('<II', binary) == (0xfeedfacf, 0x1000007), 'Expected thin x86_64 Mach-O'
         assert VERSION.encode() + b'\0' in binary
-        assert b'1.2.1-beta.1' not in binary and b'1.2.1b1' not in binary
+        assert b'1.3.0-beta.2' in binary
         assert archive.getinfo(binary_name).external_attr >> 16 & 0o111, 'Missing executable mode'
         for name in NOTICES.values():
             assert archive.read('AirPortRTW.kext/Contents/Resources/Notices/' + name)
@@ -81,7 +81,7 @@ def package(kext, output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kext', type=Path, default=ROOT / 'build/out/AirPortRTW.kext')
-    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-' + VERSION + '.zip'))
+    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-1.3.0-beta.2.zip'))
     parser.add_argument('--verify', type=Path, help='Verify an existing ZIP without packaging')
     args = parser.parse_args()
     if args.verify:
