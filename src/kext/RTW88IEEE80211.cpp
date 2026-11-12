@@ -2974,6 +2974,8 @@ bool RTW88IEEE80211::matchesPendingJoin(const char *ssid, const uint8_t *bssid,
 void RTW88IEEE80211::failJoin(const char *stage)
 {
     roamTrace(stage,_authAttempts);
+    /* Release temporary firmware Wi-Fi association priority on failure. */
+    if (_hw) rtw88_coex_join_end(_hw, false);
     __atomic_store_n(&_disconnectVoluntary, false, __ATOMIC_RELEASE);
     IOLog("rtw88: join failed stage=%s attempts=%u\n", stage, _authAttempts);
     __atomic_store_n(&_connectCancelled, true, __ATOMIC_RELEASE);
@@ -3541,6 +3543,8 @@ void RTW88IEEE80211::processAssocResponse(struct sk_buff *skb)
         _vif->cfg.aid   = aid;
         _hw->ops->bss_info_changed(_hw, _vif, bss,
             BSS_CHANGED_ASSOC | BSS_CHANGED_QOS);
+        /* The Linux association callback already issued COEX FINISH. */
+        rtw88_coex_join_end(_hw, true);
     }
 
     if (_wpa2 && !_externalSupplicant) {
