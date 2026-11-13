@@ -10,6 +10,12 @@ namespace RTW88StationMACWire {
 constexpr int HardwareAddressSelector = 0x167;
 constexpr int SetAddressSelector = 0x170;
 
+// Tahoe 25G342's SET_MAC_ADDRESS takes six bytes starting at offset zero.
+// Ventura Legacy copies the BSD payload into a larger zeroed kernel buffer.
+struct SetAddress {
+    uint8_t address[6];
+};
+
 struct HardwareAddress {
     uint32_t version;
     uint8_t address[6];
@@ -27,6 +33,7 @@ struct PrivateMAC {
     uint8_t unused[6];
 };
 
+static_assert(sizeof(SetAddress) == 6, "SET_MAC_ADDRESS payload layout changed");
 static_assert(sizeof(HardwareAddress) == 12 && offsetof(HardwareAddress, address) == 4,
               "HW_ADDR payload layout changed");
 static_assert(sizeof(PrivateMAC) == 28 && offsetof(PrivateMAC, enabled) == 4 &&

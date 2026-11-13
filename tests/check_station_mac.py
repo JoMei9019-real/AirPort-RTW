@@ -17,7 +17,9 @@ def function(source, start, end):
 
 native = function(controller, "SInt32 AirPortRTW::apple80211Request", "void AirPortRTW::logGetResult")
 assert "handleStationMACRequest(isSet, request_number, interface, data)" in native
-assert "STA_MAC_SET_ADDRESS_NATIVE_SEEN" in native
+assert "request_number == RTW88StationMACWire::SetAddressSelector" in native
+bsd = function(controller, "SInt32 AirPortRTW::apple80211_ioctl(", "SInt32 AirPortRTW::apple80211_ioctl_set")
+assert bsd.index("len != sizeof(RTW88StationMACWire::SetAddress) || !reqData") < bsd.index("const bool scanBridge")
 assert "privateMACBridge" not in controller
 assert "station MAC updated to" not in controller
 
@@ -225,6 +227,26 @@ int main() {
     assert(permanent.version == 1 && !memcmp(permanent.address, wiphy.perm_addr, 6));
     assert(controller.handleStationMACRequest(true, HardwareAddressSelector,
                                              &net, &permanent) == RTW88IOCTLGuard::DarwinUnsupported);
+
+    SetAddress requested = {{0x06, 0x55, 0x64, 0x73, 0x82, 0x91}};
+    const auto setAddress = [&](IO80211Interface &interface, bool isSet = true) {
+        return controller.handleStationMACRequest(isSet, SetAddressSelector, &interface, &requested);
+    };
+    const unsigned writes = hardware.writes;
+    assert(setAddress(net, false) == RTW88IOCTLGuard::DarwinUnsupported);
+    assert(setAddress(other) == RTW88IOCTLGuard::DarwinUnsupported);
+    driver._state = RTW88_STATE_HANDSHAKING;
+    assert(setAddress(net) == EBUSY && hardware.writes == writes);
+    driver._state = RTW88_STATE_IDLE;
+    requested.address[0] = 0x07;
+    assert(setAddress(net) == EINVAL && hardware.writes == writes);
+    requested.address[0] = rotated[0];
+    assert(setAddress(net) == 0 && hardware.writes == writes + 1);
+    assert(!memcmp(driver._macAddr, rotated, 6) && !memcmp(net.address, rotated, 6));
+    assert(setAddress(net) == 0 && hardware.writes == writes + 1);
+    memcpy(requested.address, permanent.address, 6);
+    assert(setAddress(net) == 0 && hardware.writes == writes + 2);
+    assert(!memcmp(net.address, wiphy.perm_addr, 6));
     assert(controller._privateMacGetCount && controller._privateMacSetCount);
     assert(packet.canary == 0x12345678);
 }
@@ -238,5 +260,5 @@ with TemporaryDirectory() as folder:
                     "-I", str(root / "src/kext"), str(source), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 
-print("PASS: Legacy private-MAC offsets, station-only routing, address replays, active-state guards, "
+print("PASS: Legacy private-MAC offsets, six-byte SET_MAC_ADDRESS, station-only routing, address replays, active-state guards, "
       "BSD rollback, Off and immutable hardware address")

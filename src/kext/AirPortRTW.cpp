@@ -154,7 +154,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.3.0-beta.5");
+    setProperty("DriverBuild", "1.3.0-beta.6");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -339,7 +339,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 1.3.0-beta.5 WPA3-Personal\n");
+    IOLog("AirPortRTW: 1.3.0-beta.6 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -1542,6 +1542,13 @@ SInt32 AirPortRTW::handleStationMACRequest(bool isSet, int selector,
             if (!req.interface || req.interface != self->_netif)
                 return kIOReturnUnsupported;
 
+            if (req.selector == RTW88StationMACWire::SetAddressSelector) {
+                if (!req.isSet)
+                    return kIOReturnUnsupported;
+                const auto &value = *static_cast<const RTW88StationMACWire::SetAddress *>(req.data);
+                return self->setStationMAC(value.address, true);
+            }
+
             if (req.selector == RTW88StationMACWire::HardwareAddressSelector) {
                 if (req.isSet)
                     return kIOReturnUnsupported;
@@ -1592,6 +1599,8 @@ SInt32 AirPortRTW::handleStationMACRequest(bool isSet, int selector,
         setProperty(isSet ? "STA_PRIVATE_MAC_SET_COUNT" : "STA_PRIVATE_MAC_GET_COUNT",
                     (uint64_t)__atomic_add_fetch(&count, 1U, __ATOMIC_RELAXED), 32);
         setProperty("STA_PRIVATE_MAC_LAST_RET", (uint64_t)error, 32);
+    } else if (selector == RTW88StationMACWire::SetAddressSelector) {
+        setProperty("STA_MAC_SET_ADDRESS_NATIVE_RET", (uint64_t)error, 32);
     } else {
         setProperty("STA_MAC_HW_ADDR_RET", (uint64_t)error, 32);
     }
@@ -1639,6 +1648,15 @@ SInt32 AirPortRTW::apple80211_ioctl(IO80211Interface *interface,
     const uint32_t reqVal = req->req_val;
     const uint32_t len = req->req_len;
     const user_addr_t reqData = (user_addr_t)req->req_data;
+
+    if (isSet && reqType == RTW88StationMACWire::SetAddressSelector &&
+        !virtualInterface && interface && interface == _netif) {
+        setProperty("STA_MAC_SET_ADDRESS_BSD_LEN", (uint64_t)len, 32);
+        if (len != sizeof(RTW88StationMACWire::SetAddress) || !reqData) {
+            setProperty("STA_MAC_SET_ADDRESS_BSD_RET", (uint64_t)EINVAL, 32);
+            return EINVAL;
+        }
+    }
 
     /* BSD buffers are NOT generally apple80211Request() structures. The
      * Ventura family strips version from CARD_CAPABILITIES (16 -> 12 bytes),
@@ -2146,10 +2164,9 @@ SInt32 AirPortRTW::apple80211Request(unsigned int request_type,
     // The Legacy family supplies a kernel payload here after validating and
     // copying the BSD wrapper. Leave virtual-interface routing to the family.
     if (request_number == APPLE80211_IOC_PRIVATE_MAC ||
-        request_number == RTW88StationMACWire::HardwareAddressSelector)
+        request_number == RTW88StationMACWire::HardwareAddressSelector ||
+        request_number == RTW88StationMACWire::SetAddressSelector)
         return handleStationMACRequest(isSet, request_number, interface, data);
-    if (isSet && request_number == RTW88StationMACWire::SetAddressSelector)
-        setProperty("STA_MAC_SET_ADDRESS_NATIVE_SEEN", kOSBooleanTrue);
     const SInt32 ret = handleNativeRequest(request_type, request_number, interface, data);
     if (request_number == APPLE80211_IOC_ASSOCIATE)
         setProperty("STA_ASSOC_NATIVE_RET", (uint64_t)(uint32_t)ret, 32);
@@ -2590,7 +2607,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.3.0-beta.5)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.3.0-beta.6)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));

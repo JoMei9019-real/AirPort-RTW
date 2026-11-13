@@ -37,7 +37,7 @@ def verify(path):
         binary = archive.read(binary_name)
         assert struct.unpack_from('<II', binary) == (0xfeedfacf, 0x1000007), 'Expected thin x86_64 Mach-O'
         assert VERSION.encode() + b'\0' in binary
-        assert b'1.3.0-beta.5' in binary
+        assert b'1.3.0-beta.6' in binary
         assert archive.getinfo(binary_name).external_attr >> 16 & 0o111, 'Missing executable mode'
         for name in NOTICES.values():
             assert archive.read('AirPortRTW.kext/Contents/Resources/Notices/' + name)
@@ -81,7 +81,7 @@ def package(kext, output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kext', type=Path, default=ROOT / 'build/out/AirPortRTW.kext')
-    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-1.3.0-beta.5.zip'))
+    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-1.3.0-beta.6.zip'))
     parser.add_argument('--verify', type=Path, help='Verify an existing ZIP without packaging')
     args = parser.parse_args()
     if args.verify:
