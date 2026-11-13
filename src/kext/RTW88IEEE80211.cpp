@@ -6463,8 +6463,8 @@ IOReturn RTW88IEEE80211::setMACAddress(const uint8_t *mac)
     if (rtw88_set_station_mac(_hw, _vif, mac) != 0)
         return kIOReturnError;
 
-    IOLog("rtw88: STA MAC programmed %02x:%02x:%02x:%02x:%02x:%02x\n",
-          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    /* Never log the user-specific private Wi-Fi address. */
+    IOLog("rtw88: STA MAC programmed before association\n");
     return kIOReturnSuccess;
 }
 
