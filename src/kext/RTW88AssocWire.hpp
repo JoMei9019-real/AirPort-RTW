@@ -27,7 +27,13 @@ inline bool decode(const uint8_t *p, size_t n, Personal &out) {
     const uint32_t upper=le32(p+12), ssidLength=le32(p+16), keyLength=le32(p+64);
     const uint32_t cipher=le32(p+68);
     const bool password=cipher==10 && (upper==8 || upper==4096 || upper==(4096|8));
-    if (!ssidLength || ssidLength>32 || le32(p+60)!=1) return false;
+    const uint32_t keyVersion=le32(p+60);
+    // Sequoia can send version 0 for a truly open, keyless association.
+    // Never relax the required key version for secured requests.
+    const bool openWithoutKey = keyVersion==0 && upper==0 &&
+                                keyLength==0 && cipher==0;
+    if (!ssidLength || ssidLength>32 ||
+        (keyVersion!=1 && !openWithoutKey)) return false;
     if (password) {
         if (!keyLength || keyLength>63 || keyLength>n-76) return false;
         for(uint32_t i=0;i<keyLength;++i)if(!p[76+i])return false;
