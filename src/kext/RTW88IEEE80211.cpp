@@ -6420,6 +6420,15 @@ void RTW88IEEE80211::getMACAddress(uint8_t *mac)
     memcpy(mac, _macAddr, 6);
 }
 
+void RTW88IEEE80211::getPermanentMACAddress(uint8_t *mac)
+{
+    if (!mac) return;
+    if (_hw && _hw->wiphy)
+        memcpy(mac, _hw->wiphy->perm_addr, ETH_ALEN);
+    else
+        memcpy(mac, _macAddr, ETH_ALEN);
+}
+
 bool RTW88IEEE80211::getRadioTelemetry(RadioTelemetry *out) const
 {
     if (!out) return false;
