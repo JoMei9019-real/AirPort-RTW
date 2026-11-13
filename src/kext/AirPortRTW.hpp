@@ -84,6 +84,18 @@ struct RTW88StaRoamData {
     uint8_t  target_bssid[APPLE80211_ADDR_LEN];
 } __attribute__((packed));
 
+/* Apple selector 238: observed 28-byte transport; internal field offsets are
+ * inferred and must be validated against the target IO80211FamilyLegacy. */
+struct RTW88PrivateMACData {
+    uint32_t version;
+    uint32_t enabled;
+    uint32_t flags;
+    uint8_t address[APPLE80211_ADDR_LEN];
+    uint8_t address_pad[2];
+    uint32_t timeout_seconds;
+    uint32_t reserved;
+} __attribute__((packed));
+
 struct RTW88IEData {
     uint32_t version;
     uint32_t frame_type_flags;
@@ -97,6 +109,7 @@ struct RTW88IEData {
 static_assert(sizeof(RTW88VHTMCSIndexSetData) == 6, "VHT MCS map ABI changed");
 static_assert(sizeof(RTW88MCSVHTData) == 20, "MCS/VHT ABI changed");
 static_assert(sizeof(RTW88StaRoamData) == 13, "STA roam ABI changed");
+static_assert(sizeof(RTW88PrivateMACData) == 28, "private MAC ABI size");
 static_assert(sizeof(RTW88IEData) == 2072, "IE ABI changed");
 
 enum : unsigned long {
@@ -185,6 +198,11 @@ public:
      * through this split SET ingress on the tested machine.  Keep scan and
      * discovery on the proven BSD transport; this hook only recovers a lost
      * APPLE80211_IOC_ASSOCIATE request and otherwise delegates unchanged. */
+    virtual SInt32 apple80211_ioctl_get(IO80211Interface *interface,
+                                        IO80211VirtualInterface *virtualInterface,
+                                        ifnet_t net, void *data) override;
+    virtual SInt32 apple80211_ioctl_get(IO80211SkywalkInterface *skywalkInterface,
+                                        void *data) override;
     virtual SInt32 apple80211_ioctl_set(IO80211Interface *interface,
                                         IO80211VirtualInterface *virtualInterface,
                                         IO80211SkywalkInterface *skywalkInterface,
@@ -323,6 +341,12 @@ private:
     void waitForDiagnosticsIdle();
     IO80211WorkLoop       *_workLoop    = nullptr;
 
+    SInt32 handlePrivateMACRequest(bool isSet, struct apple80211req *request,
+                                   const char *ingress);
+    uint32_t _privateMacFlags = 0;
+    uint32_t _privateMacTimeout = 0;
+    bool _privateMacEnabled = false;
+    bool _privateMacInitialized = false;
     IOEthernetAddress       _macAddr;
     bool                    _scanInProgress = false;
     UInt32                  _powerSaveLevel = APPLE80211_POWERSAVE_MODE_DISABLED;
