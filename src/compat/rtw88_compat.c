@@ -1681,6 +1681,25 @@ uint8_t rtw88_get_tx_nss(struct rtw_dev *rtwdev)
     return nss;
 }
 
+/* Read firmware C2H rate-adaptation data for the connected peer. */
+void rtw88_get_tx_rate_snapshot(struct ieee80211_sta *sta,
+                                struct rtw88_tx_rate_snapshot *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!sta) return;
+    struct rtw_sta_info *si = (struct rtw_sta_info *)sta->drv_priv;
+    const u32 bit_rate = READ_ONCE(si->ra_report.bit_rate);
+    if (!bit_rate) return;
+    out->flags = READ_ONCE(si->ra_report.txrate.flags);
+    out->legacy_100kbps = READ_ONCE(si->ra_report.txrate.legacy);
+    out->mcs = READ_ONCE(si->ra_report.txrate.mcs);
+    out->nss = READ_ONCE(si->ra_report.txrate.nss);
+    if (!out->nss) out->nss = 1;
+    out->bw = READ_ONCE(si->ra_report.txrate.bw);
+    out->valid = 1;
+}
+
 uint32_t rtw88_read_log(char *out_buf, uint32_t max_len)
 {
     if (!out_buf || max_len == 0 || !rtw88_log_lock) return 0;
