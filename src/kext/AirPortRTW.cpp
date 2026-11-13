@@ -1491,6 +1491,91 @@ static bool rtw88TryHostAssociation(AirPortRTW *self, IO80211Interface *interfac
 namespace {
 static bool rtw88TryAssocFromSplitWrapper(AirPortRTW *, IO80211Interface *, void *, SInt32 *);
 }
+
+SInt32 AirPortRTW::handlePrivateMACRequest(bool isSet, struct apple80211req *request,
+                                          const char *ingress)
+{
+    static volatile UInt32 getCount = 0, setCount = 0;
+    if (isSet) {
+        setProperty("STA_PRIVATE_MAC_SET_SEEN", kOSBooleanTrue);
+        setProperty("STA_PRIVATE_MAC_SET_COUNT",
+                    (uint64_t)__atomic_add_fetch(&setCount, 1U, __ATOMIC_RELAXED), 32);
+    } else {
+        setProperty("STA_PRIVATE_MAC_GET_SEEN", kOSBooleanTrue);
+        setProperty("STA_PRIVATE_MAC_GET_COUNT",
+                    (uint64_t)__atomic_add_fetch(&getCount, 1U, __ATOMIC_RELAXED), 32);
+    }
+    SInt32 result = 0;
+    RTW88PrivateMACData payload = {};
+    if (!request || request->req_type != 238 || request->req_len != sizeof(payload))
+        result = EINVAL;
+    else if (!request->req_data)
+        result = EFAULT;
+    else if (!_ieee80211)
+        result = ENODEV;
+    else if (isSet) {
+        result = copyin((user_addr_t)request->req_data, &payload, sizeof(payload));
+        if (!result) {
+            if (payload.version != APPLE80211_VERSION || payload.enabled > 1)
+                result = EINVAL;
+            else {
+                uint8_t target[APPLE80211_ADDR_LEN] = {};
+                uint8_t current[APPLE80211_ADDR_LEN] = {};
+                if (payload.enabled)
+                    memcpy(target, payload.address, sizeof(target));
+                else
+                    _ieee80211->getPermanentMACAddress(target);
+                _ieee80211->getMACAddress(current);
+                const bool allZero = !(target[0] | target[1] | target[2] |
+                                       target[3] | target[4] | target[5]);
+                if (allZero || (target[0] & 1))
+                    result = EINVAL;
+                else {
+                    const IOReturn r = memcmp(current, target, sizeof(target)) == 0 ?
+                        kIOReturnSuccess : _ieee80211->setMACAddress(target);
+                    if (r != kIOReturnSuccess) {
+                        result = errnoFromReturn(r);
+                        if (!result) result = EIO;
+                    } else {
+                        _privateMacEnabled = payload.enabled != 0;
+                        _privateMacFlags = payload.flags;
+                        _privateMacTimeout = payload.enabled ? payload.timeout_seconds : 0;
+                        _privateMacInitialized = true;
+                        memcpy(_macAddr.bytes, target, sizeof(target));
+                    }
+                }
+                bzero(target, sizeof(target));
+                bzero(current, sizeof(current));
+            }
+        }
+    } else {
+        uint8_t current[APPLE80211_ADDR_LEN] = {};
+        uint8_t permanent[APPLE80211_ADDR_LEN] = {};
+        _ieee80211->getMACAddress(current);
+        _ieee80211->getPermanentMACAddress(permanent);
+        if (!_privateMacInitialized) {
+            _privateMacEnabled = memcmp(current, permanent, sizeof(current)) != 0;
+            _privateMacFlags = 0;
+            _privateMacTimeout = 0;
+            _privateMacInitialized = true;
+        }
+        payload.version = APPLE80211_VERSION;
+        payload.enabled = _privateMacEnabled ? 1U : 0U;
+        payload.flags = _privateMacFlags;
+        memcpy(payload.address, current, sizeof(current));
+        payload.timeout_seconds = _privateMacEnabled ? _privateMacTimeout : 0;
+        result = copyout(&payload, (user_addr_t)request->req_data, sizeof(payload));
+        bzero(current, sizeof(current));
+        bzero(permanent, sizeof(permanent));
+    }
+    setProperty("STA_PRIVATE_MAC_LAST_RET", (uint64_t)(uint32_t)result, 32);
+    /* Never log private addresses; policy/rotation remain owned by CoreWiFi. */
+    IOLog("AirPortRTW: PRIVATE_MAC %s ingress=%s ret=%d\n",
+          isSet ? "SET" : "GET", ingress ? ingress : "unknown", (int)result);
+    bzero(&payload, sizeof(payload));
+    return result;
+}
+
 SInt32 AirPortRTW::apple80211_ioctl(IO80211Interface *interface,
                                       IO80211VirtualInterface *virtualInterface,
                                       ifnet_t net, unsigned long cmd,
@@ -1567,8 +1652,11 @@ SInt32 AirPortRTW::apple80211_ioctl(IO80211Interface *interface,
     const bool currentNetworkBridge = !virtualInterface && isGet &&
         interface && interface == _netif &&
         reqType == APPLE80211_IOC_CURRENT_NETWORK;
+    const bool privateMACBridge = !virtualInterface && interface &&
+        interface == _netif && reqType == 238;
+    if (privateMACBridge && len != sizeof(RTW88PrivateMACData)) return EINVAL;
     if (!scanBridge && !scalarPowerSave && !scalarDisassociate && !channelsBridge &&
-        !currentNetworkBridge) {
+        !currentNetworkBridge && !privateMACBridge) {
         const UInt32 before = __atomic_load_n(&_nativeAssocDispatchCount, __ATOMIC_RELAXED);
         SInt32 sr = super::apple80211_ioctl(interface, virtualInterface, net, cmd, data);
         if (virtualInterface && sr != 0) {
@@ -1641,6 +1729,9 @@ SInt32 AirPortRTW::apple80211_ioctl(IO80211Interface *interface,
     if (!(void *)reqData) {
         return EFAULT;
     }
+
+    if (privateMACBridge)
+        return handlePrivateMACRequest(isSet, req, "legacy-ioctl");
 
     /* The restored family rejects the host CHANNELS_INFO layout with EINVAL
      * before reaching our handler. Retain this v21 scan-support exception,
@@ -1878,11 +1969,40 @@ static bool rtw88TryAssocFromSplitWrapper(AirPortRTW *self,
 }
 }
 
+
+SInt32 AirPortRTW::apple80211_ioctl_get(IO80211Interface *interface,
+                                        IO80211VirtualInterface *virtualInterface,
+                                        ifnet_t net, void *data)
+{
+    if (data && interface && interface == _netif && !virtualInterface) {
+        auto *request = static_cast<apple80211req *>(data);
+        if (request->req_type == 238)
+            return handlePrivateMACRequest(false, request, "legacy-split-get");
+    }
+    return super::apple80211_ioctl_get(interface, virtualInterface, net, data);
+}
+
+SInt32 AirPortRTW::apple80211_ioctl_get(IO80211SkywalkInterface *skywalkInterface,
+                                        void *data)
+{
+    if (data && skywalkInterface) {
+        auto *request = static_cast<apple80211req *>(data);
+        if (request->req_type == 238)
+            return handlePrivateMACRequest(false, request, "skywalk-split-get");
+    }
+    return super::apple80211_ioctl_get(skywalkInterface, data);
+}
+
 SInt32 AirPortRTW::apple80211_ioctl_set(IO80211Interface *interface,
                                            IO80211VirtualInterface *virtualInterface,
                                            IO80211SkywalkInterface *skywalkInterface,
                                            void *data)
 {
+    if (data && interface && interface == _netif && !virtualInterface) {
+        auto *request = static_cast<apple80211req *>(data);
+        if (request->req_type == 238)
+            return handlePrivateMACRequest(true, request, "legacy-split-set");
+    }
     setProperty("STA_SPLIT_ASSOC_INGRESS", kOSBooleanTrue);
     RTW88SplitTraceSnapshot splitPre = {};
     rtw88CaptureSplitTrace(data, &splitPre);
@@ -1957,6 +2077,11 @@ SInt32 AirPortRTW::apple80211_ioctl_set(IO80211Interface *interface,
 SInt32 AirPortRTW::apple80211_ioctl_set(IO80211SkywalkInterface *skywalkInterface,
                                            void *data)
 {
+    if (data && skywalkInterface) {
+        auto *request = static_cast<apple80211req *>(data);
+        if (request->req_type == 238)
+            return handlePrivateMACRequest(true, request, "skywalk-split-set");
+    }
     setProperty("STA_SPLIT_ASSOC_SKYWALK_INGRESS", kOSBooleanTrue);
     RTW88SplitTraceSnapshot splitPre = {};
     rtw88CaptureSplitTrace(data, &splitPre);
