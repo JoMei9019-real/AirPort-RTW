@@ -55,6 +55,43 @@ static constexpr UInt32 kRTW88DataQueueDepth = 64;
 static constexpr UInt32 kRTW88TxQueueHigh    = 128;
 static constexpr UInt32 kRTW88TxQueueLow     = 64;
 
+/* Current firmware rate-adaptation report in Apple's 500-kbit/s units.
+ * HT/VHT rate tables below are in 1-Mbit/s-equivalent 0.5 units from
+ * the supplied RTL8821CE patch; never substitute the AP's max rate. */
+static uint32_t rtw88CurrentRate500Kbps(
+    const RTW88IEEE80211::RadioTelemetry &t)
+{
+    if (!t.rateValid) return 0;
+    const uint32_t nss = t.nss ? t.nss : 1;
+    const unsigned gi = (t.rateFlags & RATE_INFO_FLAGS_SHORT_GI) ? 1U : 0U;
+    if (t.rateFlags & RATE_INFO_FLAGS_VHT_MCS) {
+        static const uint16_t vht20[2][10] = {
+            {13,26,39,52,78,104,117,130,156,173},
+            {14,29,43,58,87,116,130,144,173,192}};
+        static const uint16_t vht40[2][10] = {
+            {27,54,81,108,162,216,243,270,324,360},
+            {30,60,90,120,180,240,270,300,360,400}};
+        static const uint16_t vht80[2][10] = {
+            {59,117,176,234,351,468,527,585,702,780},
+            {65,130,195,260,390,520,585,650,780,867}};
+        if (t.mcs>9 || nss>4) return 0;
+        const uint16_t *table = t.bandwidth==RATE_INFO_BW_80?vht80[gi]:
+                                t.bandwidth==RATE_INFO_BW_40?vht40[gi]:vht20[gi];
+        return uint32_t(table[t.mcs])*nss/2U;
+    }
+    if (t.rateFlags & RATE_INFO_FLAGS_MCS) {
+        static const uint16_t ht20[2][8] = {
+            {13,26,39,52,78,104,117,130},{14,29,43,58,87,116,130,144}};
+        static const uint16_t ht40[2][8] = {
+            {27,54,81,108,162,216,243,270},{30,60,90,120,180,240,270,300}};
+        if (t.mcs>7 || nss>4) return 0;
+        const uint16_t *table=t.bandwidth==RATE_INFO_BW_40?ht40[gi]:ht20[gi];
+        return uint32_t(table[t.mcs])*nss/2U;
+    }
+    return t.legacyRate100kbps ? (t.legacyRate100kbps+2U)/5U : 0U;
+}
+
+
 /* IONetworkController asks subclasses to register power states through
  * registerWithPolicyMaker().  State 0 intentionally advertises no device
  * capability; state 1 means the PCI function is usable. */
@@ -2253,10 +2290,15 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         auto *d = static_cast<RTW88MCSVHTData *>(data);
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
-        d->index = 0; /* rtw88 port does not yet expose live TX MCS */
-        d->nss = _ieee80211->txNSS();
-        d->bw = _ieee80211->channelWidthMHz();
-        d->guard_interval = APPLE80211_GI_LONG;
+        RTW88IEEE80211::RadioTelemetry telemetry = {};
+        _ieee80211->getRadioTelemetry(&telemetry);
+        if (!telemetry.rateValid) return 6;
+        d->index = telemetry.mcs;
+        d->nss = telemetry.nss;
+        d->bw = telemetry.bandwidth==RATE_INFO_BW_80?80U:
+                telemetry.bandwidth==RATE_INFO_BW_40?40U:20U;
+        d->guard_interval = (telemetry.rateFlags & RATE_INFO_FLAGS_SHORT_GI) ?
+            APPLE80211_GI_SHORT : APPLE80211_GI_LONG;
         return kIOReturnSuccess;
     }
 
@@ -2279,7 +2321,10 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         auto *d = static_cast<apple80211_mcs_data *>(data);
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
-        d->index = 0; /* live TX-MCS export is not wired yet */
+        RTW88IEEE80211::RadioTelemetry telemetry = {};
+        _ieee80211->getRadioTelemetry(&telemetry);
+        if (!telemetry.rateValid) return 6;
+        d->index = telemetry.mcs;
         return kIOReturnSuccess;
     }
 
@@ -2311,7 +2356,10 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (isSet) return kIOReturnError;
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
-        d->nss = _ieee80211->txNSS();
+        RTW88IEEE80211::RadioTelemetry telemetry = {};
+        _ieee80211->getRadioTelemetry(&telemetry);
+        if (!telemetry.rateValid) return 6;
+        d->nss = telemetry.nss;
         return kIOReturnSuccess;
     }
 
@@ -2320,7 +2368,10 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         auto *d = static_cast<apple80211_nss_data *>(data);
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
-        d->nss = _ieee80211->txNSS();
+        RTW88IEEE80211::RadioTelemetry telemetry = {};
+        _ieee80211->getRadioTelemetry(&telemetry);
+        if (!telemetry.rateValid) return 6;
+        d->nss = telemetry.nss;
         return kIOReturnSuccess;
     }
 
@@ -2622,34 +2673,22 @@ __attribute__((__noinline__)) IOReturn AirPortRTW::handleRequestPHY_MODE(bool is
 
 __attribute__((__noinline__)) IOReturn AirPortRTW::handleRequestRATE(bool isSet, void *data)
 {
-        if (isSet) return kIOReturnUnsupported;
-        RTW88StateResult st = {};
-        if (_ieee80211->cmdGetState(&st) != kIOReturnSuccess || st.state != RTW88_STATE_CONNECTED)
-            return 6;
-        RTW88BSS b = {};
-        if (_ieee80211->copyCurrentBSS(&b) != kIOReturnSuccess) return 6;
-        auto *d = static_cast<apple80211_rate_data *>(data);
-        bzero(d, sizeof(*d));
-        d->version = APPLE80211_VERSION;
-        d->num_radios = 1;
-        uint32_t best = 0;
-        for (uint16_t pos = 0; pos + 2 <= b.ies_len;) {
-            const uint8_t id = b.ies[pos];
-            const uint8_t n = b.ies[pos + 1];
-            if ((uint32_t)pos + 2U + n > b.ies_len) break;
-            if (id == 1 || id == 50) {
-                for (uint8_t i = 0; i < n; ++i) {
-                    const uint32_t r = b.ies[pos + 2 + i] & 0x7fU;
-                    if (r > best) best = r;
-                }
-            }
-            pos = (uint16_t)(pos + 2U + n);
-        }
-        /* Legacy rates use 500-kbit/s units; the reference IO80211 driver exposes its
-         * net80211 rate value directly through this ABI. */
-        d->rate[0] = best;
-        return kIOReturnSuccess;
-    }
+    if (isSet) return kIOReturnUnsupported;
+    if (!data || !_ieee80211) return kIOReturnBadArgument;
+    RTW88StateResult state = {};
+    if (_ieee80211->cmdGetState(&state)!=kIOReturnSuccess ||
+        state.state!=RTW88_STATE_CONNECTED) return 6;
+    RTW88IEEE80211::RadioTelemetry telemetry = {};
+    _ieee80211->getRadioTelemetry(&telemetry);
+    uint32_t rate=rtw88CurrentRate500Kbps(telemetry);
+    if (!rate) return 6;
+    auto *d=static_cast<apple80211_rate_data *>(data);
+    bzero(d,sizeof(*d));
+    d->version=APPLE80211_VERSION;
+    d->num_radios=1;
+    d->rate[0]=rate;
+    return kIOReturnSuccess;
+}
 
 __attribute__((__noinline__)) IOReturn AirPortRTW::handleRequestRATE_SET(bool isSet, void *data)
 {
