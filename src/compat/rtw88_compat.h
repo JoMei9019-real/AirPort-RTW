@@ -66,6 +66,14 @@
 /* ------------------------------------------------------------------ */
 
 struct rtw_dev;
+struct ieee80211_sta;
+
+/* Snapshot of the live C2H firmware rate-adaptation report. */
+struct rtw88_tx_rate_snapshot {
+    uint32_t flags;
+    uint32_t legacy_100kbps;
+    uint8_t mcs, nss, bw, valid;
+};
 
 /* dev_err / dev_warn / dev_info / dev_dbg */
 void rtw88_dev_printk(int level, struct device *dev, const char *fmt, ...)
@@ -161,6 +169,8 @@ void rtw88_get_stats(struct rtw_dev *rtwdev, uint32_t *tx_bytes, uint32_t *rx_by
  * need the Linux driver's private layout live in rtw88_compat.c, after main.h
  * has provided the complete definition. */
 uint8_t rtw88_get_tx_nss(struct rtw_dev *rtwdev);
+void rtw88_get_tx_rate_snapshot(struct ieee80211_sta *sta,
+                                struct rtw88_tx_rate_snapshot *out);
 uintptr_t rtw88_tx_thread_id(void);
 int rtw88_tx_batch_write(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
                          struct sk_buff *skb, bool kick);
