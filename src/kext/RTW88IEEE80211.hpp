@@ -219,7 +219,7 @@ public:
     /* Native AWDL Ethernet -> 802.11 direct data encapsulation. Consumes m. */
     bool      txAWDLDataFrame(mbuf_t m);
     void      getMACAddress(uint8_t *mac);
-    void      getPermanentMACAddress(uint8_t *mac);
+    bool      getPermanentMACAddress(uint8_t *mac) const;
     struct RadioTelemetry {
         uint32_t rateFlags;
         uint32_t legacyRate100kbps;

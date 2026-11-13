@@ -156,6 +156,8 @@ typedef atomic_t refcount_t;
 
 int  rtw88_compat_init(void);
 void rtw88_compat_exit(void);
+void rtw88_coex_maintenance_start(void);
+void rtw88_coex_maintenance_stop(void);
 
 /* Set the firmware resources directory (call before rtw_pci_probe) */
 void rtw88_set_fw_dir(const char *dir);

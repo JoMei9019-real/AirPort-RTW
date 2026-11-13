@@ -152,6 +152,7 @@ bool rtw88_disable_watchdog_work = true;
  * paths. Keep its BT coexistence maintenance separately scheduled. */
 static struct delayed_work g_coex_maintenance_work;
 static bool g_coex_maintenance_initialized = false;
+static bool g_coex_maintenance_enabled = false;
 static volatile uint32_t g_coex_maintenance_runs = 0;
 static void rtw88_coex_maintenance_worker(struct work_struct *work);
 
@@ -1010,15 +1011,11 @@ static struct ieee80211_hw *g_rtw88_hw = NULL;
 void rtw88_register_hw(struct ieee80211_hw *hw)
 {
     g_rtw88_hw = hw;
-    if (g_coex_maintenance_initialized && system_wq)
-        queue_delayed_work(system_wq, &g_coex_maintenance_work, 2 * HZ);
 }
 void rtw88_unregister_hw(struct ieee80211_hw *hw)
 {
     if (g_rtw88_hw == hw) {
-        /* Drain periodic reads before the hardware backing hw->priv is freed. */
-        if (g_coex_maintenance_initialized)
-            cancel_delayed_work_sync(&g_coex_maintenance_work);
+        rtw88_coex_maintenance_stop();
         g_rtw88_hw = NULL;
     }
 }
@@ -1142,18 +1139,30 @@ int rtw88_compat_init(void)
         return -ENOMEM;
     }
 
+    // The frontend starts this worker after probe and STA setup complete.
     INIT_DELAYED_WORK(&g_coex_maintenance_work, rtw88_coex_maintenance_worker);
     g_coex_maintenance_initialized = true;
-    /* Schedule on rtw88_register_hw(), after a valid hardware pointer exists. */
     return 0;
+}
+
+void rtw88_coex_maintenance_start(void)
+{
+    if (!g_coex_maintenance_initialized || !system_wq)
+        return;
+    __atomic_store_n(&g_coex_maintenance_enabled, true, __ATOMIC_RELEASE);
+    queue_delayed_work(system_wq, &g_coex_maintenance_work, 2 * HZ);
+}
+
+void rtw88_coex_maintenance_stop(void)
+{
+    if (__atomic_exchange_n(&g_coex_maintenance_enabled, false, __ATOMIC_ACQ_REL))
+        cancel_delayed_work_sync(&g_coex_maintenance_work);
 }
 
 void rtw88_compat_exit(void)
 {
-    if (g_coex_maintenance_initialized) {
-        cancel_delayed_work_sync(&g_coex_maintenance_work);
-        g_coex_maintenance_initialized = false;
-    }
+    rtw88_coex_maintenance_stop();
+    g_coex_maintenance_initialized = false;
     if (g_irq_work_initialized)
         cancel_work_sync(&g_irq_work);
     destroy_workqueue(g_datapath_wq);
@@ -1217,7 +1226,7 @@ static void rtw88_coex_maintenance_worker(struct work_struct *work)
         }
         mutex_unlock(&rtwdev->mutex);
     }
-    if (g_coex_maintenance_initialized && system_wq)
+    if (__atomic_load_n(&g_coex_maintenance_enabled, __ATOMIC_ACQUIRE))
         queue_delayed_work(system_wq, &g_coex_maintenance_work, 2 * HZ);
 }
 
@@ -1438,13 +1447,15 @@ int rtw88_set_station_mac(struct ieee80211_hw *hw,
 
     struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
     struct rtw_vif *rtwvif = (struct rtw_vif *)vif->drv_priv;
-    if (!rtwvif)
-        return -EINVAL;
-
+    mutex_lock(&rtwdev->mutex);
+    if (!rtwvif->conf || !test_bit(RTW_FLAG_RUNNING, rtwdev->flags) ||
+        test_bit(RTW_FLAG_SCANNING, rtwdev->flags) ||
+        rtwdev->coex.stat.wl_under_ips || rtwdev->coex.stat.wl_under_lps) {
+        mutex_unlock(&rtwdev->mutex);
+        return -EBUSY;
+    }
     memcpy(vif->addr, mac, ETH_ALEN);
     memcpy(rtwvif->mac_addr, mac, ETH_ALEN);
-
-    mutex_lock(&rtwdev->mutex);
     rtw_vif_port_config(rtwdev, rtwvif, PORT_SET_MAC_ADDR);
     mutex_unlock(&rtwdev->mutex);
     return 0;

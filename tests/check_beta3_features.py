@@ -16,9 +16,9 @@ assert 'd->index = telemetry.mcs' in controller
 assert 'd->nss = telemetry.nss' in controller
 assert 'd->rate[0]=rate' in controller
 assert 'hasVHT && b.channel > 14' in controller
-assert '1.3.0-beta.4' in controller
+assert '1.3.0-beta.5' in controller
 assert 'd->index = 0; /* live TX-MCS export is not wired yet */' not in controller
 # 433.5 Mbps VHT80 MCS9 one stream, short GI -> integer 500-kbit/s units
 # 867 units are reported, yielding 433.5 Mbps from the UI representation.
 assert '780,867' in controller
-print('PASS: live firmware RA telemetry wiring, PHY band, Beta 4 version')
+print('PASS: live firmware RA telemetry wiring, PHY band, Beta 5 version')

@@ -11,6 +11,7 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
+#include <sys/errno.h>
 #include <sys/mbuf.h>
 #include <string.h>
 #include <sys/random.h>
@@ -930,6 +931,7 @@ IOReturn RTW88IEEE80211::start()
     _state = RTW88_STATE_IDLE;
     _associatedVisible = false;
     _scanReturnState = RTW88_STATE_IDLE;
+    rtw88_coex_maintenance_start();
     RTW88_STAGE("IEEE80211::start complete — SUCCESS");
     return kIOReturnSuccess;
 
@@ -954,6 +956,7 @@ fail_probe:
 void RTW88IEEE80211::stop()
 {
     IOLog("rtw88: IEEE80211 stop\n");
+    rtw88_coex_maintenance_stop();
     cancelAuthentication();
     cancelRoamSwitch();
     _manualScanAbort = true;
@@ -6420,13 +6423,12 @@ void RTW88IEEE80211::getMACAddress(uint8_t *mac)
     memcpy(mac, _macAddr, 6);
 }
 
-void RTW88IEEE80211::getPermanentMACAddress(uint8_t *mac)
+bool RTW88IEEE80211::getPermanentMACAddress(uint8_t *mac) const
 {
-    if (!mac) return;
-    if (_hw && _hw->wiphy)
-        memcpy(mac, _hw->wiphy->perm_addr, ETH_ALEN);
-    else
-        memcpy(mac, _macAddr, ETH_ALEN);
+    if (!mac || !_hw || !_hw->wiphy || !RTW88Roaming::unicast(_hw->wiphy->perm_addr))
+        return false;
+    memcpy(mac, _hw->wiphy->perm_addr, ETH_ALEN);
+    return true;
 }
 
 bool RTW88IEEE80211::getRadioTelemetry(RadioTelemetry *out) const
@@ -6447,25 +6449,25 @@ bool RTW88IEEE80211::getRadioTelemetry(RadioTelemetry *out) const
 
 IOReturn RTW88IEEE80211::setMACAddress(const uint8_t *mac)
 {
-    if (!mac || !_rtwdev || !_vif)
-        return kIOReturnNotReady;
-
-    const bool allZero = !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]);
-    if (allZero || (mac[0] & 0x01))
+    if (!mac || !RTW88Roaming::unicast(mac))
         return kIOReturnBadArgument;
+    if (!_hw || !_vif || !_powered)
+        return kIOReturnNotReady;
+    if (memcmp(mac, _macAddr, ETH_ALEN) == 0)
+        return kIOReturnSuccess;
 
-    /* A station address must not change midway through auth/association. */
-    if (_state == RTW88_STATE_CONNECTED || _state == RTW88_STATE_ASSOCIATING ||
-        _state == RTW88_STATE_AUTHENTICATING)
+    // An idle state alone is insufficient during a background scan or roam.
+    if (_state != RTW88_STATE_IDLE || _associatedVisible || _manualScanChannelCount ||
+        __atomic_load_n(&_roamScanWorkerPending, __ATOMIC_ACQUIRE) ||
+        _deferredConnectPending || _roamSwitch.phase || _awdlOffChannel)
         return kIOReturnBusy;
 
-    if (rtw88_set_station_mac(_hw, _vif, mac) != 0)
+    const int result = rtw88_set_station_mac(_hw, _vif, mac);
+    if (result == -EBUSY)
+        return kIOReturnBusy;
+    if (result)
         return kIOReturnError;
-    /* Commit the software address only after the hardware accepted it. */
     memcpy(_macAddr, mac, ETH_ALEN);
-
-    /* Never log the user-specific private Wi-Fi address. */
-    IOLog("rtw88: STA MAC programmed before association\n");
     return kIOReturnSuccess;
 }
 
