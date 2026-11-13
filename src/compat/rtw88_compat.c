@@ -1193,10 +1193,15 @@ static void rtw88_coex_maintenance_worker(struct work_struct *work)
         if (test_bit(RTW_FLAG_RUNNING, rtwdev->flags) &&
             !test_bit(RTW_FLAG_SCANNING, rtwdev->flags) &&
             rtwdev->efuse.btcoex) {
-            rtw_leave_lps(rtwdev);
-            rtw_coex_wl_status_check(rtwdev);
+            /* Avoid rtw_leave_lps: its synchronous MMIO polling previously
+             * hung this macOS port. Firmware queries are issued only while
+             * the device is awake and operational. */
+            if (!rtwdev->coex.stat.wl_under_lps &&
+                !rtwdev->coex.stat.wl_under_ips) {
+                rtw_coex_wl_status_check(rtwdev);
             rtw_coex_query_bt_hid_list(rtwdev);
-            rtw_coex_active_query_bt_info(rtwdev);
+                rtw_coex_active_query_bt_info(rtwdev);
+            }
             uint32_t n = ++g_coex_maintenance_runs;
             if ((n % 15U) == 1U)
                 rtw88_candidate_log("rtw88: beta4 BT coex maintenance runs=%u\\n", n);
