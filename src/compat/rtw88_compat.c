@@ -148,6 +148,14 @@ struct rtw88_usb_ops       *rtw88_usb_io_ops   = NULL;
  * chip-local thermal power tracking. Full DIG/RA needs valid station stats. */
 bool rtw88_disable_watchdog_work = true;
 
+/* Beta 4: the Linux watchdog is deliberately disabled for unsafe RF-DM
+ * paths. Keep its BT coexistence maintenance separately scheduled. */
+static struct delayed_work g_coex_maintenance_work;
+static bool g_coex_maintenance_initialized = false;
+static volatile uint32_t g_coex_maintenance_runs = 0;
+static void rtw88_coex_maintenance_worker(struct work_struct *work);
+
+
 /* ------------------------------------------------------------------ */
 /*  Workqueue implementation (kernel threads + IOLock)                  */
 /* ------------------------------------------------------------------ */
@@ -1125,11 +1133,18 @@ int rtw88_compat_init(void)
         return -ENOMEM;
     }
 
+    INIT_DELAYED_WORK(&g_coex_maintenance_work, rtw88_coex_maintenance_worker);
+    g_coex_maintenance_initialized = true;
+    queue_delayed_work(system_wq, &g_coex_maintenance_work, 2 * HZ);
     return 0;
 }
 
 void rtw88_compat_exit(void)
 {
+    if (g_coex_maintenance_initialized) {
+        cancel_delayed_work_sync(&g_coex_maintenance_work);
+        g_coex_maintenance_initialized = false;
+    }
     if (g_irq_work_initialized)
         cancel_work_sync(&g_irq_work);
     destroy_workqueue(g_datapath_wq);
@@ -1164,6 +1179,33 @@ void rtw88_compat_exit(void)
 #include "tx.h"
 #include "hci.h"
 #include "coex.h"
+
+/* Periodic BT maintenance only. The core watchdog must remain disabled:
+ * its station iteration/RF dynamic-mechanism paths are not yet safe on macOS.
+ * Follow Linux's locking, RUNNING/SCANNING and IPS/LPS guards. */
+static void rtw88_coex_maintenance_worker(struct work_struct *work)
+{
+    (void)work;
+    struct ieee80211_hw *hw = g_rtw88_hw;
+    if (hw && hw->priv && rtw88_disable_watchdog_work) {
+        struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
+        mutex_lock(&rtwdev->mutex);
+        if (test_bit(RTW_FLAG_RUNNING, rtwdev->flags) &&
+            !test_bit(RTW_FLAG_SCANNING, rtwdev->flags) &&
+            rtwdev->efuse.btcoex) {
+            rtw_leave_lps(rtwdev);
+            rtw_coex_wl_status_check(rtwdev);
+            rtw_coex_query_bt_hid_list(rtwdev);
+            rtw_coex_active_query_bt_info(rtwdev);
+            uint32_t n = ++g_coex_maintenance_runs;
+            if ((n % 15U) == 1U)
+                rtw88_candidate_log("rtw88: beta4 BT coex maintenance runs=%u\\n", n);
+        }
+        mutex_unlock(&rtwdev->mutex);
+    }
+    if (g_coex_maintenance_initialized && system_wq)
+        queue_delayed_work(system_wq, &g_coex_maintenance_work, 2 * HZ);
+}
 
 uintptr_t rtw88_tx_thread_id(void) { return (uintptr_t)current_thread(); }
 
