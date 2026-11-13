@@ -6459,9 +6459,10 @@ IOReturn RTW88IEEE80211::setMACAddress(const uint8_t *mac)
         _state == RTW88_STATE_AUTHENTICATING)
         return kIOReturnBusy;
 
-    memcpy(_macAddr, mac, ETH_ALEN);
     if (rtw88_set_station_mac(_hw, _vif, mac) != 0)
         return kIOReturnError;
+    /* Commit the software address only after the hardware accepted it. */
+    memcpy(_macAddr, mac, ETH_ALEN);
 
     /* Never log the user-specific private Wi-Fi address. */
     IOLog("rtw88: STA MAC programmed before association\n");
