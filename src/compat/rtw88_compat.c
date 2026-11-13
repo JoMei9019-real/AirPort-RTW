@@ -1007,11 +1007,20 @@ u8 ieee80211_vif_type_p2p(struct ieee80211_vif *vif)
 /* Single global hw pointer — forward-declared above, defined/initialized here. */
 static struct ieee80211_hw *g_rtw88_hw = NULL;
 
-void rtw88_register_hw(struct ieee80211_hw *hw) { g_rtw88_hw = hw; }
+void rtw88_register_hw(struct ieee80211_hw *hw)
+{
+    g_rtw88_hw = hw;
+    if (g_coex_maintenance_initialized && system_wq)
+        queue_delayed_work(system_wq, &g_coex_maintenance_work, 2 * HZ);
+}
 void rtw88_unregister_hw(struct ieee80211_hw *hw)
 {
-    if (g_rtw88_hw == hw)
+    if (g_rtw88_hw == hw) {
+        /* Drain periodic reads before the hardware backing hw->priv is freed. */
+        if (g_coex_maintenance_initialized)
+            cancel_delayed_work_sync(&g_coex_maintenance_work);
         g_rtw88_hw = NULL;
+    }
 }
 
 /* Accessor with external linkage so C++ TUs can retrieve the pointer without
@@ -1135,7 +1144,7 @@ int rtw88_compat_init(void)
 
     INIT_DELAYED_WORK(&g_coex_maintenance_work, rtw88_coex_maintenance_worker);
     g_coex_maintenance_initialized = true;
-    queue_delayed_work(system_wq, &g_coex_maintenance_work, 2 * HZ);
+    /* Schedule on rtw88_register_hw(), after a valid hardware pointer exists. */
     return 0;
 }
 
@@ -1199,12 +1208,12 @@ static void rtw88_coex_maintenance_worker(struct work_struct *work)
             if (!rtwdev->coex.stat.wl_under_lps &&
                 !rtwdev->coex.stat.wl_under_ips) {
                 rtw_coex_wl_status_check(rtwdev);
-            rtw_coex_query_bt_hid_list(rtwdev);
+                rtw_coex_query_bt_hid_list(rtwdev);
                 rtw_coex_active_query_bt_info(rtwdev);
             }
             uint32_t n = ++g_coex_maintenance_runs;
             if ((n % 15U) == 1U)
-                rtw88_candidate_log("rtw88: beta4 BT coex maintenance runs=%u\\n", n);
+                rtw88_candidate_log("rtw88: beta4 BT coex maintenance runs=%u\n", n);
         }
         mutex_unlock(&rtwdev->mutex);
     }
