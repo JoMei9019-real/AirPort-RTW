@@ -6420,6 +6420,22 @@ void RTW88IEEE80211::getMACAddress(uint8_t *mac)
     memcpy(mac, _macAddr, 6);
 }
 
+bool RTW88IEEE80211::getRadioTelemetry(RadioTelemetry *out) const
+{
+    if (!out) return false;
+    bzero(out, sizeof(*out));
+    if (!_sta) return false;
+    struct rtw88_tx_rate_snapshot rate = {};
+    rtw88_get_tx_rate_snapshot(_sta, &rate);
+    out->rateFlags = rate.flags;
+    out->legacyRate100kbps = rate.legacy_100kbps;
+    out->mcs = rate.mcs;
+    out->nss = rate.nss;
+    out->bandwidth = rate.bw;
+    out->rateValid = rate.valid != 0;
+    return out->rateValid;
+}
+
 IOReturn RTW88IEEE80211::setMACAddress(const uint8_t *mac)
 {
     if (!mac || !_rtwdev || !_vif)
