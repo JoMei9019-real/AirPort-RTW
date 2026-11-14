@@ -35,7 +35,7 @@ struct RTW88IEEE80211{
  bool roamScanActive()const{return _roamScanActive;}
  void restoreConnectedChannel(){++homeRestores;}void txNullFunc(bool ps){assert(!ps);++psClears;}
  int setAWDLChannel(unsigned){return 0;}int setAWDLReceiveMode(bool){return 0;}
- void wakeTrace(const char*){}void resumeDeferredJoin(){}void scanDone(bool);
+ void wakeTrace(const char*){}void resumeDeferredJoin(){}void scanDone(bool,bool=false);
 ''')
 pre = pre.replace('using IOReturn=int;', 'constexpr int kIOReturnSuccess=0;using IOReturn=int;')
 methods += method('void RTW88IEEE80211::scanDone(')

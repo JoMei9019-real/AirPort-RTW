@@ -54,7 +54,8 @@ pre=pre.replace('void roamTrace(const char*,uint32_t=0){}',r'''
  ieee80211_scan_request *_scanRequest=nullptr;Channel *_scanRequestChannels[256]={},*_manualScanChannels[256]={};
  void *_manualScanTC=this,*_vif=this;Timer timer;Timer *_timer=&timer;
  void restoreConnectedChannel(){++restores;}void txNullFunc(bool x){ps.push_back(x);}void txProbeRequest(){assert(!(_hw->conf.chandef.chan->flags&6));++probes;}
- void scanDone(bool aborted){assert(_scanReturnState==5);restoreConnectedChannel();txNullFunc(false);_state=5;_scanReturnState=0;_roamScanResult=aborted?3:2;_roamScanActive=false;}
+ void scanDone(bool aborted,bool manual=false){assert(_scanReturnState==5);restoreConnectedChannel();txNullFunc(false);_state=5;_scanReturnState=0;_roamScanResult=aborted?3:2;_roamScanActive=false;
+  if(manual){_manualScanAbort=false;_manualScanChannelCount=0;}}
 ''')
 # Real scanner uses RTW88State only as a state-value type.
 pre=pre.replace('using IOReturn=int;', 'using IOReturn=int;using RTW88State=int;')

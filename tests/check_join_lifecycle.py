@@ -55,13 +55,16 @@ struct RTW88IEEE80211{
  IOReturn cmdDisconnect();
  bool bssOffersPSKOnly(const char*,const uint8_t*){return false;}
  bool matchesPSKPasswordJoin(const char*,const char*,const uint8_t*){return false;}
- IOReturn cmdConnect(const char*,const char*,const uint8_t*,const uint8_t*,bool){assert(false);return 0;}
- IOReturn cmdConnectSAE(const char*s,const char*p,const uint8_t*){++starts;_state=2;_connectCancelled=false;_saeMode=true;strcpy(_targetBSS.ssid,s);strcpy(_password,p);return 0;}
+ IOReturn cmdConnect(const char*,const char*,const uint8_t*,const uint8_t*,bool,bool,
+                     const RTW88AssocWire::StationAddress &){assert(false);return 0;}
+ IOReturn cmdConnectSAE(const char*s,const char*p,const uint8_t*,const RTW88AssocWire::StationAddress &){
+  ++starts;_state=2;_connectCancelled=false;_saeMode=true;strcpy(_targetBSS.ssid,s);strcpy(_password,p);return 0;}
 };
 struct AirPortRTW{
  RTW88IEEE80211*_ieee80211;bool _shutdown=false,_assocDoneReported=false,_rsnHandshakeReported=false;
  unsigned _authLower=0,_authUpper=0;
  bool roamingActionsAllowed(){return true;}
+ bool matchesJoinStationAddress(const RTW88AssocWire::StationAddress &){return true;}
  template<class...T>void setProperty(T...){}
  IOReturn handleMenuSAE(const RTW88AssocWire::Personal&);IOReturn handleDISASSOCIATE();
 };

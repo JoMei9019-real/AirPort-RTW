@@ -4,20 +4,42 @@
 #include <string.h>
 
 // Sequoia 900-byte and Tahoe 908-byte ASSOCIATE envelopes.
-// Validate the shared prefix independently; never interpret the unknown tail.
+// Validate the shared prefix independently of the Tahoe station address.
 // Mode and both auth fields use 32 bits rather than the Ventura controller ABI.
 // Never cast this wire prefix to apple80211_assoc_data.
 // The optional extended key slot is read only for explicitly typed passwords.
 // The unknown tail is never interpreted as RSN or credentials.
 namespace RTW88AssocWire {
 constexpr size_t RequestSize = 900, TahoeRequestSize = 908, PrefixSize = 108, PasswordPrefixSize = 140;
+// Apple80211Associate2 on Intel Tahoe 25G342, before Legacy translation.
+constexpr size_t TahoeFlagsOffset = 0x1d4, TahoeStationAddressOffset = 0x200;
+constexpr uint8_t TahoePrivateAddressPresent = 0x08;
 inline bool supportedRequestSize(size_t n) {
     return n == RequestSize || n == TahoeRequestSize;
 }
+struct StationAddress {
+    enum class Mode : uint8_t { Unspecified, Default, Private };
+    Mode mode = Mode::Unspecified;
+    uint8_t bytes[6] = {};
+};
 struct Personal {
     uint32_t mode, lower, upper, ssidLength, keyLength, cipher;
     uint8_t ssid[32], bssid[6], key[64];
+    StationAddress station;
 };
+inline bool decodeTahoeStationAddress(const uint8_t *p, size_t n, StationAddress &out) {
+    out = {};
+    if (!p || n != TahoeRequestSize) return false;
+    if (!(p[TahoeFlagsOffset] & TahoePrivateAddressPresent)) {
+        out.mode = StationAddress::Mode::Default;
+        return true;
+    }
+    const uint8_t *mac = p + TahoeStationAddressOffset;
+    if ((mac[0] & 3) != 2) return false; // Locally administered unicast.
+    out.mode = StationAddress::Mode::Private;
+    memcpy(out.bytes, mac, sizeof(out.bytes));
+    return true;
+}
 inline uint32_t le32(const uint8_t *p) {
     return uint32_t(p[0]) | uint32_t(p[1])<<8 | uint32_t(p[2])<<16 | uint32_t(p[3])<<24;
 }

@@ -2603,10 +2603,16 @@ bool RTW88IEEE80211::abortActiveScan(bool waitForIdle)
     return _state != RTW88_STATE_SCANNING;
 }
 
-void RTW88IEEE80211::scanDone(bool aborted)
+void RTW88IEEE80211::scanDone(bool aborted, bool manual)
 {
     // A late firmware completion after timeout must not finish a new join.
-    if (_state != RTW88_STATE_SCANNING) return;
+    if (_state != RTW88_STATE_SCANNING) {
+        if (manual) {
+            _manualScanAbort = false;
+            _manualScanChannelCount = 0;
+        }
+        return;
+    }
     const bool roamScan = roamScanActive();
     if (_timer) _timer->cancelTimeout();
     if (!aborted) {
@@ -2674,6 +2680,12 @@ void RTW88IEEE80211::scanDone(bool aborted)
     }
 
     wakeTrace("scan-done");
+    // Firmware and home-channel updates are complete. Release ownership
+    // before waking the workloop that can apply a deferred join's MAC.
+    if (manual) {
+        _manualScanAbort = false;
+        _manualScanChannelCount = 0;
+    }
     if (_powered && _state == RTW88_STATE_CONNECTED && _parent) _parent->scanTxReady();
     /* Complete the Apple scan transaction first.  If ASSOCIATE arrived while
      * scanning, start that already-accepted join immediately afterwards. */
@@ -2700,19 +2712,13 @@ void RTW88IEEE80211::resumeDeferredJoin()
         const bool bssidValid = _deferredBSSIDValid;
         const bool externalSupplicant = _deferredExternalSupplicant;
         const bool sae = _deferredSAE;
-
-        _deferredConnectPending = false;
-        _deferredPMKValid = false;
-        _deferredBSSIDValid = false;
-        bzero(_deferredSSID, sizeof(_deferredSSID));
-        bzero(_deferredPassword, sizeof(_deferredPassword));
-        bzero(_deferredPMK, sizeof(_deferredPMK));
-        bzero(_deferredBSSID, sizeof(_deferredBSSID));
+        const auto station = _deferredStationAddress;
+        clearDeferredJoin();
 
         IOReturn joinRet = cmdConnect(ssid, password[0] ? password : nullptr,
                                       pmkValid ? pmk : nullptr,
                                       bssidValid ? bssid : nullptr,
-                                      externalSupplicant, sae);
+                                      externalSupplicant, sae, station);
         IOLog("rtw88: deferred ASSOCIATE after scan ret=0x%x ssid=%s\n",
               joinRet, ssid);
         bzero(pmk, sizeof(pmk));
@@ -2871,8 +2877,7 @@ void RTW88IEEE80211::runManualScan()
     const unsigned rmMode=_rm.scanMode,rmDwell=_rm.dwellMs;
     const uint64_t rmBaseTSF=_rm.baseTSF,rmBaseUs=_rm.baseUs;
     if (!_hw || !_vif) {
-        scanDone(true);
-        _manualScanChannelCount = 0;
+        scanDone(true, true);
         if(rmWorker)_rm.scanOwned=false;
         if(roamWorker)__atomic_store_n(&_roamScanWorkerPending,false,__ATOMIC_RELEASE);
         return;
@@ -2948,9 +2953,7 @@ void RTW88IEEE80211::runManualScan()
     if(roamWorker)roamTrace("scan-firmware-exit-complete");
     /* scanDone restores/calibrates the home channel and clears AP power-save
      * once, including an aborted scan, before notifying IO80211. */
-    scanDone(_manualScanAbort);
-    _manualScanAbort = false;
-    _manualScanChannelCount = 0;
+    scanDone(_manualScanAbort, true);
     if(rmWorker)_rm.scanOwned=false;
     if(roamWorker)__atomic_store_n(&_roamScanWorkerPending,false,__ATOMIC_RELEASE);
 }
@@ -2991,7 +2994,8 @@ void RTW88IEEE80211::failJoin(const char *stage)
 }
 
 IOReturn RTW88IEEE80211::cmdConnect(const char *ssid, const char *password, const uint8_t *pmk,
-                                      const uint8_t *bssid, bool externalSupplicant, bool sae)
+                                      const uint8_t *bssid, bool externalSupplicant, bool sae,
+                                      const RTW88AssocWire::StationAddress &station)
 {
     // A diagnostic scan has no Apple scan transaction to defer a new join
     // into. Abort the short worker and let the caller retry once it is idle.
@@ -3019,6 +3023,7 @@ IOReturn RTW88IEEE80211::cmdConnect(const char *ssid, const char *password, cons
         else bzero(_deferredBSSID, sizeof(_deferredBSSID));
         _deferredExternalSupplicant = externalSupplicant;
         _deferredSAE = sae;
+        _deferredStationAddress = station;
         _deferredConnectPending = true;
 
         if (_manualScanChannelCount) {
@@ -3113,6 +3118,12 @@ IOReturn RTW88IEEE80211::cmdConnect(const char *ssid, const char *password, cons
             !RTW88WPA3::profile(_targetBSS.ies,_targetBSS.ies_len,profile)) return kIOReturnUnsupported;
         _targetBSS.cipher = _targetBSS.group_cipher = WLAN_CIPHER_SUITE_CCMP;
         _targetBSS.akm = 0x000fac08;
+    }
+    // In-driver roaming retains this link's station address across APs.
+    if (_parent && !_roamSwitchInternal) {
+        const IOReturn result = _parent->prepareJoinStationAddress(station);
+        if (result != kIOReturnSuccess)
+            return result;
     }
     _saeMode = sae;
     _authAttempts = 0;
@@ -3920,6 +3931,7 @@ void RTW88IEEE80211::clearDeferredJoin()
     _deferredBSSIDValid = false;
     _deferredExternalSupplicant = false;
     _deferredSAE = false;
+    _deferredStationAddress = {};
     bzero(_deferredSSID, sizeof(_deferredSSID));
     bzero(_deferredPassword, sizeof(_deferredPassword));
     bzero(_deferredPMK, sizeof(_deferredPMK));
@@ -6577,16 +6589,21 @@ void RTW88IEEE80211::clearWPA3()
     _sae.clear();_saeMode=false;
     if(_lock)IOLockUnlock(_lock);
 }
-IOReturn RTW88IEEE80211::cmdConnectSAE(const char *ssid,const char *password,const uint8_t *bssid)
+IOReturn RTW88IEEE80211::cmdConnectSAE(const char *ssid, const char *password, const uint8_t *bssid,
+                                     const RTW88AssocWire::StationAddress &station)
 {
     if (!_parent || !_parent->roamingActionsAllowed()) return kIOReturnNotReady;
     IOWorkLoop *rxwl=_parent->rxProcessingDeferred()?_parent->getRxWorkLoop():nullptr;
-    struct Request { const char *ssid,*password;const uint8_t *bssid; } request={ssid,password,bssid};
+    struct Request {
+        const char *ssid, *password;
+        const uint8_t *bssid;
+        const RTW88AssocWire::StationAddress &station;
+    } request = {ssid, password, bssid, station};
     auto action=[](OSObject *owner,void *context,void*,void*,void*)->IOReturn {
         auto*self=static_cast<RTW88IEEE80211*>(owner);auto*r=static_cast<Request*>(context);
         if(self->_state!=RTW88_STATE_IDLE && !(self->_state==RTW88_STATE_SCANNING && self->_scanReturnState==RTW88_STATE_IDLE))return kIOReturnBusy;
         self->clearAssocRsnIE();
-        return self->cmdConnect(r->ssid,r->password,nullptr,r->bssid,false,true);
+        return self->cmdConnect(r->ssid,r->password,nullptr,r->bssid,false,true,r->station);
     };
     return rxwl?rxwl->runAction(action,this,&request):action(this,&request,nullptr,nullptr,nullptr);
 }

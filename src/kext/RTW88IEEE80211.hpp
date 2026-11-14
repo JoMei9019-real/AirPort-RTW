@@ -23,6 +23,7 @@
 #include "RTW88RRM.hpp"
 #include "RTW88Lifecycle.hpp"
 #include "RTW88RoamSwitch.hpp"
+#include "RTW88AssocWire.hpp"
 
 /* Opaque C driver handle */
 struct rtw_dev;
@@ -114,6 +115,9 @@ public:
     virtual void scanTxReady() {}
     virtual void setRxQueueEnabled(bool enabled) { (void)enabled; }
     virtual void radioPowerChanged(bool powered) { (void)powered; }
+    virtual IOReturn prepareJoinStationAddress(const RTW88AssocWire::StationAddress &) {
+        return kIOReturnSuccess;
+    }
     /* Optional native 802.11 action-frame sink for AWDL/P2P controllers. */
     virtual void injectRxActionFrame(const uint8_t *frame, uint32_t len, int8_t rssi, uint16_t channel) {
         (void)frame; (void)len; (void)rssi; (void)channel;
@@ -232,7 +236,7 @@ public:
     /* Called from compat layer (ieee80211_rx_irqsafe) */
     void      rxFrame(struct sk_buff *skb);
     void      txStatus(struct sk_buff *skb);
-    void      scanDone(bool aborted);
+    void      scanDone(bool aborted, bool manual = false);
     void resumeDeferredJoin();
 
     /* Control interface — called from RTW88UserClient */
@@ -242,7 +246,8 @@ public:
     bool associatedVisible() const { return _associatedVisible; }
     IOReturn  cmdScan(uint16_t roamChannel = 0);
     IOReturn  cmdConnect(const char *ssid, const char *password, const uint8_t *pmk = nullptr,
-                         const uint8_t *bssid = nullptr, bool externalSupplicant = false, bool sae = false);
+                         const uint8_t *bssid = nullptr, bool externalSupplicant = false, bool sae = false,
+                         const RTW88AssocWire::StationAddress &station = {});
     IOReturn  cmdInstallExternalKey(bool pairwise, uint8_t keyidx, uint32_t cipher,
                                     const uint8_t *key, uint8_t key_len);
     bool      externalKeysReady() const { return _enterprise ? _enterpriseAuthorized :
@@ -258,7 +263,8 @@ public:
     IOReturn copyScanBSS(uint32_t index, RTW88BSS *out);
     IOReturn copyCurrentBSS(RTW88BSS *out);
     IOReturn copyChannels(RTW88Channel *out, uint32_t capacity, uint32_t *count);
-    IOReturn cmdConnectSAE(const char *,const char *,const uint8_t *);
+    IOReturn cmdConnectSAE(const char *, const char *, const uint8_t *,
+                          const RTW88AssocWire::StationAddress &station = {});
     unsigned saeStage() const { return _sae.stage; }
     unsigned saeError() const { return _sae.error; }
     unsigned saeRejectionStatus() const;
@@ -528,6 +534,7 @@ private:
     bool                _deferredPMKValid = false;
     uint8_t             _deferredBSSID[6] = {};
     bool                _deferredBSSIDValid = false;
+    RTW88AssocWire::StationAddress _deferredStationAddress;
     bool                _deferredExternalSupplicant = false;
 
     /* Target BSS for connection */

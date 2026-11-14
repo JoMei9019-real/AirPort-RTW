@@ -154,7 +154,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.3.0-beta.6");
+    setProperty("DriverBuild", "1.3.0-beta.7");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -339,7 +339,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 1.3.0-beta.6 WPA3-Personal\n");
+    IOLog("AirPortRTW: 1.3.0-beta.7 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -1457,8 +1457,53 @@ IOReturn AirPortRTW::setStationMAC(const uint8_t *address, bool updateBSD)
     if (memcmp(previous.bytes, address, sizeof(previous.bytes)) != 0) {
         _privateMacFlags = 0;
         _privateMacTimeout = 0;
+        _assocOwnsStationMAC = false;
     }
     return kIOReturnSuccess;
+}
+
+bool AirPortRTW::matchesJoinStationAddress(const RTW88AssocWire::StationAddress &station)
+{
+    using Mode = RTW88AssocWire::StationAddress::Mode;
+    if (station.mode != Mode::Private)
+        return !_assocOwnsStationMAC;
+
+    IOEthernetAddress current = {};
+    _ieee80211->getMACAddress(current.bytes);
+    return memcmp(current.bytes, station.bytes, sizeof(current.bytes)) == 0;
+}
+
+IOReturn AirPortRTW::prepareJoinStationAddress(const RTW88AssocWire::StationAddress &station)
+{
+    using Mode = RTW88AssocWire::StationAddress::Mode;
+    if (!_workLoop)
+        return kIOReturnNotReady;
+    auto apply = [](OSObject *owner, void *data, void *, void *, void *) -> IOReturn {
+        auto *self = static_cast<AirPortRTW *>(owner);
+        const auto &request = *static_cast<const RTW88AssocWire::StationAddress *>(data);
+        const bool privateAddress = request.mode == Mode::Private;
+        if (!privateAddress && !self->_assocOwnsStationMAC)
+            return kIOReturnSuccess;
+
+        IOEthernetAddress current = {}, permanent = {};
+        if (!self->_ieee80211 || !self->_ieee80211->getPermanentMACAddress(permanent.bytes))
+            return kIOReturnNotReady;
+        self->_ieee80211->getMACAddress(current.bytes);
+        const uint8_t *desired = privateAddress ? request.bytes : permanent.bytes;
+        const bool changed = memcmp(current.bytes, desired, sizeof(current.bytes)) != 0;
+        const bool owned = self->_assocOwnsStationMAC;
+        const IOReturn result = self->setStationMAC(desired, true);
+        if (result == kIOReturnSuccess)
+            self->_assocOwnsStationMAC = privateAddress && (changed || owned);
+        self->setProperty("STA_ASSOC_PRIVATE_MAC_APPLY_RET", (uint64_t)(uint32_t)result, 32);
+        self->setProperty("STA_ASSOC_PRIVATE_MAC_ACTIVE",
+                          result == kIOReturnSuccess && privateAddress ?
+                          kOSBooleanTrue : kOSBooleanFalse);
+        return result;
+    };
+    auto request = station;
+    return _workLoop->inGate() ? apply(this, &request, nullptr, nullptr, nullptr) :
+                               _workLoop->runAction(apply, this, &request);
 }
 
 IOReturn AirPortRTW::getHardwareAddressForInterface(IO80211Interface *iface,
@@ -1476,45 +1521,79 @@ IOReturn AirPortRTW::getHardwareAddressForInterface(IO80211Interface *iface,
  *
  * the reference Ventura IO80211 driver implements apple80211Request() and leaves association/
  * security translation to IO80211FamilyLegacy. Preserve that path except for
- * scan and the validated 900/908-byte association prefix on newer hosts using
+ * scan and the validated 900/908-byte association requests on newer hosts using
  * the restored Legacy/Skywalk stack.
  */
-namespace {
-static bool rtw88TryHostAssociation(AirPortRTW *self, IO80211Interface *interface,
-                                    apple80211req *req, SInt32 *result)
+bool AirPortRTW::tryHostAssociation(apple80211req *req, SInt32 &result)
 {
-    if (!req->req_data || !RTW88AssocWire::supportedRequestSize(req->req_len)) return false;
-    uint8_t prefix[RTW88AssocWire::PasswordPrefixSize] = {};
+    const size_t size = req->req_len;
+    if (!req->req_data || !RTW88AssocWire::supportedRequestSize(size))
+        return false;
+    const bool tahoe = version_major == 25 && size == RTW88AssocWire::TahoeRequestSize;
+    const size_t copySize = tahoe ? size : RTW88AssocWire::PasswordPrefixSize;
+    // Snapshot the BSD request before Legacy translation drops the address.
+    auto *wire = static_cast<uint8_t *>(IOMallocZero(copySize));
+    if (!wire) { result = ENOMEM; return true; }
+    const int error = copyin((user_addr_t)req->req_data, wire, copySize);
     RTW88AssocWire::Personal fields = {};
-    const int error = copyin((user_addr_t)req->req_data, prefix, sizeof(prefix));
-    const bool valid = !error && RTW88AssocWire::decode(prefix, sizeof(prefix), fields);
-    RTW88AssocWire::wipe(prefix, sizeof(prefix));
-    if (!valid) { RTW88AssocWire::wipe(&fields, sizeof(fields)); return false; }
-    if(fields.cipher==10) {
-        self->setProperty("WPA3_MENU_HOST_PASSWORD",kOSBooleanTrue);
-        *result=self->handleMenuSAE(fields);
-        RTW88AssocWire::wipe(&fields,sizeof(fields));
-        if(*result<0 || *result>=256){int e=self->errnoFromReturn(*result);*result=e?e:EIO;}
+    const bool valid = !error && RTW88AssocWire::decode(wire, RTW88AssocWire::PasswordPrefixSize, fields);
+    const bool stationValid = !valid || !tahoe ||
+        RTW88AssocWire::decodeTahoeStationAddress(wire, copySize, fields.station);
+    RTW88AssocWire::wipe(wire, copySize);
+    IOFree(wire, copySize);
+    if (error) { result = error; return true; }
+    if (!valid)
+        return false;
+    if (!stationValid) {
+        setProperty("STA_ASSOC_PRIVATE_MAC_REQUEST", "invalid");
+        RTW88AssocWire::wipe(&fields, sizeof(fields));
+        result = EINVAL;
         return true;
     }
-    apple80211_assoc_data assoc = {};
-    assoc.version = APPLE80211_VERSION;
-    assoc.ad_mode = fields.mode; assoc.ad_auth_lower = fields.lower; assoc.ad_auth_upper = fields.upper;
-    assoc.ad_ssid_len = fields.ssidLength;
-    memcpy(assoc.ad_ssid, fields.ssid, fields.ssidLength);
-    memcpy(assoc.ad_bssid.octet, fields.bssid, sizeof(fields.bssid));
-    assoc.ad_key.version = APPLE80211_VERSION;
-    assoc.ad_key.key_len = fields.keyLength; assoc.ad_key.key_cipher_type = fields.cipher;
-    memcpy(assoc.ad_key.key, fields.key, fields.keyLength);
+
+    auto join = [](OSObject *owner, void *data, void *, void *, void *) -> IOReturn {
+        auto *self = static_cast<AirPortRTW *>(owner);
+        const auto &request = *static_cast<const RTW88AssocWire::Personal *>(data);
+        if (!self->_ieee80211)
+            return kIOReturnNotReady;
+        using Mode = RTW88AssocWire::StationAddress::Mode;
+        if (request.station.mode != Mode::Unspecified)
+            self->setProperty("STA_ASSOC_PRIVATE_MAC_REQUEST",
+                              request.station.mode == Mode::Private ? "private" : "absent");
+        if (request.cipher == 10) {
+            self->setProperty("WPA3_MENU_HOST_PASSWORD", kOSBooleanTrue);
+            return self->handleMenuSAE(request);
+        }
+        apple80211_assoc_data assoc = {};
+        assoc.version = APPLE80211_VERSION;
+        assoc.ad_mode = request.mode;
+        assoc.ad_auth_lower = request.lower;
+        assoc.ad_auth_upper = request.upper;
+        assoc.ad_ssid_len = request.ssidLength;
+        memcpy(assoc.ad_ssid, request.ssid, request.ssidLength);
+        memcpy(assoc.ad_bssid.octet, request.bssid, sizeof(request.bssid));
+        assoc.ad_key.version = APPLE80211_VERSION;
+        assoc.ad_key.key_len = request.keyLength;
+        assoc.ad_key.key_cipher_type = request.cipher;
+        memcpy(assoc.ad_key.key, request.key, request.keyLength);
+        self->setProperty("STA_ASSOC_HOST32_TRANSLATED", kOSBooleanTrue);
+        const IOReturn ret = self->handleASSOCIATE(&assoc, request.station);
+        self->setProperty("STA_ASSOC_NATIVE_RET", (uint64_t)(uint32_t)ret, 32);
+        RTW88AssocWire::wipe(&assoc, sizeof(assoc));
+        return ret;
+    };
+    if (!_workLoop)
+        result = kIOReturnNotReady;
+    else if (_workLoop->inGate())
+        result = join(this, &fields, nullptr, nullptr, nullptr);
+    else
+        result = _workLoop->runAction(join, this, &fields);
     RTW88AssocWire::wipe(&fields, sizeof(fields));
-    self->setProperty("STA_ASSOC_HOST32_TRANSLATED", kOSBooleanTrue);
-    *result = self->apple80211Request(SIOCSA80211, APPLE80211_IOC_ASSOCIATE, interface, &assoc);
-    RTW88AssocWire::wipe(&assoc, sizeof(assoc));
-    if (*result < 0 || *result >= 256) {
-        const int e = self->errnoFromReturn(*result); *result = e ? e : EIO;
+    if (result < 0 || result >= 256) {
+        const int error = errnoFromReturn(result);
+        result = error ? error : EIO;
     }
     return true;
-}
 }
 
 namespace {
@@ -1546,7 +1625,10 @@ SInt32 AirPortRTW::handleStationMACRequest(bool isSet, int selector,
                 if (!req.isSet)
                     return kIOReturnUnsupported;
                 const auto &value = *static_cast<const RTW88StationMACWire::SetAddress *>(req.data);
-                return self->setStationMAC(value.address, true);
+                const IOReturn ret = self->setStationMAC(value.address, true);
+                if (ret == kIOReturnSuccess)
+                    self->_assocOwnsStationMAC = false;
+                return ret;
             }
 
             if (req.selector == RTW88StationMACWire::HardwareAddressSelector) {
@@ -1570,6 +1652,7 @@ SInt32 AirPortRTW::handleStationMACRequest(bool isSet, int selector,
                 const IOReturn ret = self->setStationMAC(
                     value.enabled ? value.address : permanent.bytes, true);
                 if (ret == kIOReturnSuccess) {
+                    self->_assocOwnsStationMAC = false;
                     self->_privateMacFlags = value.flags;
                     self->_privateMacTimeout = value.enabled ? value.timeoutSeconds : 0;
                 }
@@ -1673,7 +1756,7 @@ SInt32 AirPortRTW::apple80211_ioctl(IO80211Interface *interface,
     if (isSet && reqType == APPLE80211_IOC_ASSOCIATE && !virtualInterface &&
         interface && interface == _netif && RTW88AssocWire::supportedRequestSize(len)) {
         SInt32 ret = 0;
-        if (rtw88TryHostAssociation(this, interface, req, &ret)) return ret;
+        if (tryHostAssociation(req, ret)) return ret;
     }
     const bool scanBridge = !virtualInterface &&
         ((isGet && reqType == APPLE80211_IOC_SCAN_RESULT) ||
@@ -2607,7 +2690,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.3.0-beta.6)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.3.0-beta.7)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -3088,7 +3171,8 @@ IOReturn AirPortRTW::handleAUTH_TYPE(bool set, struct apple80211_authtype_data *
     return kIOReturnSuccess;
 }
 
-IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
+IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d,
+                                    const RTW88AssocWire::StationAddress &station)
 {
     IOLog("AirPortRTW: handleASSOCIATE ENTER\n");
     // Metadata only: never publish SSID, BSSID, PMK or password bytes.
@@ -3118,7 +3202,7 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
     if(d->ad_key.key_cipher_type==10 && d->ad_auth_lower==1 &&
        (d->ad_auth_upper==8 || d->ad_auth_upper==4096 || d->ad_auth_upper==(4096|8))) {
         if(!d->ad_key.key_len || d->ad_key.key_len>sizeof(d->ad_key.key))return kIOReturnUnsupported;
-        RTW88AssocWire::Personal request={};request.mode=d->ad_mode;request.lower=1;
+        RTW88AssocWire::Personal request={};request.mode=d->ad_mode;request.lower=1;request.station=station;
         request.upper=d->ad_auth_upper;request.ssidLength=d->ad_ssid_len;request.keyLength=d->ad_key.key_len;request.cipher=10;
         memcpy(request.ssid,d->ad_ssid,request.ssidLength);memcpy(request.bssid,d->ad_bssid.octet,6);memcpy(request.key,d->ad_key.key,request.keyLength);
         IOReturn ret=handleMenuSAE(request);RTW88AssocWire::wipe(&request,sizeof(request));return ret;
@@ -3153,7 +3237,8 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
          current.state == RTW88_STATE_ASSOCIATING ||
          current.state == RTW88_STATE_HANDSHAKING ||
          current.state == RTW88_STATE_CONNECTED)) {
-        bool same = _ieee80211->matchesPendingJoin(ssid, bssid, pmk, enterprise);
+        bool same = _ieee80211->matchesPendingJoin(ssid, bssid, pmk, enterprise) &&
+                    matchesJoinStationAddress(station);
         setProperty("ASSOCIATE_COALESCED", same ? kOSBooleanTrue : kOSBooleanFalse);
         if (same) return kIOReturnSuccess;
         // A valid new ASSOCIATE supersedes the old attempt/link. Drain its
@@ -3186,7 +3271,7 @@ IOReturn AirPortRTW::handleASSOCIATE(struct apple80211_assoc_data *d)
     _assocDoneReported = false;
     _rsnHandshakeReported = false;
     setProperty("STA_ASSOCIATE_BEFORE_RAW_STATE", (uint64_t)_ieee80211->rawState(), 32);
-    IOReturn ret = _ieee80211->cmdConnect(ssid, nullptr, pmk, bssid, enterprise);
+    IOReturn ret = _ieee80211->cmdConnect(ssid, nullptr, pmk, bssid, enterprise, false, station);
     setProperty("STA_ASSOCIATE_CMD_RET", (uint64_t)(uint32_t)ret, 32);
     setProperty("STA_ASSOCIATE_AFTER_RAW_STATE", (uint64_t)_ieee80211->rawState(), 32);
     if (ret == kIOReturnSuccess)
@@ -4238,8 +4323,9 @@ IOReturn AirPortRTW::handleMenuSAE(const RTW88AssocWire::Personal &request)
     if(bssid && !RTW88Roaming::unicast(bssid))return kIOReturnBadArgument;
     const bool sae=(request.upper&4096) || !_ieee80211->bssOffersPSKOnly(c.ssid,bssid);
     if(!sae && request.keyLength<8)return kIOReturnBadArgument;
-    if(sae ? _ieee80211->matchesSAEJoin(c.ssid,c.password,bssid) :
-             _ieee80211->matchesPSKPasswordJoin(c.ssid,c.password,bssid))return kIOReturnSuccess;
+    if ((sae ? _ieee80211->matchesSAEJoin(c.ssid,c.password,bssid) :
+               _ieee80211->matchesPSKPasswordJoin(c.ssid,c.password,bssid)) &&
+        matchesJoinStationAddress(request.station)) return kIOReturnSuccess;
     RTW88StateResult state={};IOReturn ret=_ieee80211->cmdGetState(&state);if(ret)return ret;
     if(state.state==RTW88_STATE_CONNECTED || state.state==RTW88_STATE_AUTHENTICATING ||
        state.state==RTW88_STATE_ASSOCIATING || state.state==RTW88_STATE_HANDSHAKING) {
@@ -4249,10 +4335,10 @@ IOReturn AirPortRTW::handleMenuSAE(const RTW88AssocWire::Personal &request)
     setProperty("STA_PERSONAL_PASSWORD_MODE",sae?"sae":"wpa2-psk");
     IOLog("AirPortRTW: personal password join mode=%s host_auth=0x%x raw_state=%u\n",
           sae?"sae":"wpa2-psk",request.upper,unsigned(_ieee80211->rawState()));
-    if(sae)ret=_ieee80211->cmdConnectSAE(c.ssid,c.password,bssid);
+    if(sae)ret=_ieee80211->cmdConnectSAE(c.ssid,c.password,bssid,request.station);
     else {
         _ieee80211->clearAssocRsnIE();
-        ret=_ieee80211->cmdConnect(c.ssid,c.password,nullptr,bssid,false);
+        ret=_ieee80211->cmdConnect(c.ssid,c.password,nullptr,bssid,false,false,request.station);
     }
     setProperty("WPA3_MENU_STATUS",ret==kIOReturnSuccess?
         (sae?"sae-request-accepted":"psk-request-accepted"):

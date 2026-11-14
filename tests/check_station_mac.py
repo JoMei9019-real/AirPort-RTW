@@ -28,6 +28,7 @@ fixture = r'''
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include "RTW88AssocWire.hpp"
 #include "RTW88StationMACWire.hpp"
 
 using SInt32 = int32_t;
@@ -37,7 +38,7 @@ constexpr int ETH_ALEN = 6;
 constexpr int kIOReturnSuccess = 0, kIOReturnNotReady = -1;
 constexpr int kIOReturnUnsupported = -2, kIOReturnBadArgument = -3;
 constexpr int kIOReturnBusy = -4, kIOReturnError = -5;
-constexpr bool kOSBooleanTrue = true;
+constexpr bool kOSBooleanTrue = true, kOSBooleanFalse = false;
 constexpr const char *kIOMACAddress = "IOMACAddress";
 namespace RTW88IOCTLGuard { constexpr int DarwinUnsupported = 102; }
 namespace RTW88Roaming {
@@ -48,6 +49,7 @@ bool unicast(const uint8_t *mac) {
 struct OSObject {};
 struct WorkLoop {
     bool gated = false;
+    bool inGate() const { return gated; }
     using Action = IOReturn (*)(OSObject *, void *, void *, void *, void *);
     IOReturn runAction(Action action, OSObject *owner, void *data) {
         assert(!gated);
@@ -107,6 +109,7 @@ struct AirPortRTW : OSObject {
     WorkLoop *_workLoop;
     IO80211Interface *_netif;
     bool allowHardware = true;
+    bool _assocOwnsStationMAC = false;
     uint32_t _privateMacFlags = 0, _privateMacTimeout = 0;
     uint32_t _privateMacGetCount = 0, _privateMacSetCount = 0;
 
@@ -123,6 +126,8 @@ struct AirPortRTW : OSObject {
     }
     IOReturn setHardwareAddress(const IOEthernetAddress *addr);
     IOReturn setStationMAC(const uint8_t *address, bool updateBSD);
+    bool matchesJoinStationAddress(const RTW88AssocWire::StationAddress &station);
+    IOReturn prepareJoinStationAddress(const RTW88AssocWire::StationAddress &station);
     SInt32 handleStationMACRequest(bool isSet, int selector, IO80211Interface *, void *);
 };
 '''
@@ -249,6 +254,39 @@ int main() {
     assert(!memcmp(net.address, wiphy.perm_addr, 6));
     assert(controller._privateMacGetCount && controller._privateMacSetCount);
     assert(packet.canary == 0x12345678);
+
+    using Address = RTW88AssocWire::StationAddress;
+    uint8_t wire[908] = {};
+    Address station;
+    wire[0x1d5] = 0x40; // A separate 25G342 flag, not the address presence bit.
+    assert(!RTW88AssocWire::decodeTahoeStationAddress(wire, 900, station));
+    memcpy(wire + 0x200, fixed, 6);
+    assert(RTW88AssocWire::decodeTahoeStationAddress(wire, sizeof(wire), station));
+    assert(station.mode == Address::Mode::Default);
+    wire[0x1d4] = 0x08;
+    wire[0x200] = 3;
+    assert(!RTW88AssocWire::decodeTahoeStationAddress(wire, sizeof(wire), station));
+    wire[0x200] = fixed[0];
+    assert(RTW88AssocWire::decodeTahoeStationAddress(wire, sizeof(wire), station));
+    assert(station.mode == Address::Mode::Private && !memcmp(station.bytes, fixed, 6));
+    assert(!controller.matchesJoinStationAddress(station));
+    net.stackError = ENXIO;
+    assert(controller.prepareJoinStationAddress(station) == kIOReturnError);
+    assert(!controller._assocOwnsStationMAC && !memcmp(net.address, wiphy.perm_addr, 6));
+    net.stackError = 0;
+    loop.gated = true;
+    assert(controller.prepareJoinStationAddress(station) == 0);
+    loop.gated = false;
+    assert(controller.matchesJoinStationAddress(station) && controller._assocOwnsStationMAC);
+    assert(!memcmp(driver._macAddr, fixed, 6) && !memcmp(net.address, fixed, 6));
+    Address absent{Address::Mode::Default,{}};
+    assert(!controller.matchesJoinStationAddress(absent));
+    assert(controller.prepareJoinStationAddress(absent) == 0 && !controller._assocOwnsStationMAC);
+    assert(!memcmp(net.address, wiphy.perm_addr, 6));
+    assert(controller.prepareJoinStationAddress(station) == 0 && controller._assocOwnsStationMAC);
+    memcpy(requested.address, fixed, 6);
+    assert(setAddress(net) == 0 && !controller._assocOwnsStationMAC);
+    assert(controller.prepareJoinStationAddress(absent) == 0 && !memcmp(net.address, fixed, 6));
 }
 '''
 

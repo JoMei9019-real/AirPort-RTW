@@ -24,6 +24,7 @@ pre=r'''
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include "RTW88AssocWire.hpp"
 using IOReturn=int;using UInt32=uint32_t;using RTW88State=int;
 constexpr int RTW88_STATE_IDLE=0,RTW88_STATE_SCANNING=1,RTW88_STATE_AUTHENTICATING=2,RTW88_STATE_ASSOCIATING=3,RTW88_STATE_HANDSHAKING=4,RTW88_STATE_CONNECTED=5;
 constexpr int kRTW88EventScanDone=0,kRTW88EventDisconnected=3,kIOReturnSuccess=0,kIOReturnBusy=1,kIONetworkLinkValid=1;
@@ -66,6 +67,7 @@ struct RTW88IEEE80211{
  struct{uint8_t bssid[6]={};}_targetBSS;
  bool _deferredConnectPending=false,_deferredPMKValid=false,_deferredBSSIDValid=false,_deferredExternalSupplicant=false,_deferredSAE=false;
  char _deferredSSID[33]={},_deferredPassword[64]={};uint8_t _deferredPMK[32]={},_deferredBSSID[6]={};
+ RTW88AssocWire::StationAddress _deferredStationAddress;
  RTW88IEEE80211(AirPortRTW&c):_parent(&c),_delegate(&c){c._ieee80211=this;}
  ~RTW88IEEE80211(){if(auth.joinable())auth.join();if(scanner.joinable())scanner.join();}
  void cancelRoamSwitch(){}void roamTrace(const char*,unsigned=0){}void wakeTrace(const char*){}
@@ -79,8 +81,9 @@ struct RTW88IEEE80211{
  void powerOff(){assert(!_manualScanChannelCount&&!_roamScanWorkerPending);_powered=false;++stops;}
  void clearAssocRsnIE(){}void restoreConnectedChannel(){}void txNullFunc(bool){}
  int setAWDLChannel(unsigned){return 0;}int setAWDLReceiveMode(bool){return 0;}
- int cmdConnect(const char*,const char*,const uint8_t*,const uint8_t*,bool,bool){++starts;_state=2;return 0;}
- void failJoin(const char*);void scanDone(bool);void resumeDeferredJoin();bool abortActiveScan(bool);int cmdPowerOffGated();
+ int cmdConnect(const char*,const char*,const uint8_t*,const uint8_t*,bool,bool,
+                const RTW88AssocWire::StationAddress &){++starts;_state=2;return 0;}
+ void failJoin(const char*);void scanDone(bool,bool=false);void resumeDeferredJoin();bool abortActiveScan(bool);int cmdPowerOffGated();
 };
 '''
 cases=r'''
@@ -106,8 +109,9 @@ int main(){
   c.drainWorkerEvents();assert(c.scanEvents==1&&c.lastScan==1&&!b.starts);
  }
  // Normal accepted scan-time join starts only after Apple SCAN_DONE, on loop.
- {AirPortRTW c;RTW88IEEE80211 b(c);b._state=1;b._deferredConnectPending=true;
-  strcpy(b._deferredSSID,"test");b.scanDone(false);assert(!b.starts&&!c.scanEvents);
+ {AirPortRTW c;RTW88IEEE80211 b(c);b._state=1;b._deferredConnectPending=true;b._manualScanChannelCount=39;
+  strcpy(b._deferredSSID,"test");b.scanDone(false,true);
+  assert(!b._manualScanChannelCount&&!b.starts&&!c.scanEvents);
   c.drainWorkerEvents();assert(b.starts==1&&c.scanEvents==1);
  }
  // Stale scan/failure completions cannot finish a newer scan or drop a join.
@@ -128,5 +132,6 @@ int main(){
 '''
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'test.cpp').write_text(pre+methods+cases)
- subprocess.run(['c++','-std=c++17','-pthread','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(p/'test.cpp'),'-o',str(p/'test')],check=True)
+ subprocess.run(['c++','-std=c++17','-pthread','-fsanitize=address,undefined','-fno-omit-frame-pointer',
+                 '-I',str(root/'src/kext'),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True,timeout=10,env={**os.environ,'ASAN_OPTIONS':'detect_leaks=0'})

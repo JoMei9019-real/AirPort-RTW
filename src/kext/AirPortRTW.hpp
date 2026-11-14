@@ -237,8 +237,8 @@ public:
                                UInt64 speed, OSData *data) override;
     virtual void setLinkStatus(UInt32 status) override;
 
-    IOReturn handleMenuSAE(const RTW88AssocWire::Personal &request);
 private:
+    IOReturn handleMenuSAE(const RTW88AssocWire::Personal &request);
     void postSTAJoinFailure();
     /* IO80211 payload adapters. Protected STA authentication is delegated to Apple RSN. */
     __attribute__((__noinline__)) SInt32 handleNativeRequest(unsigned int request_type, int request_number, IO80211Interface *interface, void *data);
@@ -250,7 +250,9 @@ private:
     __attribute__((__noinline__)) IOReturn handleRequestHW_SUPPORTED_CHANNELS(bool isSet, void *data);
     IOReturn handleSSID(bool set, struct apple80211_ssid_data *data);
     IOReturn handleAUTH_TYPE(bool set, struct apple80211_authtype_data *data);
-    IOReturn handleASSOCIATE(struct apple80211_assoc_data *data);
+    IOReturn handleASSOCIATE(struct apple80211_assoc_data *data,
+                              const RTW88AssocWire::StationAddress &station = {});
+    __attribute__((__noinline__)) bool tryHostAssociation(apple80211req *req, SInt32 &result);
     IOReturn handleRSN_IE(bool set, struct apple80211_rsn_ie_data *data);
     IOReturn handleAP_IE_LIST(struct apple80211_ap_ie_data *data);
     IOReturn handleCIPHER_KEY(struct apple80211_key *key);
@@ -326,6 +328,9 @@ private:
     SInt32 handleStationMACRequest(bool isSet, int selector,
                                    IO80211Interface *interface, void *data);
     IOReturn setStationMAC(const uint8_t *address, bool updateBSD);
+    IOReturn prepareJoinStationAddress(const RTW88AssocWire::StationAddress &station) override;
+    bool matchesJoinStationAddress(const RTW88AssocWire::StationAddress &station);
+    bool _assocOwnsStationMAC = false;
     uint32_t _privateMacFlags = 0;
     uint32_t _privateMacTimeout = 0;
     uint32_t _privateMacGetCount = 0;

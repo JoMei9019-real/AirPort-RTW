@@ -31,7 +31,7 @@ assert 'if (_pmkProvided) handleEAPOL(llc + 8' in source
 assert 'memcpy(eapol + 99, _assocRsnIE, key_data_len)' in source
 assert 'if (!_enterprise || ethertype != ETH_P_PAE)' in source
 controller = (root / 'src/kext/AirPortRTW.cpp').read_text()
-assert 'cmdConnect(ssid, nullptr, pmk, bssid, enterprise)' in controller
+assert 'cmdConnect(ssid, nullptr, pmk, bssid, enterprise, false, station)' in controller
 assert 'key->key_cipher_type == RTW88Enterprise::AppleMsk' in controller
 assert 'RTW88Enterprise::auth(' in controller
 pre = r'''

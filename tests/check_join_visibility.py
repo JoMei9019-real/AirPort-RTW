@@ -34,6 +34,7 @@ methods = ''.join(method(b, sig) for sig in (
     'bool RTW88IEEE80211::cachedJoinTargetReady(',
     'IOReturn RTW88IEEE80211::cmdConnect(',
     'IOReturn RTW88IEEE80211::cmdDisconnect()',
+    'void RTW88IEEE80211::clearDeferredJoin()',
     'void RTW88IEEE80211::resumeDeferredJoin()',
     'void RTW88IEEE80211::processAssocResponse(',
     'IOReturn RTW88IEEE80211::cmdGetState(',
@@ -109,6 +110,9 @@ struct sk_buff{uint8_t data[30]={};unsigned len=30;bool freed=false;};
 void kfree_skb(sk_buff*p){assert(!p->freed);p->freed=true;}
 struct Timer{bool armed=false;void cancelTimeout(){armed=false;}void wakeAtTime(uint64_t){armed=true;}void setTimeoutMS(int){armed=true;}};
 struct Parent{bool up=false;unsigned ups=0,downs=0;
+ int addressResult=0;RTW88AssocWire::StationAddress station;
+ IOReturn prepareJoinStationAddress(const RTW88AssocWire::StationAddress &request){
+  station=request;return addressResult;}
  void setLinkStatus(unsigned s){up=(s&kIONetworkLinkActive);up?++ups:++downs;}};
 struct Delegate{unsigned assoc=0;void rtw88Event(int,void*){++assoc;}};
 '''
@@ -118,6 +122,7 @@ struct RTW88IEEE80211{
  bool _roamScanWorkerPending=false,_roamSwitchInternal=false,_manualScanAbort=false;
  bool _deferredConnectPending=false,_deferredPMKValid=false,_deferredBSSIDValid=false,_deferredExternalSupplicant=false,_deferredSAE=false;
  char _deferredSSID[33]={},_deferredPassword[64]={};uint8_t _deferredPMK[32]={},_deferredBSSID[6]={};
+ RTW88AssocWire::StationAddress _deferredStationAddress;
  bool _saeMode=false,_enterprise=false,_externalSupplicant=false,_pmkProvided=false,_wpa2=true,_curBssTim=false;
  bool abortOK=true;unsigned _manualScanChannelCount=0,_authAttempts=0,_deauthReason=0,_assocAID=0,_connChanWidth=20,_scanGeneration=7;
  int _state=RTW88_STATE_IDLE,_scanReturnState=RTW88_STATE_IDLE,_rssi=-50;
@@ -132,14 +137,16 @@ struct RTW88IEEE80211{
  void roamTrace(const char*,unsigned=0){}void cancelRoamSwitch(){}
  void clearKeys(){_saeMode=false;}void releaseSta(){_sta=nullptr;}
  void clearAssocRsnIE(){_assocRsnIELen=0;}bool htAllowed(){return true;}void startTxAggregation(){}
- void clearDeferredJoin(){_deferredConnectPending=false;}
+ void clearDeferredJoin();
  void cancelAuthentication(){++drains;_connectCancelled=true;}
  void restoreSTAChannelAfterAWDL(){_awdlOffChannel=false;}
  bool abortActiveScan(bool){if(abortOK){_state=RTW88_STATE_CONNECTED;_scanReturnState=0;}return abortOK;}
  void failJoin(const char*){++failures;_state=RTW88_STATE_IDLE;_associatedVisible=false;_connectCancelled=true;}
  void doDisconnect(){clearKeys();releaseSta();_state=RTW88_STATE_IDLE;_associatedVisible=false;_parent->setLinkStatus(kIONetworkLinkValid);}
- IOReturn cmdConnect(const char*,const char*,const uint8_t*,const uint8_t*,bool,bool=false);
- IOReturn cmdConnectSAE(const char*s,const char*p,const uint8_t*b){clearAssocRsnIE();return cmdConnect(s,p,nullptr,b,false,true);}
+ IOReturn cmdConnect(const char*,const char*,const uint8_t*,const uint8_t*,bool,bool=false,
+                     const RTW88AssocWire::StationAddress & = {});
+ IOReturn cmdConnectSAE(const char*s,const char*p,const uint8_t*b,const RTW88AssocWire::StationAddress &station){
+  clearAssocRsnIE();return cmdConnect(s,p,nullptr,b,false,true,station);}
  bool bssOffersPSKOnly(const char*,const uint8_t*);
  bool cachedJoinTargetReady(const char*,const uint8_t*,bool);
  bool matchesPendingJoin(const char*,const uint8_t*,const uint8_t*,bool=false)const;
@@ -152,6 +159,7 @@ struct apple80211_state_data{unsigned version=0,state=0;};
 struct AirPortRTW{RTW88IEEE80211*_ieee80211;template<class...T>void setProperty(T...){}
  bool _shutdown=false,_assocDoneReported=false,_rsnHandshakeReported=false;unsigned _authLower=0,_authUpper=0;
  bool roamingActionsAllowed(){return true;}IOReturn handleMenuSAE(const RTW88AssocWire::Personal&);
+ bool matchesJoinStationAddress(const RTW88AssocWire::StationAddress &){return true;}
  IOReturn handleSSID(bool,apple80211_ssid_data*);IOReturn handleSTATE(apple80211_state_data*);};
 '''
 cases = r'''
@@ -167,6 +175,27 @@ void queries(RTW88IEEE80211&b,bool run,unsigned appleState){AirPortRTW a{&b};RTW
  if(run){assert(ssid.ssid_len==b._targetBSS.ssid_len&&!memcmp(ssid.ssid_bytes,b._targetBSS.ssid,ssid.ssid_len));assert(!memcmp(current.bssid,b._targetBSS.bssid,6));}
 }
 int main(){
+ // A deferred request carries its address to the authentication boundary.
+ // If the hardware rejects the address, no authentication worker starts.
+ {
+  using Mode = RTW88AssocWire::StationAddress::Mode;
+  RTW88IEEE80211 b;auto target=network("private",3);b._bssList=&target;
+  b._state=RTW88_STATE_SCANNING;
+  uint8_t pmk[32]={};
+  const RTW88AssocWire::StationAddress station{Mode::Private,{0x02,1,2,3,4,5}};
+  assert(b.cmdConnect("private",nullptr,pmk,nullptr,false,false,station)==0);
+  assert(b.parent.station.mode==Mode::Unspecified);
+  b._state=RTW88_STATE_IDLE;
+  const unsigned before=scheduled;
+  b.parent.addressResult=kIOReturnBusy;
+  b.resumeDeferredJoin();
+  assert(scheduled==before&&b.failures==1&&!b._deferredConnectPending);
+  assert(b.parent.station.mode==Mode::Private&&!memcmp(b.parent.station.bytes,station.bytes,6));
+  assert(b._deferredStationAddress.mode==Mode::Unspecified);
+  b.parent.addressResult=0;
+  assert(b.cmdConnect("private",nullptr,pmk,nullptr,false,false,station)==0);
+  assert(scheduled==before+1&&b._state==RTW88_STATE_AUTHENTICATING);
+ }
  // Real menu passphrases (cipher 10, auth_upper 8) must work for WPA2-only
  // targets as well as transition APs. Beta 9 unconditionally forced SAE.
  const uint8_t psk[]={48,20,1,0,0,15,172,4,1,0,0,15,172,4,1,0,0,15,172,2,0,0};
