@@ -120,6 +120,7 @@ declarations = r'''
 struct RTW88IEEE80211{
  bool _associatedVisible=false,_powered=true,_connectCancelled=false,_disconnectVoluntary=false,_awdlOffChannel=false;
  bool _roamScanWorkerPending=false,_roamSwitchInternal=false,_manualScanAbort=false;
+ uint64_t _rxNoiseSample=0;
  bool _deferredConnectPending=false,_deferredPMKValid=false,_deferredBSSIDValid=false,_deferredExternalSupplicant=false,_deferredSAE=false;
  char _deferredSSID[33]={},_deferredPassword[64]={};uint8_t _deferredPMK[32]={},_deferredBSSID[6]={};
  RTW88AssocWire::StationAddress _deferredStationAddress;
@@ -180,16 +181,17 @@ int main(){
  {
   using Mode = RTW88AssocWire::StationAddress::Mode;
   RTW88IEEE80211 b;auto target=network("private",3);b._bssList=&target;
+  b._rxNoiseSample=1;
   b._state=RTW88_STATE_SCANNING;
   uint8_t pmk[32]={};
   const RTW88AssocWire::StationAddress station{Mode::Private,{0x02,1,2,3,4,5}};
   assert(b.cmdConnect("private",nullptr,pmk,nullptr,false,false,station)==0);
-  assert(b.parent.station.mode==Mode::Unspecified);
+  assert(b.parent.station.mode==Mode::Unspecified&&b._rxNoiseSample==1);
   b._state=RTW88_STATE_IDLE;
   const unsigned before=scheduled;
   b.parent.addressResult=kIOReturnBusy;
   b.resumeDeferredJoin();
-  assert(scheduled==before&&b.failures==1&&!b._deferredConnectPending);
+  assert(scheduled==before&&b.failures==1&&!b._deferredConnectPending&&!b._rxNoiseSample);
   assert(b.parent.station.mode==Mode::Private&&!memcmp(b.parent.station.bytes,station.bytes,6));
   assert(b._deferredStationAddress.mode==Mode::Unspecified);
   b.parent.addressResult=0;

@@ -56,10 +56,10 @@ static constexpr UInt32 kRTW88DataQueueDepth = 64;
 static constexpr UInt32 kRTW88TxQueueHigh    = 128;
 static constexpr UInt32 kRTW88TxQueueLow     = 64;
 
-/* Current firmware rate-adaptation report in Apple's 500-kbit/s units.
- * HT/VHT rate tables below are in 1-Mbit/s-equivalent 0.5 units from
- * the supplied RTL8821CE patch; never substitute the AP's max rate. */
-static uint32_t rtw88CurrentRate500Kbps(
+/* APPLE80211_IOC_RATE reports the current firmware TX rate in whole Mbit/s.
+ * The HT/VHT tables are in units of 500 kbit/s. The legacy report is in
+ * units of 100 kbit/s. Both conversions truncate fractional Mbit/s. */
+static uint32_t rtw88CurrentTxRateMbps(
     const RTW88IEEE80211::RadioTelemetry &t)
 {
     if (!t.rateValid) return 0;
@@ -89,7 +89,7 @@ static uint32_t rtw88CurrentRate500Kbps(
         const uint16_t *table=t.bandwidth==RATE_INFO_BW_40?ht40[gi]:ht20[gi];
         return uint32_t(table[t.mcs])*nss/2U;
     }
-    return t.legacyRate100kbps ? (t.legacyRate100kbps+2U)/5U : 0U;
+    return t.legacyRate100kbps / 10U;
 }
 
 
@@ -154,7 +154,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.3.0-beta.7");
+    setProperty("DriverBuild", "1.3.0-beta.8");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -339,7 +339,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 1.3.0-beta.7 WPA3-Personal\n");
+    IOLog("AirPortRTW: 1.3.0-beta.8 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -2569,9 +2569,10 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         RTW88StateResult st = {};
         const IOReturn ret = _ieee80211->cmdGetState(&st);
         if (ret != kIOReturnSuccess) return ret;
+        const bool up = _ieee80211->associatedVisible();
         const RTW88LinkEventData d = rtw88LinkQuery(
-            _ieee80211->associatedVisible(), _ieee80211->disconnectIsVoluntary(),
-            st.rssi, APPLE80211_LINK_DOWN_REASON_DEAUTH);
+            up, _ieee80211->disconnectIsVoluntary(), st.rssi,
+            APPLE80211_LINK_DOWN_REASON_DEAUTH, up ? _ieee80211->linkNoise().dbm : 0);
         memcpy(data, &d, sizeof(d));
         setProperty("STA_LINK_QUERY_BYTES", (uint64_t)sizeof(d), 32);
         setProperty("STA_LINK_QUERY_VOLUNTARY", d.flag ? kOSBooleanTrue : kOSBooleanFalse);
@@ -2690,7 +2691,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.3.0-beta.7)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.3.0-beta.8)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -2771,8 +2772,13 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         d->version = APPLE80211_VERSION;
         d->num_radios = 1;
         d->noise_unit = APPLE80211_UNIT_DBM;
-        d->noise[0] = d->aggregate_noise = -95;
-        d->noise_ext[0] = d->aggregate_noise_ext = -95;
+        const auto noise = _ieee80211->linkNoise();
+        d->noise[0] = d->aggregate_noise = noise.dbm;
+        d->noise_ext[0] = d->aggregate_noise_ext = noise.dbm;
+        using Source = RTW88LinkNoise::Source;
+        const char *source = noise.source == Source::RxSNR ? "rx-snr" :
+                             noise.source == Source::ThermalEstimate ? "thermal-estimate" : "fixed";
+        setProperty("STA_LINK_NOISE_SOURCE", source);
         return kIOReturnSuccess;
     }
 
@@ -2907,7 +2913,7 @@ __attribute__((__noinline__)) IOReturn AirPortRTW::handleRequestRATE(bool isSet,
         state.state!=RTW88_STATE_CONNECTED) return 6;
     RTW88IEEE80211::RadioTelemetry telemetry = {};
     _ieee80211->getRadioTelemetry(&telemetry);
-    uint32_t rate=rtw88CurrentRate500Kbps(telemetry);
+    const uint32_t rate = rtw88CurrentTxRateMbps(telemetry);
     if (!rate) return 6;
     auto *d=static_cast<apple80211_rate_data *>(data);
     bzero(d,sizeof(*d));
@@ -3460,7 +3466,7 @@ void AirPortRTW::fillScanResultFromBSS(const RTW88BSS &b, struct apple80211_scan
                            APPLE80211_C_FLAG_20MHZ |
         (b.channel <= 14 ? APPLE80211_C_FLAG_2GHZ : APPLE80211_C_FLAG_5GHZ);
 
-    d->asr_noise = -95;
+    d->asr_noise = RTW88LinkNoise::ScanNoiseDbm;
     d->asr_rssi = b.rssi;
     d->asr_snr = (int16_t)(b.rssi - d->asr_noise);
     d->asr_beacon_int = (int16_t)b.beacon_interval;
@@ -3627,6 +3633,8 @@ IOReturn AirPortRTW::handleCURRENT_NETWORK(struct apple80211_scan_result *out)
     }
 
     fillScanResultFromBSS(current, out, true);
+    out->asr_noise = _ieee80211->linkNoise().dbm;
+    out->asr_snr = out->asr_rssi > out->asr_noise ? out->asr_rssi - out->asr_noise : 0;
     kprintf("AirPortRTW: CURRENT_NETWORK ssid_len=%u channel=%u rssi=%d ies=%d\n",
           out->asr_ssid_len, out->asr_channel.channel,
           out->asr_rssi, out->asr_ie_len);

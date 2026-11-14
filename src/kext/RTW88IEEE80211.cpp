@@ -844,6 +844,7 @@ IOReturn RTW88IEEE80211::start()
         IOLog("rtw88: unknown PCI device %04x — cannot probe\n", _pcidev->device);
         return kIOReturnUnsupported;
     }
+    _rxNoiseSupported = chip == &rtw8821c_hw_spec;
     RTW88_STAGE("chip matched: device=%04x", _pcidev->device);
 
     const struct pci_device_id fake_id = {
@@ -1387,8 +1388,21 @@ void RTW88IEEE80211::rxFrame(struct sk_buff *skb)
     }
     if (rtw88StationSignal(skb->data, skb->len, _macAddr, _targetBSS.bssid,
                           rxs->signal,
-                          (rxs->flag & (RX_FLAG_NO_SIGNAL_VAL | RX_FLAG_FAILED_FCS_CRC)) != 0))
+                          (rxs->flag & (RX_FLAG_NO_SIGNAL_VAL | RX_FLAG_FAILED_FCS_CRC)) != 0)) {
         _rssi = rxs->signal;
+        if (rxs->rtw_snr_half_db && _associatedVisible && _state == RTW88_STATE_CONNECTED &&
+            !_awdlOffChannel && rxs->freq && rxs->freq == _targetBSS.freq) {
+            const uint8_t width = rxs->bw == RATE_INFO_BW_80 ? 80 :
+                                  rxs->bw == RATE_INFO_BW_40 ? 40 : 20;
+            // Compare RSSI/SNR from one PPDU at the link's operating width.
+            if (width == _connChanWidth) {
+                const auto sample = RTW88LinkNoise::sample(rxs->signal, rxs->rtw_snr_half_db,
+                                                         width, jiffies);
+                if (sample)
+                    __atomic_store_n(&_rxNoiseSample, sample, __ATOMIC_RELAXED);
+            }
+        }
+    }
 
     struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
     __le16 fc = hdr->frame_control;
@@ -3053,6 +3067,7 @@ IOReturn RTW88IEEE80211::cmdConnect(const char *ssid, const char *password, cons
     releaseSta();
     /* A new join supersedes any previous externally-visible RUN state. */
     _associatedVisible = false;
+    __atomic_store_n(&_rxNoiseSample, 0, __ATOMIC_RELAXED);
     /* failJoin may have retired the previous attempt on a worker before its
      * queued link-down reached the controller. That notification is correctly
      * discarded once this join starts, so retire the old interface link here
@@ -6457,6 +6472,12 @@ bool RTW88IEEE80211::getRadioTelemetry(RadioTelemetry *out) const
     out->bandwidth = rate.bw;
     out->rateValid = rate.valid != 0;
     return out->rateValid;
+}
+
+RTW88LinkNoise::Reading RTW88IEEE80211::linkNoise() const
+{
+    const auto sample = __atomic_load_n(&_rxNoiseSample, __ATOMIC_RELAXED);
+    return RTW88LinkNoise::read(_rxNoiseSupported, _connChanWidth, sample, jiffies);
 }
 
 IOReturn RTW88IEEE80211::setMACAddress(const uint8_t *mac)

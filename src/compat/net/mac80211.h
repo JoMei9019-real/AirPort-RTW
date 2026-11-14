@@ -667,6 +667,7 @@ struct ieee80211_rx_status {
     u8   antenna;
     u8   ampdu_delimiter_crc;
     bool zero_length_psdu_type;
+    u8   rtw_snr_half_db; /* RTL8821C path A; zero means unavailable */
 };
 
 #define IEEE80211_SKB_RXCB(skb) ((struct ieee80211_rx_status *)(skb)->cb)

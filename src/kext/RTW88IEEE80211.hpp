@@ -24,6 +24,7 @@
 #include "RTW88Lifecycle.hpp"
 #include "RTW88RoamSwitch.hpp"
 #include "RTW88AssocWire.hpp"
+#include "RTW88LinkNoise.hpp"
 
 /* Opaque C driver handle */
 struct rtw_dev;
@@ -231,6 +232,7 @@ public:
         bool rateValid;
     };
     bool      getRadioTelemetry(RadioTelemetry *out) const;
+    RTW88LinkNoise::Reading linkNoise() const;
     IOReturn  setMACAddress(const uint8_t *mac);
 
     /* Called from compat layer (ieee80211_rx_irqsafe) */
@@ -660,6 +662,8 @@ private:
     bool _roamingAssistEnabled = false, _roamingCapsValid = false;
     uint32_t _roamingStats[RTW88Roaming::Count] = {};
     int      _rssi     = -100;
+    bool     _rxNoiseSupported = false;
+    uint64_t _rxNoiseSample = 0;
 
     /* Diagnostics: periodic logging of RX activity during scan */
     uint32_t _rxFrameCount = 0;

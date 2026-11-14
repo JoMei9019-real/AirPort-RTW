@@ -28,6 +28,7 @@ assert backend.count('__atomic_store_n(&_disconnectVoluntary, false,') == 3
 
 pre = r'''
 #include "RTW88LinkEventWire.hpp"
+#include "RTW88LinkNoise.hpp"
 #include <cassert>
 #include <cstring>
 #include <iostream>
@@ -51,6 +52,7 @@ struct Backend { bool powered=false,visible=false,voluntary=true; int powerResul
  IOReturn cmdPowerOn(){if (!powerResult)powered=true;return powerResult;}
  bool isPowered(){return powered;} bool associatedVisible(){return visible;}
  bool disconnectIsVoluntary(){return voluntary;}
+ RTW88LinkNoise::Reading linkNoise(){return {-89,RTW88LinkNoise::Source::ThermalEstimate};}
  IOReturn cmdGetState(RTW88StateResult *r){r->rssi=-55;return 0;} };
 struct Interrupt { bool enabled=false; void enable(){enabled=true;} void disable(){enabled=false;} };
 struct IOBasicOutputQueue { static constexpr int kServiceAsync=1; };
@@ -103,6 +105,8 @@ int main(){
  c.backend.voluntary=false;assert(c.query(false,guarded)==0);assert(guarded[16]==0);
  c.backend.visible=true;assert(c.query(false,guarded)==0);
  int32_t rssi;memcpy(&rssi,guarded+4,4);assert(guarded[0]==0 && rssi==-55);
+ uint16_t snr;int16_t noise;memcpy(&snr,guarded+8,2);memcpy(&noise,guarded+10,2);
+ assert(snr==34 && noise==-89);
  for(unsigned i=16;i<32;++i)assert(guarded[i]==0);
  assert(c.query(true,guarded)==kIOReturnUnsupported);
 

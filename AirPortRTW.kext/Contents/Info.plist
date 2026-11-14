@@ -15,7 +15,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>AirPortRTW for RTL88xx</string>
 	<key>CFBundleGetInfoString</key>
-	<string>AirPortRTW 1.3.0 — Private Wi-Fi address test Beta 7</string>
+	<string>AirPortRTW 1.3.0 — TX rate and link noise test Beta 8</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>

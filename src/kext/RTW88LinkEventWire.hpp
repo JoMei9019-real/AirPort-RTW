@@ -33,11 +33,11 @@ static_assert(offsetof(RTW88LinkEventData, reason) == 20, "link reason ABI");
 static_assert(sizeof(RTW88LinkEventTLV) == 40, "link event TLV ABI");
 
 inline RTW88LinkEventData rtw88LinkQuery(bool up, bool voluntary, int32_t rssi,
-                                        uint32_t downReason) {
+                                        uint32_t downReason, int16_t noiseDbm) {
     RTW88LinkEventData d = {};
     d.isLinkDown = !up;
     if (!up) { d.flag = voluntary; d.reason = downReason; }
-    else { d.rssi = rssi; d.nf = -95; d.snr = rssi > -95 ? rssi + 95 : 0; }
+    else { d.rssi = rssi; d.nf = noiseDbm; d.snr = rssi > noiseDbm ? rssi - noiseDbm : 0; }
     return d;
 }
 inline RTW88LinkEventTLV rtw88LinkNotification(bool up, uint32_t ieeeReason) {

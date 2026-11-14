@@ -13,6 +13,7 @@ root = Path(__file__).resolve().parents[1]
 controller = (root / 'src/kext/AirPortRTW.cpp').read_text()
 backend = (root / 'src/kext/RTW88IEEE80211.cpp').read_text()
 compat = (root / 'src/compat/rtw88_compat.c').read_text()
+rx_wrapper = (root / 'src/compat/rtw88_rx.c').read_text()
 
 def method(source, signature):
     start = source.index(signature)
@@ -29,29 +30,41 @@ multi = multi[:multi.index('\n    case ', 1)]
 # Run the real multi-scan switch arm too, not just a substring assertion.
 multi = 'IOReturn AirPortRTW::scanMultiple(bool isSet) { switch (1) {\n' + multi.replace(
     'case APPLE80211_IOC_SCAN_REQ_MULTIPLE:', 'case 1:') + '\n} return 99; }\n'
+noise_query = method(controller, 'case APPLE80211_IOC_NOISE:')
+noise_query = ('IOReturn AirPortRTW::getNoise(bool isSet, void *data) { switch (1) {\n' +
+               noise_query.replace('case APPLE80211_IOC_NOISE:', 'case 1:') + '} return 99; }\n')
 scan = method(controller, 'IOReturn AirPortRTW::handleSCAN_REQ(')
 timer = method(backend, 'void RTW88IEEE80211::onTimer()')
 rx = method(backend, 'void RTW88IEEE80211::rxFrame(')
+noise = method(backend, 'RTW88LinkNoise::Reading RTW88IEEE80211::linkNoise()')
+descriptor = method(rx_wrapper, 'void rtw_rx_query_rx_desc(').replace(
+    '_Static_assert(', 'static_assert(').replace('*d = desc;', '*d = static_cast<const rtw_rx_desc *>(desc);')
 restore = method(compat, 'void rtw88_restore_connected_hw(')
 pre = r'''
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-using IOReturn=int;using UInt32=uint32_t;using __le16=uint16_t;
+#include "RTW88LinkNoise.hpp"
+using IOReturn=int;using UInt32=uint32_t;using __le16=uint16_t;using __le32=uint32_t;
 enum {kIOReturnSuccess=0,kIOReturnBadArgument=1,kIOReturnUnsupported=2};
 enum {RTW88_STATE_IDLE,RTW88_STATE_SCANNING,RTW88_STATE_AUTHENTICATING,
  RTW88_STATE_ASSOCIATING,RTW88_STATE_HANDSHAKING,RTW88_STATE_CONNECTED};
 constexpr unsigned APPLE80211_VERSION=1,APPLE80211_MAX_SSID_LEN=32,
- APPLE80211_MAX_CHANNELS=64,APPLE80211_M_SCAN_DONE=42;
+ APPLE80211_MAX_CHANNELS=64,APPLE80211_M_SCAN_DONE=42,APPLE80211_UNIT_DBM=1;
 void IOLog(const char*,...){}void kprintf(const char*,...){}
 int authRetries=0;void thread_call_enter(void*){++authRetries;}
 struct RTW88StateResult{int state=RTW88_STATE_IDLE;};
 struct apple80211_scan_data{unsigned version=1,ssid_len=0,num_channels=0;};
+struct apple80211_noise_data{
+ unsigned version,num_radios,noise_unit;
+ int noise[4],aggregate_noise,noise_ext[4],aggregate_noise_ext;
+};
 struct ScanBackend{
  int state=RTW88_STATE_IDLE,ret=0;unsigned scans=0;
  int cmdGetState(RTW88StateResult *p){p->state=state;return 0;}
  int cmdScan(){++scans;return ret;}
+ RTW88LinkNoise::Reading linkNoise(){return {-87,RTW88LinkNoise::Source::RxSNR};}
 };
 struct Netif{unsigned completions=0;
  void postMessage(int msg,void *data,size_t n){
@@ -63,11 +76,20 @@ struct AirPortRTW{
  ScanBackend backend;ScanBackend *_ieee80211=&backend;
  Netif netif;Netif *_netif=&netif;
  bool _scanInProgress=false;unsigned _scanCursor=9;
+ const char *noiseSource=nullptr;
+ void setProperty(const char *name,const char *value){
+  assert(!strcmp(name,"STA_LINK_NOISE_SOURCE"));noiseSource=value;
+ }
  IOReturn handleSCAN_REQ(void*);IOReturn scanMultiple(bool);
+ IOReturn getNoise(bool,void *);
 };
 struct Hw;struct Ops{void(*cancel_hw_scan)(Hw*,void*);};struct Hw{Ops *ops;};
-constexpr unsigned RX_FLAG_FAILED_FCS_CRC=1,RX_FLAG_NO_SIGNAL_VAL=2,RX_FLAG_RTW_INTEGRITY_FAILED=4;
-struct ieee80211_rx_status{unsigned flag=0;int signal=-42;};
+constexpr unsigned RX_FLAG_FAILED_FCS_CRC=1,RX_FLAG_NO_SIGNAL_VAL=2,RX_FLAG_DECRYPTED=4;
+#include "rtw88_rx_security.h"
+enum {RATE_INFO_BW_20,RATE_INFO_BW_40,RATE_INFO_BW_80};
+uint64_t jiffies=10000;
+struct ieee80211_rx_status{unsigned flag=0;int signal=-42;
+ unsigned bw=RATE_INFO_BW_20,freq=5180;uint8_t rtw_snr_half_db=0;};
 struct ieee80211_hdr{__le16 frame_control;};
 struct sk_buff{
  unsigned len=24;alignas(8) uint8_t storage[64]={};uint8_t *data=storage;
@@ -77,8 +99,9 @@ unsigned frees=0,signals=0,management=0,dataFrames=0,awdlFrames=0;
 bool awdlConsumes=false;
 void kfree_skb(sk_buff *s){assert(s&&!s->freed);s->freed=true;++frees;}
 ieee80211_rx_status *IEEE80211_SKB_RXCB(sk_buff *s){return &s->status;}
+bool matchesAP=true;
 bool rtw88StationSignal(const uint8_t*,unsigned,const uint8_t*,const uint8_t*,int,bool invalid){
- ++signals;return !invalid;
+ ++signals;return !invalid&&matchesAP;
 }
 bool ieee80211_is_mgmt(__le16 fc){return (fc&12)==0;}
 bool ieee80211_is_data(__le16 fc){return (fc&12)==8;}
@@ -87,7 +110,11 @@ struct RTW88IEEE80211{
  int _state=RTW88_STATE_IDLE,_rssi=-80;
  bool _enterprise=false,_enterpriseAuthorized=false,_manualScanAbort=false,canceled=false;
  unsigned _manualScanChannelCount=0,_rxFrameCount=0,completions=0,disconnects=0,failures=0;
- uint8_t _macAddr[6]={};struct{uint8_t bssid[6]={};}_targetBSS;
+ uint8_t _macAddr[6]={};struct{uint8_t bssid[6]={};unsigned freq=5180;}_targetBSS;
+ bool _associatedVisible=false,_awdlOffChannel=false,_rxNoiseSupported=true;
+ uint8_t _connChanWidth=80;
+ uint64_t _rxNoiseSample=0;
+ RTW88LinkNoise::Reading linkNoise() const;
  Hw *_hw=nullptr;void *_vif=nullptr,*_connectTC=nullptr;
  bool authenticationCancelled(){return canceled;}
  void scanDone(bool aborted){
@@ -107,8 +134,22 @@ RTW88IEEE80211 *active=nullptr;
 void syncCancel(Hw*,void*){active->scanDone(true);}
 constexpr unsigned ETH_ALEN=6,PORT_SET_BSSID=1,RTW_FLAG_SCANNING=0;
 struct rtw_dev{
+ struct Chip{unsigned id=0,rx_pkt_desc_sz=24;} spec;
+ Chip *chip=&spec;
  bool mutex=false,need_rfk=true;unsigned long flags[1]={1};struct{int fix_rate=0;}dm_info;
 };
+using u8=uint8_t;
+enum {RTW_CHIP_TYPE_8821C=1,RX_DESC_ENC_AES=4,RTW_RX_DESC_W0_ENC_TYPE=15};
+struct rtw_rx_desc{uint32_t w0=0;};
+struct rtw_rx_pkt_stat{
+ bool is_c2h=false,phy_status=true,crc_err=false,icv_err=false,decrypted=false;
+ unsigned drv_info_sz=32,shift=3;
+};
+unsigned le32_get_bits(uint32_t value,unsigned mask){return value&mask;}
+void rtw88_original_rx_query_rx_desc(rtw_dev *, void *, rtw_rx_pkt_stat *stat,
+                                     ieee80211_rx_status *status) {
+ if (!stat->is_c2h) *status={};
+}
 struct rtw_vif{uint8_t bssid[6]={};};
 struct ieee80211_hw{rtw_dev *priv;};struct ieee80211_vif{rtw_vif *drv_priv;};
 unsigned switches=0,calibrations=0,bssidWrites=0;
@@ -125,6 +166,38 @@ void rtw_chip_prepare_tx(rtw_dev *d){
 '''
 cases = r'''
 int main(){
+ {
+  AirPortRTW controller;
+  apple80211_noise_data noise={};
+  assert(controller.getNoise(false,&noise)==6 && !controller.noiseSource);
+  controller.backend.state=RTW88_STATE_CONNECTED;
+  assert(controller.getNoise(true,&noise)==kIOReturnUnsupported);
+  assert(controller.getNoise(false,&noise)==0);
+  assert(noise.num_radios==1 && noise.noise_unit==APPLE80211_UNIT_DBM);
+  assert(noise.noise[0]==-87 && noise.aggregate_noise==-87);
+  assert(!strcmp(controller.noiseSource,"rx-snr"));
+ }
+ {
+  rtw_dev dev;dev.chip->id=RTW_CHIP_TYPE_8821C;
+  struct {rtw_rx_desc descriptor;u8 rest[24+3+32-sizeof(rtw_rx_desc)]={};} buffer;
+  auto *phy=reinterpret_cast<u8 *>(&buffer)+24+3;
+  rtw_rx_pkt_stat stat;
+  ieee80211_rx_status status;
+  auto captured=[&](){
+   status.rtw_snr_half_db=99;
+   rtw_rx_query_rx_desc(&dev,&buffer.descriptor,&stat,&status);
+   return status.rtw_snr_half_db;
+  };
+  phy[0]=0x21;phy[24]=62;assert(captured()==62);
+  phy[0]=0x20;assert(captured()==0);phy[0]=0x21;
+  phy[24]=0xff;assert(captured()==0);phy[24]=62;
+  stat.drv_info_sz=24;assert(captured()==0);stat.drv_info_sz=32;
+  stat.is_c2h=true;assert(captured()==0);stat.is_c2h=false;
+  stat.phy_status=false;assert(captured()==0);stat.phy_status=true;
+  stat.crc_err=true;assert(captured()==0);stat.crc_err=false;
+  stat.icv_err=true;assert(captured()==0);stat.icv_err=false;
+  dev.chip->id=0;assert(captured()==0);
+ }
  apple80211_scan_data request;
  for(bool multiple:{false,true}){
   AirPortRTW c;
@@ -182,15 +255,43 @@ int main(){
  awdlConsumes=true;sk_buff awdl;awdl.data[0]=8;awdl.status.signal=-10;
  awdl.status.flag=RX_FLAG_NO_SIGNAL_VAL;receiver.rxFrame(&awdl);
  assert(awdl.freed&&dataFrames==1&&awdlFrames==2&&receiver._rssi==-42&&frees==284);
- std::puts("PASS: production single/multiple scan ingress, coalescing, timeout/EAP guards, deferred calibration and RX FCS/ownership");
+ using Source=RTW88LinkNoise::Source;
+ receiver._associatedVisible=true;
+ receiver._state=RTW88_STATE_CONNECTED;
+ const auto expectNoise=[&](int dbm,Source source){
+  const auto noise=receiver.linkNoise();assert(noise.dbm==dbm&&noise.source==source);
+ };
+ const auto receive=[&](unsigned freq,unsigned width,int signal,uint8_t snr){
+  sk_buff frame;frame.status={0,signal,width,freq,snr};receiver.rxFrame(&frame);
+ };
+ expectNoise(-89,Source::ThermalEstimate);
+ receive(5180,RATE_INFO_BW_80,-54,62);
+ expectNoise(-85,Source::RxSNR);
+ jiffies+=RTW88LinkNoise::MaxSampleAgeMs+1;
+ expectNoise(-89,Source::ThermalEstimate);
+ receive(5200,RATE_INFO_BW_80,-54,62);
+ receive(5180,RATE_INFO_BW_20,-54,62);
+ receive(5180,RATE_INFO_BW_80,-54,0);
+ receive(5180,RATE_INFO_BW_80,-54,12);
+ receiver._awdlOffChannel=true;receive(5180,RATE_INFO_BW_80,-54,62);
+ receiver._awdlOffChannel=false;
+ receiver._state=RTW88_STATE_SCANNING;receive(5180,RATE_INFO_BW_80,-54,62);
+ receiver._state=RTW88_STATE_CONNECTED;
+ matchesAP=false;receive(5180,RATE_INFO_BW_80,-54,62);matchesAP=true;
+ expectNoise(-89,Source::ThermalEstimate);
+ receiver._connChanWidth=40;expectNoise(-92,Source::ThermalEstimate);
+ receiver._connChanWidth=20;expectNoise(-95,Source::ThermalEstimate);
+ receiver._connChanWidth=80;receiver._rxNoiseSupported=false;expectNoise(-95,Source::Fixed);
+ std::puts("PASS: scan and RX regressions, RTL8821C SNR capture, link-noise validation and fallback");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory)
     (path / 'test.cpp').write_text('#include <initializer_list>\n' + pre +
-                                  scan + multi + timer + rx + restore + cases)
+                                  scan + multi + noise_query + timer + rx + noise + descriptor + restore + cases)
     subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17',
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                    '-I', str(root / 'src/kext'), '-I', str(root / 'src/compat'),
                     '-g', str(path / 'test.cpp'), '-o', str(path / 'test')],
                    check=True, timeout=60)
     subprocess.run([str(path / 'test')], check=True, timeout=30,
