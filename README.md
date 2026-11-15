@@ -1,123 +1,103 @@
-# AirPort-RTW
+# AirPort-RTW 1.2.1
 
-AirPort-RTW is a native macOS IO80211 Wi-Fi driver project derived from the Feixiao rtw88 macOS port.
+A Wi-Fi driver for supported Realtek PCIe cards on x86_64 Hackintosh systems.
+It works with the normal macOS Wi-Fi menu.
 
-The goal is to keep Feixiao's Realtek/Linux rtw88 hardware core while replacing the user-controlled network frontend with a native macOS AirPort-style frontend based on IO80211FamilyLegacy and IOSkywalkFamily.
+**Latest release: 1.2.1 — Fixes a Wi-Fi hang that could interrupt large downloads.**
 
-## First integrated target
+[Download 1.2.1](https://github.com/JoMei9019-real/AirPort-RTW/releases/tag/v1.2.1)
+· [Installation guide](docs/INSTALLATION.md)
+· [Release notes](RELEASE_1_2_1.md)
 
-This branch intentionally delivers the native stack as one larger test unit rather than many reboot-heavy intermediate builds:
+## What it does
 
-- native macOS Wi-Fi interface / menu integration
-- scanning
-- association
-- WPA/WPA2 path
-- 2.4 / 5 GHz support
-- link state and RX/TX integration
-- power-management / sleep-wake hooks
-- diagnostics and rtw88 control path retained where useful
+- Connect to Wi-Fi through macOS, without a separate connection app.
+- Use **WPA3-Personal with PMF**, including on compatible WPA2/WPA3 transition
+  networks. Hardware pairwise encryption improves WPA3 speed and CPU use.
+- Switch between compatible WPA3 access points while keeping WPA3 security.
+- Automatically switch between compatible access points on the same network.
+  This is useful when moving around a home with several access points or repeaters.
+- Prefer 5 GHz when its signal is strong enough, and use 2.4 GHz when needed.
+- Use supported **802.11k and 802.11v** features to find nearby access points
+  and consider switch suggestions from the router.
 
-Initial PCIe IDs:
+Roaming can briefly interrupt traffic. **802.11r Fast Transition is not
+implemented.** Some 802.11k/v functions are experimental and still need testing
+with more routers. A router showing “11k” or “11v” does not confirm every feature.
 
-- RTL8821CE: 10ec:c821, 10ec:b821
-- RTL8822BE: 10ec:b822
-- RTL8822CE: 10ec:c822, 10ec:c82f
+## Supported hardware
 
-RTL8812AE / RTL8814AE remain in the Feixiao lineage but are deliberately not enabled in this first native test build.
+| Card | PCI vendor:device IDs | Status |
+| --- | --- | --- |
+| RTL8821CE | `10ec:c821`, `10ec:b821` | Supported |
+| RTL8822BE | `10ec:b822` | Supported |
+| RTL8822CE | `10ec:c822`, `10ec:c82f` | Supported |
+| RTL8814AE | `10ec:8813` | Experimental; needs hardware testing |
 
-## Dependencies
+RTL8812AE, USB and SDIO adapters are not supported. A listed card does not
+guarantee compatibility with every laptop or EFI configuration.
 
-Run:
+## Install or update
+
+1. Back up your working EFI folder and keep a way to restore it.
+2. Download **AirPortRTW-1.2.1.zip** from the release page and extract it.
+   The ZIP contains the kext and `BOOT-ARGS.txt`; guides are available online.
+   The “Source code” downloads do not contain a ready-to-use driver.
+3. Follow the [installation guide](docs/INSTALLATION.md) for your macOS version.
+   Ventura uses the system Wi-Fi components. Sonoma, Sequoia and Tahoe need
+   additional compatible legacy Wi-Fi components.
+4. Put `AirPortRTW.kext` in `EFI/OC/Kexts/` and enable it in OpenCore under
+   **Kernel → Add**. Disable older `rtw88.kext` or duplicate AirPortRTW copies.
+5. Restart and connect from the macOS Wi-Fi menu.
+
+If AirPortRTW already works on your current macOS version, replace its kext
+and keep your working dependencies.
+
+To check which build is loaded, run this in Terminal:
 
 ```sh
-./scripts/bootstrap-deps.sh
+ioreg -r -c AirPortRTW -l | grep DriverBuild
 ```
 
-This checks out:
+For this release, the result should show `1.2.1`.
 
-- AcidAnthera MacKernelSDK
-- thegwchr rtw88-stable
+## Turn off automatic roaming
 
-The bootstrap script fetches the three required firmware blobs into `firmware/` reproducibly before building.
+Automatic roaming is enabled by default. To turn it off, add
+**`-rtwnoautoroam`** to **NVRAM → Add → 7C436110-AB2A-4BBB-A880-FE41995C9F82 → boot-args**
+in your OpenCore `config.plist`, keeping your existing arguments, then restart.
+Remove this argument and restart to enable automatic roaming again.
+All four supported driver arguments are listed in [BOOT-ARGS.txt](docs/BOOT-ARGS.txt).
 
-## Build
+## Known limitations
 
-```sh
-make airport
-```
+- On some starts, a transition network may connect using **WPA2 first**.
+  Disconnecting and reconnecting has selected WPA3 in the reported case.
+  Other starts used WPA3 directly; the cause remains under investigation.
+- Some WPA3 attempts may receive an SAE rejection before a later attempt
+  succeeds. A WPA3 guest network also failed to obtain an IP address in one
+  setup. These separate issues remain open.
+- **Heavy downloads or speed tests can cause packet drops.** Not all traffic
+  losses have been resolved.
+- Reconnecting after sleep can be slow. Deep sleep and hibernation are not
+  fully reliable on all systems.
+- WPA2-Enterprise is experimental and has not been verified on hardware.
+  WPA3-Enterprise and pure pairwise TKIP are not supported.
+- AirDrop and full Continuity support are not provided by this release.
+- RTL8814AE support still needs testing on a physical card.
 
-Output:
+See [roaming and diagnostics](docs/ROAMING.md) for advanced settings, logs,
+and details about what has been tested.
 
-```
-build/out/AirPortRTW.kext
-```
+## Help and development
 
-The project currently targets x86_64 Hackintosh systems and the Ventura IO80211FamilyLegacy ABI.
+When [reporting a problem](https://github.com/JoMei9019-real/AirPort-RTW/issues),
+include your Wi-Fi card, macOS version, loaded build, and steps to reproduce it.
+Logs help; remove private information before sharing them.
 
-## OpenCore setup by macOS version
+Developers can use the [build guide](docs/BUILDING.md). Development continues
+on `1.0.0-beta`; use a published release for normal installation.
 
-AirPort-RTW currently targets the Ventura-era IO80211 ABI. The OpenCore setup differs depending on the macOS version.
-
-### macOS Ventura (13)
-
-Ventura already ships the Apple Wi-Fi frameworks that AirPort-RTW targets. Do **not** inject the restored Sonoma+ legacy Wi-Fi stack on Ventura.
-
-1. Copy `AirPortRTW.kext` to `EFI/OC/Kexts/`.
-2. Add and enable `AirPortRTW.kext` under OpenCore `Kernel -> Add`.
-3. Leave the stock `com.apple.iokit.IOSkywalkFamily` enabled. Do **not** add an OpenCore `Kernel -> Block` entry for it.
-4. Do **not** add `IOSkywalkFamily.kext` or `IO80211FamilyLegacy.kext` from the Sonoma/Sequoia/Tahoe compatibility setup.
-5. Do not load the old Feixiao `rtw88.kext` at the same time as AirPortRTW; both would match the same PCI device.
-6. Reboot and verify that AirPortRTW attaches to the Realtek PCI device and that Wi-Fi appears in macOS.
-
-Lilu and AMFIPass may still be present if your EFI needs them for other patches, but they are not part of the Ventura-specific AirPort-RTW dependency chain described above.
-
-### macOS Sonoma / Sequoia / Tahoe
-
-These releases require the restored legacy Apple Wi-Fi stack.
-
-The required legacy Wi-Fi kexts can be found in the OpenCore Legacy Patcher repository:
-
-[OpenCore-Legacy-Patcher / payloads / Kexts / Wifi](https://github.com/dortania/OpenCore-Legacy-Patcher/tree/main/payloads/Kexts/Wifi)
-
-For AirPort-RTW, the relevant kexts from that folder are:
-
-- `IOSkywalkFamily.kext`
-- `IO80211FamilyLegacy.kext`
-
-You do **not** need `IO80211ElCap` or `corecaptureElCap` for the AirPort-RTW setup described here. Use versions that are compatible with your macOS release.
-
-The intended OpenCore load order is:
-
-1. Lilu
-2. AMFIPass
-3. IOSkywalkFamily
-4. IO80211FamilyLegacy
-5. AirPortRTW
-
-Block the stock `com.apple.iokit.IOSkywalkFamily` using OpenCore `Kernel -> Block` with Strategy `Exclude` for the applicable Darwin versions. `SecureBootModel` must be configured compatibly with the restored legacy stack.
-
-Do not load the old Feixiao `rtw88.kext` at the same time as AirPortRTW; both would match the same PCI device.
-
-### macOS Monterey and earlier
-
-Monterey and earlier releases are **not currently validated targets** for AirPort-RTW. The project is built around the Ventura IO80211 ABI, so the Ventura instructions should not be assumed to work unchanged on older releases. If support for an older release is added later, its required framework and OpenCore configuration will be documented here.
-
-
-## Test plan
-
-For the first real hardware test, use one reboot and validate the whole path:
-
-1. confirm AirPortRTW attaches to the Realtek PCI device;
-2. verify Wi-Fi appears in macOS;
-3. scan and join a WPA2 or WPA2/WPA3-transition network;
-4. test normal traffic on 2.4 and 5 GHz;
-5. sleep and wake once;
-6. switch networks once;
-7. collect the diagnostic log if any step fails.
-
-This branch is experimental kernel code. Keep a bootable fallback EFI.
-
-
-## Lineage and licensing
-
-AirPort-RTW starts from Feixiao and incorporates GPL-compatible native IO80211 work from the RTL88WiFi / AirPort_RTW88 lineage. See `NOTICE.md` and the retained SPDX/copyright notices in individual source files.
+AirPort-RTW builds on Feixiao's rtw88 macOS port and native IO80211 work from
+the RTL88WiFi / AirPort_RTW88 projects. See [NOTICE.md](NOTICE.md) and the
+license notices in the source files.

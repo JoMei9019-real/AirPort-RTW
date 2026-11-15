@@ -85,6 +85,8 @@ DRIVER_CFLAGS := \
     -DCONFIG_RTW88_8822CE=1 \
     -DCONFIG_RTW88_8821C=1 \
     -DCONFIG_RTW88_8821CE=1 \
+    -DCONFIG_RTW88_8814A=1 \
+    -DCONFIG_RTW88_8814AE=1 \
     -Werror=implicit-function-declaration \
     -Werror=int-conversion \
     -Werror=incompatible-pointer-types \
@@ -134,7 +136,10 @@ CHIP_SRCS := \
     $(LINUX_SRC)/rtw8822ce.c \
     $(LINUX_SRC)/rtw8821c.c \
     $(LINUX_SRC)/rtw8821c_table.c \
-    $(LINUX_SRC)/rtw8821ce.c
+    $(LINUX_SRC)/rtw8821ce.c \
+    $(LINUX_SRC)/rtw8814a.c \
+    $(LINUX_SRC)/rtw8814a_table.c \
+    $(LINUX_SRC)/rtw8814ae.c
 
 # Compat C implementation
 COMPAT_SRCS := \
@@ -206,6 +211,17 @@ $(OUT_KEXT_BIN): $(ALL_OBJS) | $(OUT_KEXT)/Contents/MacOS
 	@echo "  NOTE  run 'sudo chown -R root:wheel $(OUT_KEXT)' for kextutil"
 	@echo "  KEXT $$(dwarfdump --uuid $(OUT_KEXT_BIN) 2>/dev/null)"
 	@echo "  OK   build/out/rtw88.kext"
+
+# RX wrapper retains descriptor ICV/CCMP proof (upstream sources stay pinned).
+$(BUILD_DIR)/driver/rx.o: $(COMPAT_DIR)/rtw88_rx.c $(COMPAT_DIR)/rtw88_rx_security.h $(LINUX_SRC)/rx.c | $(BUILD_DIR)/driver
+	$(CC) $(DRIVER_CFLAGS) -c $(COMPAT_DIR)/rtw88_rx.c -o $@
+
+# Serialize every PCI producer (data, scan null, management) before slot selection.
+$(BUILD_DIR)/driver/pci-serialized.c: $(LINUX_SRC)/pci.c scripts/prepare-pci.py | $(BUILD_DIR)/driver
+	python3 scripts/prepare-pci.py $< $@
+
+$(BUILD_DIR)/driver/pci.o: $(BUILD_DIR)/driver/pci-serialized.c
+	$(CC) $(DRIVER_CFLAGS) -iquote $(LINUX_SRC) -c $< -o $@
 
 # Compile Linux driver C files with compat headers
 $(BUILD_DIR)/driver/%.o: $(LINUX_SRC)/%.c | $(BUILD_DIR)/driver
@@ -333,6 +349,7 @@ AIRPORT_OUT_BIN   := $(AIRPORT_OUT_KEXT)/Contents/MacOS/AirPortRTW
 
 AIRPORT_KEXT_SRCS := \
     $(KEXT_SRC)/RTW88IEEE80211.cpp \
+    $(KEXT_SRC)/RTW88WPA3Crypto.cpp \
     $(KEXT_SRC)/RTW88HwOps.cpp \
     $(KEXT_SRC)/AirPortRTW.cpp \
     $(KEXT_SRC)/AirPortRTWAWDL.cpp \
@@ -343,7 +360,12 @@ AIRPORT_KEXT_OBJS := $(patsubst $(KEXT_SRC)/%.cpp, $(BUILD_DIR)/airport/%.o, $(A
 
 AIRPORT_KMOD_OBJ := $(BUILD_DIR)/airport/kmod_info.o
 
-AIRPORT_ALL_OBJS := $(DRIVER_OBJS) $(CHIP_OBJS) $(COMPAT_OBJS) $(FIRMWARE_OBJS) $(AIRPORT_KMOD_OBJ) $(AIRPORT_KEXT_OBJS)
+SAE_ARCHIVE := $(BUILD_DIR)/wpa3/librtw_sae.a
+SAE_INPUTS := $(shell find experimental/wpa3/rtw80211/sae -type f)
+$(SAE_ARCHIVE): $(SAE_INPUTS) scripts/build-sae.sh Makefile
+	DERIVED_FILE_DIR="$(BUILD_DIR)/wpa3" SDKROOT="$(SDK)" MACOSX_DEPLOYMENT_TARGET=13.0 bash scripts/build-sae.sh
+
+AIRPORT_ALL_OBJS := $(DRIVER_OBJS) $(CHIP_OBJS) $(COMPAT_OBJS) $(FIRMWARE_OBJS) $(AIRPORT_KMOD_OBJ) $(AIRPORT_KEXT_OBJS) $(SAE_ARCHIVE)
 
 AIRPORT_LDFLAGS := \
     $(ARCH) -static -nostdlib -Xlinker -kext \
@@ -359,6 +381,11 @@ $(AIRPORT_OUT_BIN): $(AIRPORT_ALL_OBJS) $(AIRPORT_KEXT_SKEL)/Contents/Info.plist
 	@echo "  SYNC $(AIRPORT_OUT_KEXT)"
 	rsync -a --exclude='MacOS' $(AIRPORT_KEXT_SKEL)/ $(AIRPORT_OUT_KEXT)/
 	@echo "  OK   build/out/AirPortRTW.kext"
+
+# Crypto-only optimization: no broad change to the IOKit/MLME build.
+# No SIMD/FPU register use is permitted by this scalar kernel path.
+$(BUILD_DIR)/airport/RTW88WPA3Crypto.o: $(KEXT_SRC)/RTW88WPA3Crypto.cpp | $(BUILD_DIR)/airport
+	$(CXX) $(KEXT_CXXFLAGS) -O2 -fno-vectorize -fno-slp-vectorize -mno-sse -mno-sse2 -mno-avx -c $< -o $@
 
 $(BUILD_DIR)/airport/%.o: $(KEXT_SRC)/%.cpp | $(BUILD_DIR)/airport
 	@echo "  CXX  $(notdir $<)"

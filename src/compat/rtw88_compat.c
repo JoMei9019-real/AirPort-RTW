@@ -148,6 +148,15 @@ struct rtw88_usb_ops       *rtw88_usb_io_ops   = NULL;
  * chip-local thermal power tracking. Full DIG/RA needs valid station stats. */
 bool rtw88_disable_watchdog_work = true;
 
+/* Beta 4: the Linux watchdog is deliberately disabled for unsafe RF-DM
+ * paths. Keep its BT coexistence maintenance separately scheduled. */
+static struct delayed_work g_coex_maintenance_work;
+static bool g_coex_maintenance_initialized = false;
+static bool g_coex_maintenance_enabled = false;
+static volatile uint32_t g_coex_maintenance_runs = 0;
+static void rtw88_coex_maintenance_worker(struct work_struct *work);
+
+
 /* ------------------------------------------------------------------ */
 /*  Workqueue implementation (kernel threads + IOLock)                  */
 /* ------------------------------------------------------------------ */
@@ -999,11 +1008,16 @@ u8 ieee80211_vif_type_p2p(struct ieee80211_vif *vif)
 /* Single global hw pointer — forward-declared above, defined/initialized here. */
 static struct ieee80211_hw *g_rtw88_hw = NULL;
 
-void rtw88_register_hw(struct ieee80211_hw *hw) { g_rtw88_hw = hw; }
+void rtw88_register_hw(struct ieee80211_hw *hw)
+{
+    g_rtw88_hw = hw;
+}
 void rtw88_unregister_hw(struct ieee80211_hw *hw)
 {
-    if (g_rtw88_hw == hw)
+    if (g_rtw88_hw == hw) {
+        rtw88_coex_maintenance_stop();
         g_rtw88_hw = NULL;
+    }
 }
 
 /* Accessor with external linkage so C++ TUs can retrieve the pointer without
@@ -1125,11 +1139,30 @@ int rtw88_compat_init(void)
         return -ENOMEM;
     }
 
+    // The frontend starts this worker after probe and STA setup complete.
+    INIT_DELAYED_WORK(&g_coex_maintenance_work, rtw88_coex_maintenance_worker);
+    g_coex_maintenance_initialized = true;
     return 0;
+}
+
+void rtw88_coex_maintenance_start(void)
+{
+    if (!g_coex_maintenance_initialized || !system_wq)
+        return;
+    __atomic_store_n(&g_coex_maintenance_enabled, true, __ATOMIC_RELEASE);
+    queue_delayed_work(system_wq, &g_coex_maintenance_work, 2 * HZ);
+}
+
+void rtw88_coex_maintenance_stop(void)
+{
+    if (__atomic_exchange_n(&g_coex_maintenance_enabled, false, __ATOMIC_ACQ_REL))
+        cancel_delayed_work_sync(&g_coex_maintenance_work);
 }
 
 void rtw88_compat_exit(void)
 {
+    rtw88_coex_maintenance_stop();
+    g_coex_maintenance_initialized = false;
     if (g_irq_work_initialized)
         cancel_work_sync(&g_irq_work);
     destroy_workqueue(g_datapath_wq);
@@ -1161,6 +1194,71 @@ void rtw88_compat_exit(void)
 #include "main.h"
 #include "fw.h"
 #include "reg.h"
+#include "tx.h"
+#include "hci.h"
+#include "coex.h"
+
+/* Periodic BT maintenance only. The core watchdog must remain disabled:
+ * its station iteration/RF dynamic-mechanism paths are not yet safe on macOS.
+ * Follow Linux's locking, RUNNING/SCANNING and IPS/LPS guards. */
+static void rtw88_coex_maintenance_worker(struct work_struct *work)
+{
+    (void)work;
+    struct ieee80211_hw *hw = g_rtw88_hw;
+    if (hw && hw->priv && rtw88_disable_watchdog_work) {
+        struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
+        mutex_lock(&rtwdev->mutex);
+        if (test_bit(RTW_FLAG_RUNNING, rtwdev->flags) &&
+            !test_bit(RTW_FLAG_SCANNING, rtwdev->flags) &&
+            rtwdev->efuse.btcoex) {
+            /* Avoid rtw_leave_lps: its synchronous MMIO polling previously
+             * hung this macOS port. Firmware queries are issued only while
+             * the device is awake and operational. */
+            if (!rtwdev->coex.stat.wl_under_lps &&
+                !rtwdev->coex.stat.wl_under_ips) {
+                rtw_coex_wl_status_check(rtwdev);
+                rtw_coex_query_bt_hid_list(rtwdev);
+                rtw_coex_active_query_bt_info(rtwdev);
+            }
+            uint32_t n = ++g_coex_maintenance_runs;
+            if ((n % 15U) == 1U)
+                rtw88_candidate_log("rtw88: beta4 BT coex maintenance runs=%u\n", n);
+        }
+        mutex_unlock(&rtwdev->mutex);
+    }
+    if (__atomic_load_n(&g_coex_maintenance_enabled, __ATOMIC_ACQUIRE))
+        queue_delayed_work(system_wq, &g_coex_maintenance_work, 2 * HZ);
+}
+
+uintptr_t rtw88_tx_thread_id(void) { return (uintptr_t)current_thread(); }
+
+/* Same preparation/ownership as rtw_tx(), with an explicit doorbell decision.
+ * The pinned upstream core remains unmodified. */
+int rtw88_tx_batch_write(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
+                         struct sk_buff *skb, bool kick)
+{
+    struct rtw_dev *dev = hw ? hw->priv : NULL;
+    struct rtw_tx_pkt_info info = {0};
+    if (!skb) return -EINVAL;
+    if (!dev || !test_bit(RTW_FLAG_RUNNING, dev->flags)) {
+        ieee80211_free_txskb(hw, skb);
+        return -ESHUTDOWN;
+    }
+    rtw_tx_pkt_info_update(dev, &info, sta, skb);
+    int ret = rtw_hci_tx_write(dev, &info, skb);
+    if (ret) ieee80211_free_txskb(hw, skb);
+    /* A rejected frame must not strand earlier accepted descriptors. */
+    if (kick || ret) rtw_hci_tx_kick_off(dev);
+    return ret;
+}
+
+bool rtw88_tx_batch_flush(struct ieee80211_hw *hw)
+{
+    struct rtw_dev *dev = hw ? hw->priv : NULL;
+    if (!dev || !test_bit(RTW_FLAG_RUNNING, dev->flags)) return false;
+    rtw_hci_tx_kick_off(dev);
+    return true;
+}
 
 /* We can't include rtw88's pci.h here because the compat tree's
  * linux/pci.h shadows it on the include path.  Just hardcode the few
@@ -1349,13 +1447,15 @@ int rtw88_set_station_mac(struct ieee80211_hw *hw,
 
     struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
     struct rtw_vif *rtwvif = (struct rtw_vif *)vif->drv_priv;
-    if (!rtwvif)
-        return -EINVAL;
-
+    mutex_lock(&rtwdev->mutex);
+    if (!rtwvif->conf || !test_bit(RTW_FLAG_RUNNING, rtwdev->flags) ||
+        test_bit(RTW_FLAG_SCANNING, rtwdev->flags) ||
+        rtwdev->coex.stat.wl_under_ips || rtwdev->coex.stat.wl_under_lps) {
+        mutex_unlock(&rtwdev->mutex);
+        return -EBUSY;
+    }
     memcpy(vif->addr, mac, ETH_ALEN);
     memcpy(rtwvif->mac_addr, mac, ETH_ALEN);
-
-    mutex_lock(&rtwdev->mutex);
     rtw_vif_port_config(rtwdev, rtwvif, PORT_SET_MAC_ADDR);
     mutex_unlock(&rtwdev->mutex);
     return 0;
@@ -1451,6 +1551,30 @@ void rtw88_force_wifi_only(void)
  * (mostly MMIO *writes*, safe), then writes the BSSID register.
  * The caller must populate hw->conf.chandef before calling.
  */
+/* Beta 2: macOS bypasses Linux's managed-station prepare_tx callback.
+ * Coex scan notifications are already issued by the underlying rtw88 core.
+ * Track the association-start notification so aborted joins can release
+ * the firmware's temporary Wi-Fi priority. */
+static bool g_coex_join_pending = false;
+static bool g_coex_join_5g = false;
+
+void rtw88_coex_join_end(struct ieee80211_hw *hw, bool successful)
+{
+    if (!hw || !hw->priv) return;
+    struct rtw_dev *rtwdev = (struct rtw_dev *)hw->priv;
+    mutex_lock(&rtwdev->mutex);
+    if (g_coex_join_pending) {
+        if (!successful && rtwdev->efuse.btcoex) {
+            rtw_coex_connect_notify(rtwdev,
+                g_coex_join_5g ? COEX_ASSOCIATE_5G_FINISH : COEX_ASSOCIATE_FINISH);
+            rtw88_candidate_log("rtw88: coex beta2 aborted join 5g=%u\n",
+                                (unsigned)g_coex_join_5g);
+        }
+        g_coex_join_pending = false;
+    }
+    mutex_unlock(&rtwdev->mutex);
+}
+
 void rtw88_connect_hw_setup(struct ieee80211_hw *hw,
                              struct ieee80211_vif *vif,
                              const uint8_t *bssid)
@@ -1460,6 +1584,19 @@ void rtw88_connect_hw_setup(struct ieee80211_hw *hw,
     struct rtw_vif *rtwvif = (struct rtw_vif *)vif->drv_priv;
 
     mutex_lock(&rtwdev->mutex);
+
+    /* Prioritize the first post-boot Wi-Fi association (and later reconnects)
+     * through the existing firmware arbitration engine. This does NOT
+     * delay loading of the independent USB Bluetooth controller. */
+    if (rtwdev->efuse.btcoex && hw->conf.chandef.chan) {
+        const bool is5g = hw->conf.chandef.chan->hw_value > 14;
+        rtw_coex_connect_notify(rtwdev,
+            is5g ? COEX_ASSOCIATE_5G_START : COEX_ASSOCIATE_START);
+        g_coex_join_pending = true;
+        g_coex_join_5g = is5g;
+        rtw88_candidate_log("rtw88: coex beta2 join start 5g=%u\n",
+                            (unsigned)is5g);
+    }
 
     /* Switch to the AP's channel (uses hw->conf.chandef set by caller). */
     IOLog("rtw88: connect_hw_setup: rtw_set_channel\n");
@@ -1609,6 +1746,25 @@ uint8_t rtw88_get_tx_nss(struct rtw_dev *rtwdev)
     if (nss == 0 || nss > 4)
         nss = 1;
     return nss;
+}
+
+/* Read firmware C2H rate-adaptation data for the connected peer. */
+void rtw88_get_tx_rate_snapshot(struct ieee80211_sta *sta,
+                                struct rtw88_tx_rate_snapshot *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!sta) return;
+    struct rtw_sta_info *si = (struct rtw_sta_info *)sta->drv_priv;
+    const u32 bit_rate = READ_ONCE(si->ra_report.bit_rate);
+    if (!bit_rate) return;
+    out->flags = READ_ONCE(si->ra_report.txrate.flags);
+    out->legacy_100kbps = READ_ONCE(si->ra_report.txrate.legacy);
+    out->mcs = READ_ONCE(si->ra_report.txrate.mcs);
+    out->nss = READ_ONCE(si->ra_report.txrate.nss);
+    if (!out->nss) out->nss = 1;
+    out->bw = READ_ONCE(si->ra_report.txrate.bw);
+    out->valid = 1;
 }
 
 uint32_t rtw88_read_log(char *out_buf, uint32_t max_len)

@@ -20,6 +20,22 @@ inline bool dataPayload(const uint8_t *p, size_t n, uint16_t &etherType) {
     etherType = uint16_t(p[14]) << 8 | p[15];
     return true;
 }
+/* Apple can hand TX down as Ethernet II or as 802.3 with the AWDL
+ * SNAP/data envelope already in place (AirPort_RTW89 f98563e). */
+inline bool txPayload(const uint8_t *prefix, size_t copied, size_t length,
+                      uint16_t &etherType, size_t &networkOffset)
+{
+    if (!prefix || copied < 14 || length < 14) return false;
+    etherType = uint16_t(prefix[12]) << 8 | prefix[13];
+    networkOffset = 14;
+    if (etherType >= 1536) return true;
+    if (etherType > 1500 || etherType != length - 14 ||
+        !dataPayload(prefix + 14, copied - 14, etherType) || etherType < 1536)
+        return false;
+    networkOffset = 30;
+    return true;
+}
+
 template <typename Deliver>
 bool receiveAggregate(const uint8_t *p, size_t n, const uint8_t *local, Deliver deliver) {
     if (!p || !local || !n) return false;
@@ -101,6 +117,27 @@ inline bool actionHeader(const uint8_t *p, size_t n) {
     return p && n>=16 && p[0]==127 && p[1]==0 && p[2]==0x17 &&
         p[3]==0xf2 && p[4]==8 && p[5]==0x10 && (p[6]==0 || p[6]==3);
 }
+/* RTW89 found that older IO80211 can panic while decompressing Service
+ * Response and ARPA TLVs. Keep them in our own parser; omit them only
+ * from the experimental Apple action handoff. */
+inline size_t copyAppleActionBody(uint8_t *out, const uint8_t *body, size_t length)
+{
+    if (!out || !actionHeader(body, length)) return 0;
+    memcpy(out, body, 16);
+    size_t written = 16;
+    for (size_t offset = 16; length - offset >= 3;) {
+        const uint8_t type = body[offset];
+        const size_t field = 3 + le16(body + offset + 1);
+        if (field > length - offset) return 0;
+        if (type != 2 && type != 0x10) {
+            memcpy(out + written, body + offset, field);
+            written += field;
+        }
+        offset += field;
+    }
+    return written;
+}
+
 struct ParseFailure { const char *reason="ok"; size_t offset=0; };
 inline bool parseAction(const uint8_t *p, size_t n, Action &out, ParseFailure *failure=nullptr) {
     if (failure) *failure=ParseFailure{};

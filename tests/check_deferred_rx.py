@@ -31,6 +31,7 @@ public:
  sk_buff *_deferredRx[256]={}; unsigned _deferredRxHead=0,_deferredRxCount=0;
  bool _deferredRxEnabled=false, _shutdown=false;
  uint32_t _deferredRxQueued=0,_deferredRxDropped=0,_deferredRxProcessed=0;
+ void drainWorkerEvents(){}
  Backend backend; Backend *_ieee80211=&backend;
  bool deferRxFrame(sk_buff *);
  void setRxQueueEnabled(bool);

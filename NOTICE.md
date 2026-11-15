@@ -19,6 +19,13 @@ the date; the full change history is in the Git log and `CHANGELOG.md`.
 
 ## Separately licensed parts
 
+- The WPA3 backend in `experimental/wpa3/` is imported from
+  souissiak1-maker/AirportRTW at revision
+  `450fa64d8e758f7180018e5da2f05cab59982fc9`. Its SAE adapter, hostap and Mbed TLS
+  sources retain the notices and licenses in `rtw80211/sae/NOTICE.txt` and
+  `third_party/`. Source hashes and revisions are recorded in `IMPORT.json`
+  and `rtw80211/sae/UPSTREAM.json`. This backend is linked into AirPort-RTW 1.2.0.
+  Release bundles keep these license texts in `Contents/Resources/Notices/`.
 - Kernel SDK headers in `driver/AirPort-RTW/MacKernelSDK/` keep their own
   notices and `LICENSE.txt`.
 - Realtek firmware in `driver/AirPort-RTW/firmware/` keeps its original notices

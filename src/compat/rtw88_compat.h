@@ -66,6 +66,14 @@
 /* ------------------------------------------------------------------ */
 
 struct rtw_dev;
+struct ieee80211_sta;
+
+/* Snapshot of the live C2H firmware rate-adaptation report. */
+struct rtw88_tx_rate_snapshot {
+    uint32_t flags;
+    uint32_t legacy_100kbps;
+    uint8_t mcs, nss, bw, valid;
+};
 
 /* dev_err / dev_warn / dev_info / dev_dbg */
 void rtw88_dev_printk(int level, struct device *dev, const char *fmt, ...)
@@ -148,6 +156,8 @@ typedef atomic_t refcount_t;
 
 int  rtw88_compat_init(void);
 void rtw88_compat_exit(void);
+void rtw88_coex_maintenance_start(void);
+void rtw88_coex_maintenance_stop(void);
 
 /* Set the firmware resources directory (call before rtw_pci_probe) */
 void rtw88_set_fw_dir(const char *dir);
@@ -161,6 +171,12 @@ void rtw88_get_stats(struct rtw_dev *rtwdev, uint32_t *tx_bytes, uint32_t *rx_by
  * need the Linux driver's private layout live in rtw88_compat.c, after main.h
  * has provided the complete definition. */
 uint8_t rtw88_get_tx_nss(struct rtw_dev *rtwdev);
+void rtw88_get_tx_rate_snapshot(struct ieee80211_sta *sta,
+                                struct rtw88_tx_rate_snapshot *out);
+uintptr_t rtw88_tx_thread_id(void);
+int rtw88_tx_batch_write(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
+                         struct sk_buff *skb, bool kick);
+bool rtw88_tx_batch_flush(struct ieee80211_hw *hw);
 uint32_t rtw88_read_log(char *out_buf, uint32_t max_len);
 void rtw88_candidate_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 uint32_t rtw88_copy_log(char *out_buf, uint32_t max_len, uint64_t *total_bytes);
@@ -176,6 +192,9 @@ int rtw88_be_tx_busy(void);
 /* Force-disable BT coexistence by clearing efuse.btcoex. Must be called
  * between rtw_pci_probe and the chip's start() op. See rtw88_compat.c. */
 void rtw88_force_wifi_only(void);
+
+/* Balance Wi-Fi priority after macOS-managed association success/failure. */
+void rtw88_coex_join_end(struct ieee80211_hw *hw, bool successful);
 
 /* TX flow control. rtw88_be_tx_avail() returns the BE ring's free-slot count
  * so the output path can stall (backpressure) instead of dropping when full.

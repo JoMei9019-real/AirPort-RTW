@@ -356,13 +356,11 @@ bool RTW88PCIDevice::start(IOService *provider)
         return false;
     }
 
-    /* Force-disable BT coexistence.  rtw_pci_probe (inside create()) has
-     * already run rtw_core_init which filled rtwdev->efuse.btcoex from
-     * the chip's eFuse — but the actual coex setup happens later in
-     * rtw_power_on (via _ieee80211->start() below).  Override now so the
-     * coex driver initialises with wifi_only=true and never enables the
-     * BT-side H2C/C2H exchange that appears to be wedging BE TX. */
-    rtw88_force_wifi_only();
+    /* Experimental Bluetooth coexistence support for the 1.3.0 beta.
+     * Preserve the hardware eFuse btcoex setting, allowing the firmware
+     * to arbitrate the shared Wi-Fi/Bluetooth RF resources. Monitor for
+     * Wi-Fi TX starvation if the Bluetooth side is unresponsive. */
+    IOLog("rtw88: preserving hardware Bluetooth coexistence setting (1.3.0 beta)\n");
 
     /* Run the full probe now so the MAC address is populated before
      * the Ethernet interface is attached.  enable() will call

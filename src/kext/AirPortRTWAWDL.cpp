@@ -1,9 +1,9 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.17 — Ventura IO80211 AWDL/P2P TX-handoff diagnostics.
+ * AirPortRTW 2.0.0-beta.18 — Ventura IO80211 AWDL/P2P TX handoff.
  *
  * This file deliberately implements only payload ABIs present in the pinned
- * the kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
+ * kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
  * selectors stay unsupported rather than pretending a radio operation completed.
  */
 #include "AirPortRTW.hpp"
@@ -45,18 +45,20 @@ static RTW88MdnsInfo rtw88InspectAWDLMdnsPacket(mbuf_t m)
     const size_t copy = total < sizeof(bytes) ? total : sizeof(bytes);
     if (mbuf_copydata(m, 0, copy, bytes) != 0) return info;
 
-    const uint16_t type = (uint16_t(uint16_t(bytes[12]) << 8) | bytes[13]);
-    if (type != 0x86dd || copy < 54) return info;
+    uint16_t type = 0;
+    size_t networkOffset = 0;
+    if (!RTW88AWDL::txPayload(bytes, copy, total, type, networkOffset) ||
+        type != 0x86dd || copy < networkOffset + 40) return info;
     info.ipv6 = true;
-    if (bytes[20] != 17 || copy < 62) return info; /* IPv6 next-header UDP */
+    const size_t dns = networkOffset + 48;
+    if (bytes[networkOffset + 6] != 17 || copy < dns) return info;
 
-    const uint8_t *udp = bytes + 54;
-    const uint16_t sport = (uint16_t(uint16_t(udp[0]) << 8) | udp[1]);
-    const uint16_t dport = (uint16_t(uint16_t(udp[2]) << 8) | udp[3]);
+    const uint8_t *udp = bytes + networkOffset + 40;
+    const uint16_t sport = uint16_t(udp[0]) << 8 | udp[1];
+    const uint16_t dport = uint16_t(udp[2]) << 8 | udp[3];
     if (sport != 5353 && dport != 5353) return info;
     info.mdns = true;
 
-    const size_t dns = 62;
     if (copy >= dns + 12)
         info.response = (bytes[dns + 2] & 0x80U) != 0;
 
@@ -101,26 +103,34 @@ void AirPortRTW::traceAWDLTxPacket(mbuf_t m, unsigned path)
     /* Only Ethernet/IPv6/UDP metadata is retained. Normal controller traffic
      * needs a 14-byte read; the bounded DNS scan runs only for mDNS. Calls on
      * the controller path may include output-queue retries, not unique TX. */
-    uint8_t header[62] = {};
-    if (mbuf_copydata(m, 0, 14, header) != 0) {
+    uint8_t header[78] = {};
+    const size_t prefix = path == 0 && length >= 30 ? 30 : 14;
+    if (mbuf_copydata(m, 0, prefix, header) != 0) {
         __atomic_fetch_add(&_awdlTxTraceCopyErrors, 1U, __ATOMIC_RELAXED);
         return;
     }
-    const uint16_t type = (uint16_t(header[12]) << 8) | header[13];
+    uint16_t type = 0;
+    size_t networkOffset = 0;
+    if (!RTW88AWDL::txPayload(header, prefix, length, type, networkOffset)) return;
     if (path == 0) {
+        if (networkOffset == 30)
+            __atomic_fetch_add(&_awdlTxDequeueWrapped, 1U, __ATOMIC_RELAXED);
         __atomic_store_n(&_awdlTxLastEtherType, (uint32_t)type, __ATOMIC_RELAXED);
         __atomic_store_n(&_awdlTxLastIPv6NextHeader, 0U, __ATOMIC_RELAXED);
     }
-    if (type != 0x86dd || length < sizeof(header)) return;
-    if (mbuf_copydata(m, 14, sizeof(header) - 14, header + 14) != 0) {
+    const size_t end = networkOffset + 48;
+    if (type != 0x86dd || length < end) return;
+    if (mbuf_copydata(m, networkOffset, end - networkOffset, header + networkOffset) != 0) {
         __atomic_fetch_add(&_awdlTxTraceCopyErrors, 1U, __ATOMIC_RELAXED);
         return;
     }
     if (path == 0)
-        __atomic_store_n(&_awdlTxLastIPv6NextHeader, (uint32_t)header[20], __ATOMIC_RELAXED);
-    if (header[20] != 17) return;
-    const uint16_t sport = (uint16_t(header[54]) << 8) | header[55];
-    const uint16_t dport = (uint16_t(header[56]) << 8) | header[57];
+        __atomic_store_n(&_awdlTxLastIPv6NextHeader, (uint32_t)header[networkOffset + 6],
+                         __ATOMIC_RELAXED);
+    if (header[networkOffset + 6] != 17) return;
+    const uint8_t *udp = header + networkOffset + 40;
+    const uint16_t sport = uint16_t(udp[0]) << 8 | udp[1];
+    const uint16_t dport = uint16_t(udp[2]) << 8 | udp[3];
     if (sport != 5353 && dport != 5353) return;
     const RTW88MdnsInfo info = rtw88InspectAWDLMdnsPacket(m);
     if (info.mdns) __atomic_fetch_add(&_awdlTxPathMdns[path], 1U, __ATOMIC_RELAXED);
@@ -183,6 +193,7 @@ void AirPortRTW::publishAWDLTxDiagnostics()
         {"AWDL_TX_DEQUEUE_TRUE_EMPTY", &_awdlTxDequeueTrueEmpty},
         {"AWDL_TX_DEQUEUE_FALSE_WITH_HEAD", &_awdlTxDequeueFalseWithHead},
         {"AWDL_TX_ACTUAL_DEQUEUED", &_awdlTxActualDequeued},
+        {"AWDL_TX_DEQUEUE_WRAPPED", &_awdlTxDequeueWrapped},
         {"AWDL_TX_DEQUEUE_COUNT_MISMATCH", &_awdlTxDequeueCountMismatch},
         {"AWDL_TX_DEQUEUE_PATH_CALLS", &_awdlTxPathCalls[0]},
         {"AWDL_TX_DEQUEUE_PATH_MDNS", &_awdlTxPathMdns[0]},
@@ -303,6 +314,10 @@ SInt32 AirPortRTW::enableVirtualInterface(IO80211VirtualInterface *interface)
         _pmPowerState == kRTW88PowerStateOff)
         return kIOReturnNotReady;
 
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        _pmPowerState == kRTW88PowerStateOff)
+        return kIOReturnNotReady;
     UInt role = (UInt)interface->getInterfaceRole();
     IOLog("AirPortRTW: enableVirtualInterface role=%u bsd=%s\n",
           role, interface->getBSDName() ? interface->getBSDName() : "?");
@@ -909,6 +924,7 @@ void AirPortRTW::drainAWDLTxPackets(void *object, UInt options, bool timerPoll)
     __atomic_store_n(&_awdlTxLastOptions, (uint32_t)options, __ATOMIC_RELAXED);
     if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE) ||
         (_awdlManager && _awdlManager->powerSuspended()) ||
         !_ieee80211 || !_ieee80211->isPowered()) {
         __atomic_fetch_add(&_awdlTxRejectedPower, 1U, __ATOMIC_RELAXED);

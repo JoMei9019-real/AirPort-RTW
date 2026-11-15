@@ -1,0 +1,2 @@
+# Preserve upstream bytes for the hash-verified SAE vendor snapshot.
+experimental/wpa3/rtw80211/sae/third_party/** whitespace=-space-before-tab

@@ -27,6 +27,7 @@
 #include <kern/thread.h>
 
 #include "RTW88IEEE80211.hpp"   /* for RTW88EventDelegate, RTW88BSS, RTW88State */
+#include "RTW88AssocWire.hpp"
 #include "RTW88UserClient.hpp"  /* for struct RTW88StateResult */
 #include "RTW88AWDLManager.hpp"
 
@@ -111,15 +112,27 @@ class AirPortRTW : public IO80211Controller, public RTW88EventDelegate, public R
 
 public:
     static void diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *timer);
+    static void btmTimerFired(OSObject *owner,IOTimerEventSource *timer);
+    bool btmControlAvailable() const override { return _btmTimer && roamingActionsAllowed(); }
+    bool scheduleBtmControl(unsigned delayMs) override;
     static void awdlTimerFired(OSObject *owner, IOTimerEventSource *timer);
     static void deferredRxReady(OSObject *owner, IOInterruptEventSource *source, int count);
+    bool deferWorkerEvent(RTW88Event, uint32_t generation, uint32_t result) override;
+    void drainWorkerEvents();
     bool deferRxFrame(struct sk_buff *skb) override;
     bool rxProcessingDeferred() const override { return true; }
+    bool roamingActionsAllowed() const override {
+        return !__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_pmTransition, __ATOMIC_ACQUIRE) &&
+               !__atomic_load_n(&_dmaStopped, __ATOMIC_ACQUIRE);
+    }
     void setRxQueueEnabled(bool enabled) override;
     void radioPowerChanged(bool powered) override;
     /* IOService */
     bool     init(OSDictionary *props) override;
     bool     start(IOService *provider) override;
+    IOReturn setProperties(OSObject *properties) override;
+    void publishRoamDiagnostics();
     void     stop(IOService *provider) override;
     void     free() override;
     void     systemWillShutdown(IOOptionBits specifier) override;
@@ -204,6 +217,7 @@ public:
     virtual UInt32 hardwareOutputQueueDepth(IO80211Interface*) override;
     virtual UInt32 getDataQueueDepth(OSObject *) override;
     virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options) override;
+    IOReturn outputStartBatched(IONetworkInterface *interface, IOOptionBits options);
     void kickGatedOutput();
     virtual SInt32 performCountryCodeOperation(IO80211Interface*, IO80211CountryCodeOp) override;
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
@@ -227,6 +241,8 @@ public:
     virtual void setLinkStatus(UInt32 status) override;
 
 private:
+    IOReturn handleMenuSAE(const RTW88AssocWire::Personal &request);
+    void postSTAJoinFailure();
     /* IO80211 payload adapters. Protected STA authentication is delegated to Apple RSN. */
     __attribute__((__noinline__)) SInt32 handleNativeRequest(unsigned int request_type, int request_number, IO80211Interface *interface, void *data);
     __attribute__((__noinline__)) IOReturn handleRequestCOUNTRY_CODE(bool isSet, void *data);
@@ -237,7 +253,9 @@ private:
     __attribute__((__noinline__)) IOReturn handleRequestHW_SUPPORTED_CHANNELS(bool isSet, void *data);
     IOReturn handleSSID(bool set, struct apple80211_ssid_data *data);
     IOReturn handleAUTH_TYPE(bool set, struct apple80211_authtype_data *data);
-    IOReturn handleASSOCIATE(struct apple80211_assoc_data *data);
+    IOReturn handleASSOCIATE(struct apple80211_assoc_data *data,
+                              const RTW88AssocWire::StationAddress &station = {});
+    __attribute__((__noinline__)) bool tryHostAssociation(apple80211req *req, SInt32 &result);
     IOReturn handleRSN_IE(bool set, struct apple80211_rsn_ie_data *data);
     IOReturn handleAP_IE_LIST(struct apple80211_ap_ie_data *data);
     IOReturn handleCIPHER_KEY(struct apple80211_key *key);
@@ -293,6 +311,7 @@ private:
     RTW88IEEE80211         *_ieee80211   = nullptr;  /* reused as-is from rtw88 core */
 
     IOTimerEventSource *_diagnosticsTimer = nullptr;
+    IOTimerEventSource *_btmTimer = nullptr;
     char *_diagnosticsBuffer = nullptr;
     uint64_t _diagnosticsSamples = 0;
     /* Last periodic sample written to the diagnostic ring (r8 throttle). */
@@ -309,13 +328,25 @@ private:
     void waitForDiagnosticsIdle();
     IO80211WorkLoop       *_workLoop    = nullptr;
 
-    IOEthernetAddress       _macAddr;
+    SInt32 handleStationMACRequest(bool isSet, int selector,
+                                   IO80211Interface *interface, void *data);
+    IOReturn setStationMAC(const uint8_t *address, bool updateBSD);
+    IOReturn prepareJoinStationAddress(const RTW88AssocWire::StationAddress &station) override;
+    bool matchesJoinStationAddress(const RTW88AssocWire::StationAddress &station);
+    bool _assocOwnsStationMAC = false;
+    uint32_t _privateMacFlags = 0;
+    uint32_t _privateMacTimeout = 0;
+    uint32_t _privateMacGetCount = 0;
+    uint32_t _privateMacSetCount = 0;
     bool                    _scanInProgress = false;
     UInt32                  _powerSaveLevel = APPLE80211_POWERSAVE_MODE_DISABLED;
     volatile UInt32         _nativeAssocDispatchCount = 0;
     /* r7: last logged GET signature per diagnosed selector (change-only log). */
     uint64_t                _getDiagLast[5] = {~0ULL, ~0ULL, ~0ULL, ~0ULL, ~0ULL};
     void logGetResult(int request_number, SInt32 ret, const void *data);
+    bool _awdlAppleActionRx = false;
+    uint32_t _awdlAppleActionInputs = 0;
+    uint32_t _awdlAppleActionDrops = 0;
     uint32_t                _awdlPeerPresencePosts = 0;
     uint32_t                _awdlPeerAbsencePosts = 0;
     uint32_t                _awdlPeerIPv6Posts = 0;
@@ -342,6 +373,7 @@ private:
     uint32_t _awdlTxDequeueTrueEmpty = 0, _awdlTxDequeueFalseWithHead = 0;
     uint32_t _awdlTxActualDequeued = 0, _awdlTxDequeueCountMismatch = 0;
     uint32_t _awdlTxClassTrue[10] = {}, _awdlTxClassFalse[10] = {};
+    uint32_t _awdlTxDequeueWrapped = 0;
     uint32_t _awdlTxPathCalls[3] = {}, _awdlTxPathMdns[3] = {};
     uint32_t _awdlTxPathAirDrop[3] = {}, _awdlTxPathServiceId[3] = {};
     uint32_t _awdlTxTraceCopyErrors = 0;
@@ -369,6 +401,11 @@ private:
      * on observed transport behavior, never on the host Darwin version. */
     bool                    _linkUp = false;
     bool                    _assocDoneReported = false;
+    uint32_t                _staLinkEventPosts = 0;
+    void postSTALinkChanged(bool up, uint32_t reason);
+    bool                    _staIdentityUp = false;
+    uint32_t                _staIdentityEventPosts = 0;
+    void postSTAIdentityChanged(bool up);
     bool                    _rsnHandshakeReported = false;
 
     /* Acceso real a hardware -- antes esto se pasaba como nullptr a
@@ -380,6 +417,8 @@ private:
     struct pci_dev          *_compatPciDev = nullptr;
 
     /* NAPI only enqueues; protocol callbacks execute on the controller loop. */
+    struct WorkerEvent { bool pending=false;uint32_t generation=0,result=0; };
+    WorkerEvent _workerEvents[2] = {}; // scan completion, failed join
     IOSimpleLock *_deferredRxLock = nullptr;
     IOInterruptEventSource *_deferredRxSource = nullptr;
     struct sk_buff *_deferredRx[256] = {};
@@ -409,6 +448,7 @@ private:
     void   setBounceOrigVA(IOPhysicalAddress phys, void *orig_va) override;
     void   syncBounceForCpu(IOPhysicalAddress dma, size_t size) override;
     void   resumeTxIfStalled() override;
+    void   scanTxReady() override;
     void   drainPendingFree();
     IOReturn quiesceForSystemSleep();
     IOReturn restoreAfterSystemWake();
