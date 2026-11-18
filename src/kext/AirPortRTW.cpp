@@ -157,13 +157,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 bool AirPortRTW::start(IOService *provider)
 {
     setProperty("PM_DEFERRED_RX_FIX", "1.0.2-beta.1");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.18");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.19");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "2.0.0-beta.18");
+    setProperty("DriverBuild", "2.0.0-beta.19");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -349,7 +349,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 2.0.0-beta.18 WPA3-Personal\n");
+    IOLog("AirPortRTW: 2.0.0-beta.19 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -456,6 +456,7 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         self->setProperty("AWDL_RX_AMSDU_PARSED", (uint64_t)self->_ieee80211->awdlRxAggregateParsed(), 32);
         self->setProperty("AWDL_RX_AMSDU_MALFORMED", (uint64_t)self->_ieee80211->awdlRxAggregateMalformed(), 32);
         self->setProperty("AWDL_RX_DIRECT_SNAP", (uint64_t)self->_ieee80211->awdlRxDirectSnap(), 32);
+        self->setProperty("AWDL_RX_WRAPPED_SNAP", (uint64_t)self->_ieee80211->awdlRxWrappedSnap(), 32);
         self->setProperty("AWDL_RX_REJECT_SNAP", (uint64_t)self->_ieee80211->awdlRxRejectedSnap(), 32);
         self->setProperty("AWDL_RX_REJECT_MAGIC", (uint64_t)self->_ieee80211->awdlRxRejectedMagic(), 32);
         self->setProperty("AWDL_RX_REJECT_DESTINATION", (uint64_t)self->_ieee80211->awdlRxRejectedDestination(), 32);
@@ -2729,7 +2730,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.18)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.19)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -2764,6 +2765,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
         d->enabled = _awdlManager->syncEnabled() ? 1 : 0;
+        setProperty("AWDL_SYNC_GET_PRIMARY_ENABLED", (uint64_t)d->enabled, 32);
         return kIOReturnSuccess;
     }
 
@@ -4036,14 +4038,18 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
         metadata.channel.version = APPLE80211_VERSION;
         metadata.channel.channel = channel;
         metadata.channel.flags = channel <= 14 ? APPLE80211_C_FLAG_2GHZ : APPLE80211_C_FLAG_5GHZ;
+        metadata.channel.flags |= APPLE80211_C_FLAG_20MHZ;
+        if (channel >= 52 && channel <= 144)
+            metadata.channel.flags |= APPLE80211_C_FLAG_DFS;
         metadata.rssi = rssi;
 
         const UInt32 result = rtw88VifBpfTapInput(awdl, packet, 12, &metadata, sizeof(metadata));
         freePacket(packet);
         if (++_awdlAppleActionInputs == 1 || _awdlAppleActionInputs % 128 == 0) {
             setProperty("AWDL_RX_APPLE_ACTION_LAST_RESULT", (uint64_t)result, 32);
-            IOLog("AirPortRTW: AWDL Apple action input #%u channel=%u rssi=%d result=0x%x\n",
-                  _awdlAppleActionInputs, (unsigned)channel, (int)rssi, (unsigned)result);
+            IOLog("AirPortRTW: AWDL Apple action input #%u channel=%u flags=0x%x rssi=%d result=0x%x\n",
+                  _awdlAppleActionInputs, (unsigned)channel, (unsigned)metadata.channel.flags,
+                  (int)rssi, (unsigned)result);
         }
         return;
     }

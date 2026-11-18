@@ -19,7 +19,7 @@ assert "rtw88_coex_maintenance_worker" in compat
 assert "rtw88_coex_maintenance_start();" in iface
 stop = iface[iface.index("void RTW88IEEE80211::stop()"):]
 assert stop.index("rtw88_coex_maintenance_stop();") < stop.index("rtw_pci_remove(_pcidev)")
-assert "2.0.0-beta.18" in workflow
+assert "2.0.0-beta.19" in workflow
 assert "actions/upload-artifact@v4" in workflow
 assert "publish:" not in workflow
 print("PASS: isolated BT coexistence maintenance, drain before PCI teardown, artifact-only workflow")

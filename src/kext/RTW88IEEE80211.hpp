@@ -308,6 +308,7 @@ public:
     uint32_t awdlRxAggregateParsed() const { return _awdlRxAggregateParsed; }
     uint32_t awdlRxAggregateMalformed() const { return _awdlRxAggregateMalformed; }
     uint32_t awdlRxDirectSnap() const { return _awdlRxDirectSnap; }
+    uint32_t awdlRxWrappedSnap() const { return _awdlRxWrappedSnap; }
     uint32_t awdlRxRejectedSnap() const { return _awdlRxRejectedSnap; }
     uint32_t awdlRxRejectedMagic() const { return _awdlRxRejectedMagic; }
     uint32_t awdlRxRejectedDestination() const { return _awdlRxRejectedDestination; }
@@ -701,6 +702,7 @@ private:
     uint32_t _awdlRxAggregateParsed = 0;
     uint32_t _awdlRxAggregateMalformed = 0;
     uint32_t _awdlRxDirectSnap = 0;
+    uint32_t _awdlRxWrappedSnap = 0;
     uint32_t _awdlRxRejectedSnap = 0;
     uint32_t _awdlRxRejectedMagic = 0;
     uint32_t _awdlRxRejectedDestination = 0;

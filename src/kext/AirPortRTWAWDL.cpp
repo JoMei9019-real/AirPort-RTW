@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.18 — Ventura IO80211 AWDL/P2P TX handoff.
+ * AirPortRTW 2.0.0-beta.19 — Ventura IO80211 AWDL/P2P TX handoff.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -520,6 +520,7 @@ SInt32 AirPortRTW::handleAWDLVirtualRequest(UInt request_type, int request_numbe
             bzero(d, sizeof(*d));
             d->version = APPLE80211_VERSION;
             d->enabled = (_awdlManager && _awdlManager->syncEnabled()) ? 1 : 0;
+            setProperty("AWDL_SYNC_GET_VIF_ENABLED", (uint64_t)d->enabled, 32);
         }
         return kIOReturnSuccess;
     }

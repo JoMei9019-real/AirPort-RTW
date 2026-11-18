@@ -20,6 +20,23 @@ inline bool dataPayload(const uint8_t *p, size_t n, uint16_t &etherType) {
     etherType = uint16_t(p[14]) << 8 | p[15];
     return true;
 }
+
+/* iOS 27 can put an RFC 1042 length prefix before the AWDL MSDU in
+ * a non-aggregated QoS frame. The length excludes the eight-byte prefix. */
+inline bool unwrapLengthPrefixedMSDU(const uint8_t *&p, size_t &length)
+{
+    static const uint8_t rfc1042[6] = {0xaa, 0xaa, 3, 0, 0, 0};
+    if (!p || length < 24 || memcmp(p, rfc1042, sizeof(rfc1042)))
+        return false;
+    const size_t innerLength = (size_t(p[6]) << 8) | p[7];
+    uint16_t etherType;
+    if (innerLength > length - 8 || !dataPayload(p + 8, innerLength, etherType))
+        return false;
+    p += 8;
+    length = innerLength;
+    return true;
+}
+
 /* Apple can hand TX down as Ethernet II or as 802.3 with the AWDL
  * SNAP/data envelope already in place (AirPort_RTW89 f98563e). */
 inline bool txPayload(const uint8_t *prefix, size_t copied, size_t length,

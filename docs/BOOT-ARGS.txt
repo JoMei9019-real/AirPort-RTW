@@ -1,4 +1,4 @@
-AirPort-RTW 2.0.0 Beta 18 - supported boot arguments
+AirPort-RTW 2.0.0 Beta 19 - supported boot arguments
 ==========================================
 
 No AirPort-RTW boot argument is required for normal use.
@@ -40,10 +40,10 @@ Use the spelling shown below; these switches do not need '=1'.
 -rtwawdlapplerx
   Tests the Apple AWDL peer-manager entry point for received action frames.
   Use after a baseline capture with this option off. The variant supplies
-  measured channel and RSSI and preserves the driver scheduler. Host-name and
+  RX channel, 20 MHz and DFS flags, and RSSI. Host-name and
   service-response TLVs stay in the local parser to avoid the legacy Apple
   decompressor. Test AirDrop visibility and file transfer on your hardware.
-  Default: use the existing Beta 17 action-frame handoff.
+  Default: use the existing action-frame handoff.
 
 Example: to turn off automatic roaming, add only -rtwnoautoroam to your
 existing boot-args. Avoid enabling all diagnostic switches together: change

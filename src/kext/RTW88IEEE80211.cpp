@@ -1559,20 +1559,23 @@ void RTW88IEEE80211::processRxMgmt(struct sk_buff *skb)
         if (_parent) {
             struct ieee80211_rx_status *rxs = IEEE80211_SKB_RXCB(skb);
             uint16_t rxChannel = 0;
-            if (rxs && rxs->band < NL80211_NUM_BANDS && _hw && _hw->wiphy) {
-                struct ieee80211_supported_band *band = _hw->wiphy->bands[rxs->band];
-                if (band) {
-                    /* rx_status::freq is not consistently populated by every
-                     * rtw88 path in this port. Prefer the currently tuned
-                     * chandef and fall back to the AWDL home channel. */
-                    if (_hw->conf.chandef.chan)
-                        rxChannel = (uint16_t)_hw->conf.chandef.chan->hw_value;
-                    else if (_awdlChannel)
-                        rxChannel = _awdlChannel;
+            if (rxs->freq && _hw && _hw->wiphy) {
+                const auto band = rxs->freq < 3000 ? NL80211_BAND_2GHZ : NL80211_BAND_5GHZ;
+                const auto *channels = _hw->wiphy->bands[band];
+                for (int i = 0; channels && i < channels->n_channels; ++i) {
+                    const auto &channel = channels->channels[i];
+                    if (channel.center_freq == rxs->freq) {
+                        rxChannel = (uint16_t)channel.hw_value;
+                        break;
+                    }
                 }
             }
+            /* Some RX paths lack a frequency snapshot. Fall back to the
+             * tuned channel, which can differ from the AWDL home channel. */
+            if (!rxChannel && _hw && _hw->conf.chandef.chan)
+                rxChannel = (uint16_t)_hw->conf.chandef.chan->hw_value;
             _parent->injectRxActionFrame(skb->data, skb->len,
-                                         rxs ? (int8_t)rxs->signal : 0,
+                                         (rxs->flag & RX_FLAG_NO_SIGNAL_VAL) ? 0 : (int8_t)rxs->signal,
                                          rxChannel);
         }
 
@@ -6035,6 +6038,7 @@ bool RTW88IEEE80211::tryDeliverAWDLDataFrame(struct sk_buff *skb)
         return false;
 
     const uint8_t *p = skb->data + hdrlen;
+    size_t msduLength = skb->len - hdrlen;
     // Reject encrypted/fragmented envelopes: this path has no reassembly or
     // decryption contract. Consume recognized AWDL envelopes on all paths.
     if (fc & (0x4000 | 0x0400) || (le16_to_cpu(hdr->seq_ctrl) & 15)) {
@@ -6053,7 +6057,7 @@ bool RTW88IEEE80211::tryDeliverAWDLDataFrame(struct sk_buff *skb)
          * final multicast subframe DA, so the old pre-filter could discard a
          * valid Bonjour/AirDrop subframe before examining it. */
         const bool parsed = RTW88AWDL::receiveAggregate(
-            p, skb->len - hdrlen, _awdlAddress,
+            p, msduLength, _awdlAddress,
             [&](const uint8_t *da, const uint8_t *sa, uint16_t type,
                 const uint8_t *payload, size_t length) {
                 deliverAWDLEthernet(da, sa, type, payload, (uint32_t)length);
@@ -6064,6 +6068,8 @@ bool RTW88IEEE80211::tryDeliverAWDLDataFrame(struct sk_buff *skb)
         return true;
     }
 
+    const bool wrapped = (fc & IEEE80211_STYPE_QOS_DATA) &&
+        RTW88AWDL::unwrapLengthPrefixedMSDU(p, msduLength);
     /* SNAP AA AA 03 00 17 F2 08 00 */
     if (p[0] != 0xaa || p[1] != 0xaa || p[2] != 0x03 ||
         p[3] != 0x00 || p[4] != 0x17 || p[5] != 0xf2 ||
@@ -6071,16 +6077,17 @@ bool RTW88IEEE80211::tryDeliverAWDLDataFrame(struct sk_buff *skb)
         ++_awdlRxRejectedSnap;
         return false;
     }
-    ++_awdlRxDirectSnap;
+    if (!wrapped) ++_awdlRxDirectSnap;
     p += 8;
 
     if (p[0] != 0x03 || p[1] != 0x04) { /* LE 0x0403 */
         ++_awdlRxRejectedMagic;
         return false;
     }
+    if (wrapped) ++_awdlRxWrappedSnap;
     uint16_t ethertype = (uint16_t)((p[6] << 8) | p[7]);
     p += 8;
-    uint32_t paylen = (uint32_t)(skb->data + skb->len - p);
+    uint32_t paylen = (uint32_t)(msduLength - 16);
 
     // Promiscuous reception also hears other AWDL peers' unicast traffic.
     // Consume that envelope without injecting it into this host's awdl0.
