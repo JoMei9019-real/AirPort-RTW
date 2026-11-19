@@ -30,6 +30,15 @@ jobs:
               python3 "$test"
             fi
           done
+      - uses: actions/checkout@v4
+        with:
+          repository: t4t5/owly
+          ref: 21171d8f9a08bfa2c625a1fa338e877a67913e54
+          path: .deps/owly
+          sparse-checkout: tests/captures
+          persist-credentials: false
+      - name: Replay Owly iPhone captures against the AWDL parser
+        run: python3 tests/replay_owly.py .deps/owly/tests/captures
       - name: Build driver and check optional diagnostic source
         run: |
           make airport
@@ -57,7 +66,9 @@ jobs:
           defined = subprocess.check_output(['nm', binary], text=True)
           assert '_rtw_sae_begin' in defined and '_rtw8814a_hw_spec' in defined
           strings = subprocess.check_output(['strings', binary], text=True)
-          assert '2.0.0-beta.19' in strings
+          assert '2.0.0-beta.20' in strings
+          assert '__ZN23IO80211VirtualInterface16dequeueTxPacketsEP15TxPacketRequest' in unresolved
+          assert 'AWDL_TX_PEER_PACKETS' in strings
           for name in ['-rtwnoautoroam', '-rtwsaeswccmp', '-rtwswscan', '-rtwnoawdlhop', 'btm-response-acked', 'ROAM_K_BEACON_ADVERTISED', 'TX_BATCH_DEFERRED_FRAMES', 'AWDL_POWER_SUSPENDED', 'AWDL_RX_APPLE_ACTION_INPUTS', 'AWDL_TX_DEQUEUE_WRAPPED', 'RX_DEFER_MODE', 'STA_LINK_EVENT_TLV_BYTES', 'rtw8814a_fw.bin']:
               assert name in strings, name
           assembly = subprocess.check_output(['xcrun', 'otool', '-tvV', 'build/airport/RTW88WPA3Crypto.o'], text=True)
@@ -66,12 +77,12 @@ jobs:
           assert not any(name in symbols for name in ['__cxx_global_var_init', '_GLOBAL__sub_I', '__cxa_guard'])
           print('PASS: release version, native symbols, driver options and scalar kernel CCMP')
           CHECK
-      - name: Package Beta 19 test artifact and verify contents
+      - name: Package Beta 20 test artifact and verify contents
         run: python3 scripts/package-release.py
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-2.0.0-beta.19
+          name: AirPortRTW-2.0.0-beta.20
           path: |
-            build/AirPortRTW-2.0.0-beta.19.zip
-            build/AirPortRTW-2.0.0-beta.19.zip.sha256
+            build/AirPortRTW-2.0.0-beta.20.zip
+            build/AirPortRTW-2.0.0-beta.20.zip.sha256
           if-no-files-found: error

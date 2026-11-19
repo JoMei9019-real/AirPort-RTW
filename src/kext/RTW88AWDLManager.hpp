@@ -61,6 +61,7 @@ public:
     bool observeAction(const uint8_t *frame, uint32_t length, bool *presenceDue = nullptr);
     uint32_t expirePublishedPeers(uint8_t *outMacs, uint32_t capacity);
     bool enqueueActionFrame(mbuf_t m); // consumes the mbuf on every path
+    unsigned availableTxSlots();
     bool enqueueData(mbuf_t m); // consumes the mbuf on every path
     bool tick(); // true when the controller should pull more packets
     bool scheduleReady() const { return !powerSuspended() && _syncEnabled && _awdlInterface && _airTemplate; }

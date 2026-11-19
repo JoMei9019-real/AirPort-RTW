@@ -12,7 +12,7 @@ end = source.index('\nvoid ', start + 1)
 drain = source[start:end]
 assert '->isOutputFlowControlled(' not in source
 assert drain.index('RTW88TxDrainGuard drainGuard') < drain.index('vif->getInterfaceRole()')
-assert drain.index('if (!drainGuard.acquired())') < drain.index('vif->dequeueOutputPacketsWithServiceClass(')
+assert drain.index('if (!drainGuard.acquired())') < drain.index('rtw88PeerDequeue(') < drain.index('rtw88IfnetDequeue(')
 
 test = r'''
 #include "RTW88TxDrainGuard.hpp"

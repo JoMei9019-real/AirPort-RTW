@@ -206,6 +206,7 @@ public:
     virtual int outputActionFrame(IO80211Interface *interface, mbuf_t m) override;
     virtual int bpfOutputPacket(OSObject *object, UInt dltType, mbuf_t m) override;
     virtual void requestPacketTx(void *object, UInt options) override;
+    UInt32 outputAWDLDataPacket(mbuf_t packet);
     void drainAWDLTxPackets(void *object, UInt options, bool timerPoll);
     void traceAWDLTxPacket(mbuf_t m, unsigned path);
     void publishAWDLTxDiagnostics();
@@ -347,9 +348,6 @@ private:
     bool _awdlAppleActionRx = false;
     uint32_t _awdlAppleActionInputs = 0;
     uint32_t _awdlAppleActionDrops = 0;
-    uint32_t                _awdlPeerPresencePosts = 0;
-    uint32_t                _awdlPeerAbsencePosts = 0;
-    uint32_t                _awdlPeerIPv6Posts = 0;
     uint32_t                _awdlServiceRefreshSignals = 0;
     uint32_t                _awdlMdnsRx = 0, _awdlMdnsTx = 0;
     uint32_t                _awdlIPv6Rx = 0, _awdlIPv6Tx = 0;
@@ -369,10 +367,10 @@ private:
     uint32_t _awdlTxSystemCallbacks = 0, _awdlTxTimerPolls = 0;
     uint32_t _awdlTxRejectedDma = 0, _awdlTxRejectedObject = 0;
     uint32_t _awdlTxLastOptions = 0, _awdlTxDiagnosticSamples = 0;
-    uint32_t _awdlTxDequeueTrue = 0, _awdlTxDequeueFalse = 0;
-    uint32_t _awdlTxDequeueTrueEmpty = 0, _awdlTxDequeueFalseWithHead = 0;
+    uint32_t _awdlTxPeerCallbackPackets = 0, _awdlTxPeerRequests = 0, _awdlTxPeerPackets = 0, _awdlTxPeerMask = 0;
+    uint32_t _awdlTxDirectAccepted = 0, _awdlTxDirectDropped = 0;
+    uint32_t _awdlTxIfnetLastResult = 0, _awdlTxIfnetPackets = 0;
     uint32_t _awdlTxActualDequeued = 0, _awdlTxDequeueCountMismatch = 0;
-    uint32_t _awdlTxClassTrue[10] = {}, _awdlTxClassFalse[10] = {};
     uint32_t _awdlTxDequeueWrapped = 0;
     uint32_t _awdlTxPathCalls[3] = {}, _awdlTxPathMdns[3] = {};
     uint32_t _awdlTxPathAirDrop[3] = {}, _awdlTxPathServiceId[3] = {};

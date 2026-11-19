@@ -157,13 +157,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 bool AirPortRTW::start(IOService *provider)
 {
     setProperty("PM_DEFERRED_RX_FIX", "1.0.2-beta.1");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.19");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.20");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "2.0.0-beta.19");
+    setProperty("DriverBuild", "2.0.0-beta.20");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -349,7 +349,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 2.0.0-beta.19 WPA3-Personal\n");
+    IOLog("AirPortRTW: 2.0.0-beta.20 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -1387,8 +1387,7 @@ UInt32 AirPortRTW::getFeatures() const
 UInt32 AirPortRTW::outputPacket(mbuf_t m, void *param)
 {
     traceAWDLTxPacket(m, 1);
-    // Compare opaque pointers only. param is never dereferenced or assumed
-    // to be a valid interface object, and routing remains unchanged.
+    // Legacy passes its VIF as the parameter on the direct output path.
     auto *vif = _awdlManager ? _awdlManager->awdlInterface() : nullptr;
     uint32_t *paramCounter = !param ? &_awdlTxParamNull :
         (param == static_cast<void *>(vif) ? &_awdlTxParamVifMatch :
@@ -1404,6 +1403,11 @@ UInt32 AirPortRTW::outputPacket(mbuf_t m, void *param)
         if (m) mbuf_freem(m);
         kickGatedOutput();
         return kIOReturnOutputDropped;
+    }
+
+    if (vif && param == static_cast<void *>(vif)) {
+        // The identity check excludes ordinary en0 Bonjour traffic.
+        return outputAWDLDataPacket(m);
     }
 
     if (preemption_enabled())
@@ -2730,7 +2734,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.19)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.20)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -4055,80 +4059,15 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
     }
 
 
-    /* Only publish peers after the AWDL parser has seen enough state to mark
-     * them usable (MIF + Version/device class). Earlier builds posted every
-     * PSF/MIF candidate, which could leave IO80211 with transient/stale peers
-     * that never had a working data plane. */
-    IO80211P2PInterface *p2p = OSDynamicCast(IO80211P2PInterface, awdl);
-    const uint8_t *sa = frame + 10;
-    if (p2p && validatedPeer && presenceDue) {
-        ether_addr peer = {};
-        memcpy(peer.octet, sa, sizeof(peer.octet));
-        IOReturn presenceRet = p2p->postPeerPresence(&peer, (int)rssi,
-                                    (int)channel,
-                                    (int)subtype, nullptr);
-        setProperty("AWDL_PEER_PRESENCE_LAST_MAC", peer.octet, 6);
+    // The installed Legacy family has no postPeerPresence/IPv6 methods.
+    // Raw action frames belong on the optional action tap, never on the
+    // Ethernet data input. The local parser above runs in either mode.
+    if (validatedPeer && presenceDue) {
+        setProperty("AWDL_PEER_PRESENCE_LAST_MAC", frame + 10, 6);
         setProperty("AWDL_PEER_PRESENCE_LAST_CHANNEL", (uint64_t)channel, 32);
-        setProperty("AWDL_PEER_PRESENCE_LAST_SUBTYPE", (uint64_t)subtype, 32);
-        char rawHex[11] = {};
-        snprintf(rawHex, sizeof(rawHex), "0x%08x", (unsigned)(uint32_t)presenceRet);
-        setProperty("AWDL_PEER_PRESENCE_RAW_HEX", rawHex);
-        ++_awdlPeerPresencePosts;
-        setProperty("AWDL_PEER_PRESENCE_POSTS", (uint64_t)_awdlPeerPresencePosts, 32);
-        setProperty("AWDL_PEER_PRESENCE_RESULT", (uint64_t)(uint32_t)presenceRet, 32);
-        /* A newly usable peer may unblock queued mDNS/IPv6 traffic on awdl0.
-         * The pinned Ventura IO80211 header does not expose the newer service-
-         * indication helper, so use the supported output wakeup and record it. */
-        ++_awdlServiceRefreshSignals;
-        setProperty("AWDL_SERVICE_REFRESH_SIGNALS", (uint64_t)_awdlServiceRefreshSignals, 32);
-        p2p->signalOutputThread();
-
-#if __IO80211_TARGET >= __MAC_10_15
-        /* The Ventura P2P interface exposes a peer IPv6 notification hook.
-         * Keep the EUI-64 address as diagnostic data, but do not interpret the
-         * method's return register as an IOReturn: the legacy private ABI has
-         * no trustworthy parameter/return contract in the public SDK. */
-        unsigned char ipv6[16] = { 0xfe, 0x80 };
-        ipv6[8]  = sa[0] ^ 0x02;
-        ipv6[9]  = sa[1];
-        ipv6[10] = sa[2];
-        ipv6[11] = 0xff;
-        ipv6[12] = 0xfe;
-        ipv6[13] = sa[3];
-        ipv6[14] = sa[4];
-        ipv6[15] = sa[5];
-        IOReturn ipv6Ret = p2p->postPeerPresenceIPv6(&peer, (int)rssi,
-                                        (int)channel,
-                                        (int)subtype, nullptr,
-                                        ipv6);
-        char ipv6RawHex[11] = {};
-        snprintf(ipv6RawHex, sizeof(ipv6RawHex), "0x%08x", (unsigned)(uint32_t)ipv6Ret);
-        setProperty("AWDL_PEER_IPV6_RAW_HEX", ipv6RawHex);
-        ++_awdlPeerIPv6Posts;
-        setProperty("AWDL_PEER_IPV6_RESULT", (uint64_t)(uint32_t)ipv6Ret, 32);
-        setProperty("AWDL_PEER_IPV6_POSTED", kOSBooleanTrue);
-        setProperty("AWDL_PEER_IPV6_POSTS", (uint64_t)_awdlPeerIPv6Posts, 32);
-        setProperty("AWDL_PEER_IPV6", ipv6, sizeof(ipv6));
-#endif
+        awdl->IO80211VirtualInterface::signalOutputThread();
     }
 
-    mbuf_t m = allocatePacket(len);
-    if (!m)
-        return;
-    if (mbuf_copyback(m, 0, len, frame, MBUF_DONTWAIT) != 0) {
-        mbuf_freem(m);
-        return;
-    }
-    mbuf_pkthdr_setlen(m, len);
-
-    alignas(8) uint8_t tagStorage[64];
-    UInt32 ret = awdl->inputPacket(m, rtw88ZeroPacketInfo(tagStorage));
-    setProperty("AWDL_LAST_ACTION_INPUT_RESULT", (uint64_t)ret, 32);
-    if (ret != kIOReturnSuccess && ret != kIOReturnOutputSuccess) {
-        /* IO80211VirtualInterface owns the mbuf on accepted paths. On a
-         * failure return it is safer not to double-free an ambiguously
-         * consumed packet; the trace above records the Ventura result. */
-    }
 }
 
 static bool rtw88AWDLMdnsPacket(mbuf_t m, bool *ipv6, bool *response, bool *airDrop)
@@ -4213,7 +4152,7 @@ void AirPortRTW::injectRxAWDLFrame(mbuf_t m)
         if (auto *p2p = OSDynamicCast(IO80211P2PInterface, awdl)) {
             ++_awdlServiceRefreshSignals;
             setProperty("AWDL_SERVICE_REFRESH_SIGNALS", (uint64_t)_awdlServiceRefreshSignals, 32);
-            p2p->signalOutputThread();
+            p2p->IO80211VirtualInterface::signalOutputThread();
         }
     }
     /* IO80211P2PInterface::inputPacket is a private ABI. Keep the raw value

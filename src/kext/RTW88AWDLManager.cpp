@@ -775,6 +775,14 @@ void RTW88AWDLManager::flushData()
     _queueHead = _queueCount = 0;
 }
 
+unsigned RTW88AWDLManager::availableTxSlots()
+{
+    return awdlGated<unsigned>(_workLoop, _owner, [&]() -> unsigned {
+        return _syncEnabled && _awdlInterface && !powerSuspended()
+            ? sizeof(_pending) / sizeof(_pending[0]) - _queueCount : 0;
+    });
+}
+
 bool RTW88AWDLManager::enqueueData(mbuf_t m)
 {
     return awdlGated<bool>(_workLoop, _owner, [&]() -> bool {

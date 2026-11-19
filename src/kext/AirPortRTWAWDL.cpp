@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.19 — Ventura IO80211 AWDL/P2P TX handoff.
+ * AirPortRTW 2.0.0-beta.20 — Ventura IO80211 AWDL/P2P TX handoff.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -9,10 +9,20 @@
 #include "AirPortRTW.hpp"
 #include "AirPortRTWInterface.hpp"
 #include "RTW88TxDrainGuard.hpp"
+#include "RTW88AWDLPeerTx.hpp"
+#include <IOKit/network/IOOutputQueue.h>
 #include <net/bpf.h>
 #include <sys/kpi_mbuf.h>
 
 #define super IO80211Controller
+
+// These exported entry points avoid the SDK's mismatched return type and
+// virtual slots. Both symbols are present in the target x86_64 Legacy binary.
+extern "C" unsigned rtw88PeerDequeue(IO80211VirtualInterface *, RTW88AWDL::PeerTxRequest<mbuf_t> *)
+    __asm__("__ZN23IO80211VirtualInterface16dequeueTxPacketsEP15TxPacketRequest");
+extern "C" IOReturn rtw88IfnetDequeue(IO80211VirtualInterface *, unsigned, IOMbufServiceClass,
+                                      mbuf_t *, mbuf_t *, unsigned *, unsigned long long *)
+    __asm__("__ZN23IO80211VirtualInterface36dequeueOutputPacketsWithServiceClassEj18IOMbufServiceClassPP6__mbufS3_PjPy");
 
 static const char *rtw88VifRoleName(UInt role)
 {
@@ -188,10 +198,14 @@ void AirPortRTW::publishAWDLTxDiagnostics()
         {"AWDL_TX_REJECTED_DMA", &_awdlTxRejectedDma},
         {"AWDL_TX_REJECTED_OBJECT", &_awdlTxRejectedObject},
         {"AWDL_TX_LAST_OPTIONS", &_awdlTxLastOptions},
-        {"AWDL_TX_DEQUEUE_BOOL_TRUE", &_awdlTxDequeueTrue},
-        {"AWDL_TX_DEQUEUE_BOOL_FALSE", &_awdlTxDequeueFalse},
-        {"AWDL_TX_DEQUEUE_TRUE_EMPTY", &_awdlTxDequeueTrueEmpty},
-        {"AWDL_TX_DEQUEUE_FALSE_WITH_HEAD", &_awdlTxDequeueFalseWithHead},
+        {"AWDL_TX_PEER_REQUESTS", &_awdlTxPeerRequests},
+        {"AWDL_TX_PEER_PACKETS", &_awdlTxPeerPackets},
+        {"AWDL_TX_PEER_LAST_MASK", &_awdlTxPeerMask},
+        {"AWDL_TX_PEER_CALLBACK_PACKETS", &_awdlTxPeerCallbackPackets},
+        {"AWDL_TX_IFNET_LAST_RESULT", &_awdlTxIfnetLastResult},
+        {"AWDL_TX_DIRECT_ACCEPTED", &_awdlTxDirectAccepted},
+        {"AWDL_TX_DIRECT_DROPPED", &_awdlTxDirectDropped},
+        {"AWDL_TX_IFNET_PACKETS", &_awdlTxIfnetPackets},
         {"AWDL_TX_ACTUAL_DEQUEUED", &_awdlTxActualDequeued},
         {"AWDL_TX_DEQUEUE_WRAPPED", &_awdlTxDequeueWrapped},
         {"AWDL_TX_DEQUEUE_COUNT_MISMATCH", &_awdlTxDequeueCountMismatch},
@@ -219,25 +233,7 @@ void AirPortRTW::publishAWDLTxDiagnostics()
     setProperty("AWDL_TX_LOCAL_MAC_PACKED", __atomic_load_n(&_awdlTxLocalMac, __ATOMIC_RELAXED), 64);
     setProperty("AWDL_TX_CONTROLLER_LAST_SOURCE_PACKED", __atomic_load_n(&_awdlTxControllerLastSource, __ATOMIC_RELAXED), 64);
 
-    static const char *trueNames[] = {
-        "AWDL_TX_CLASS_CTL_TRUE", "AWDL_TX_CLASS_VO_TRUE", "AWDL_TX_CLASS_VI_TRUE",
-        "AWDL_TX_CLASS_RV_TRUE", "AWDL_TX_CLASS_AV_TRUE", "AWDL_TX_CLASS_OAM_TRUE",
-        "AWDL_TX_CLASS_RD_TRUE", "AWDL_TX_CLASS_BE_TRUE", "AWDL_TX_CLASS_BK_TRUE",
-        "AWDL_TX_CLASS_BKSYS_TRUE"
-    };
-    static const char *falseNames[] = {
-        "AWDL_TX_CLASS_CTL_FALSE", "AWDL_TX_CLASS_VO_FALSE", "AWDL_TX_CLASS_VI_FALSE",
-        "AWDL_TX_CLASS_RV_FALSE", "AWDL_TX_CLASS_AV_FALSE", "AWDL_TX_CLASS_OAM_FALSE",
-        "AWDL_TX_CLASS_RD_FALSE", "AWDL_TX_CLASS_BE_FALSE", "AWDL_TX_CLASS_BK_FALSE",
-        "AWDL_TX_CLASS_BKSYS_FALSE"
-    };
-    static_assert(sizeof(trueNames) / sizeof(trueNames[0]) == 10, "TX class diagnostics");
-    static_assert(sizeof(falseNames) == sizeof(trueNames), "TX class diagnostics");
-    for (unsigned i = 0; i < 10; ++i) {
-        setProperty(trueNames[i], (uint64_t)__atomic_load_n(&_awdlTxClassTrue[i], __ATOMIC_RELAXED), 32);
-        setProperty(falseNames[i], (uint64_t)__atomic_load_n(&_awdlTxClassFalse[i], __ATOMIC_RELAXED), 32);
-    }
-    setProperty("AWDL_TX_DIAGNOSTIC_MODE", "passive-handoff");
+    setProperty("AWDL_TX_DIAGNOSTIC_MODE", "legacy-peer-queue");
 }
 
 static uint16_t rtw88PreferredAWDLSocialChannel(RTW88IEEE80211 *backend)
@@ -913,6 +909,20 @@ int AirPortRTW::bpfOutputPacket(OSObject *object, UInt dltType, mbuf_t m)
     return kIOReturnUnsupported;
 }
 
+UInt32 AirPortRTW::outputAWDLDataPacket(mbuf_t packet)
+{
+    if (__atomic_load_n(&_shutdown, __ATOMIC_ACQUIRE) || !_awdlManager) {
+        if (packet) mbuf_freem(packet);
+        return kIOReturnOutputDropped;
+    }
+    const auto mdns = rtw88InspectAWDLMdnsPacket(packet);
+    if (mdns.serviceIdValid)
+        _awdlManager->noteLocalAirDropServiceId(mdns.serviceId, sizeof(mdns.serviceId));
+    const bool accepted = _awdlManager->enqueueData(packet);
+    __atomic_fetch_add(accepted ? &_awdlTxDirectAccepted : &_awdlTxDirectDropped, 1U, __ATOMIC_RELAXED);
+    return accepted ? kIOReturnOutputSuccess : kIOReturnOutputDropped;
+}
+
 void AirPortRTW::requestPacketTx(void *object, UInt options)
 {
     drainAWDLTxPackets(object, options, false);
@@ -975,34 +985,7 @@ void AirPortRTW::drainAWDLTxPackets(void *object, UInt options, bool timerPoll)
     };
 
     UInt32 accepted = 0;
-    for (unsigned cidx = 0; cidx < sizeof(classes) / sizeof(classes[0]); cidx++) {
-        mbuf_t head = nullptr, tail = nullptr;
-        UInt count = 0;
-        unsigned long long bytes = 0;
-
-        ++_awdlTxDequeueCalls;
-        const bool dequeueResult = vif->dequeueOutputPacketsWithServiceClass(32, classes[cidx],
-                                                        &head, &tail,
-                                                        &count, &bytes);
-        /* The SDK declares a bool, not an IOReturn. Record true/false without
-         * assigning error semantics or changing the existing ownership path. */
-        __atomic_fetch_add(dequeueResult ? &_awdlTxDequeueTrue : &_awdlTxDequeueFalse,
-                           1U, __ATOMIC_RELAXED);
-        __atomic_fetch_add(dequeueResult ? &_awdlTxClassTrue[cidx] : &_awdlTxClassFalse[cidx],
-                           1U, __ATOMIC_RELAXED);
-        if (dequeueResult && !head)
-            __atomic_fetch_add(&_awdlTxDequeueTrueEmpty, 1U, __ATOMIC_RELAXED);
-        if (!dequeueResult && head)
-            __atomic_fetch_add(&_awdlTxDequeueFalseWithHead, 1U, __ATOMIC_RELAXED);
-        if (!head) {
-            ++_awdlTxEmptyDequeues;
-        } else {
-            _awdlTxDequeuePackets += count;
-            _awdlTxDequeueBytes += bytes;
-            _awdlTxClassPackets[cidx] += count;
-            setProperty(classProps[cidx], (uint64_t)_awdlTxClassPackets[cidx], 32);
-        }
-
+    auto consumeChain = [&](mbuf_t head) -> UInt {
         UInt actual = 0;
         mbuf_t m = head;
         while (m) {
@@ -1045,10 +1028,49 @@ void AirPortRTW::drainAWDLTxPackets(void *object, UInt options, bool timerPoll)
             }
             m = next;
         }
-        if (actual != count)
-            __atomic_fetch_add(&_awdlTxDequeueCountMismatch, 1U, __ATOMIC_RELAXED);
+        return actual;
+    };
+
+    unsigned space = _awdlManager->availableTxSlots();
+    RTW88AWDL::PeerTxRequest<mbuf_t> request{};
+    const unsigned mask = timerPoll ? 0x1fU : options;
+    request.prepare(mask, space);
+    UInt fromPeer = 0;
+    if (request.total) {
+        ++_awdlTxPeerRequests;
+        _awdlTxPeerMask = mask & 0x1f;
+        const unsigned reported = rtw88PeerDequeue(vif, &request);
+        // Returned chains own the packets even when a count disagrees.
+        for (auto head : request.heads) fromPeer += consumeChain(head);
+        _awdlTxPeerPackets += fromPeer;
+        if (!timerPoll) _awdlTxPeerCallbackPackets += fromPeer;
+        if (fromPeer != reported) ++_awdlTxDequeueCountMismatch;
     }
 
+    // On a native callback the ifnet queues belong to IO80211's outputStart.
+    // Retain the old timer fallback for packets still waiting upstream.
+    if (timerPoll && !fromPeer) {
+        for (unsigned cidx = 0; cidx < sizeof(classes) / sizeof(classes[0]) && space; ++cidx) {
+            mbuf_t head = nullptr, tail = nullptr;
+            UInt count = 0;
+            unsigned long long bytes = 0;
+            ++_awdlTxDequeueCalls;
+            const IOReturn result = rtw88IfnetDequeue(vif, space < 32 ? space : 32, classes[cidx],
+                                                       &head, &tail, &count, &bytes);
+            _awdlTxIfnetLastResult = static_cast<uint32_t>(result);
+            if (!head) ++_awdlTxEmptyDequeues;
+            const UInt actual = consumeChain(head);
+            space = actual < space ? space - actual : 0;
+            _awdlTxIfnetPackets += actual;
+            _awdlTxDequeuePackets += actual;
+            _awdlTxDequeueBytes += bytes;
+            if (actual != count) ++_awdlTxDequeueCountMismatch;
+            if (actual) {
+                _awdlTxClassPackets[cidx] += actual;
+                setProperty(classProps[cidx], (uint64_t)_awdlTxClassPackets[cidx], 32);
+            }
+        }
+    }
     setProperty("AWDL_TX_DEQUEUE_CALLS", (uint64_t)_awdlTxDequeueCalls, 32);
     setProperty("AWDL_TX_DEQUEUE_PACKETS", (uint64_t)_awdlTxDequeuePackets, 32);
     setProperty("AWDL_TX_DEQUEUE_BYTES", _awdlTxDequeueBytes, 64);
@@ -1056,7 +1078,6 @@ void AirPortRTW::drainAWDLTxPackets(void *object, UInt options, bool timerPoll)
     setProperty("AWDL_TX_CONTROLLER_ENQUEUE_SUCCESS", (uint64_t)_awdlTxEnqueueSuccess, 32);
     setProperty("AWDL_TX_CONTROLLER_ENQUEUE_FAILURE", (uint64_t)_awdlTxEnqueueFailure, 32);
     setProperty("AWDL_LAST_DEQUEUE_COUNT", (uint64_t)accepted, 32);
-    (void)options;
 }
 
 
@@ -1078,23 +1099,9 @@ void AirPortRTW::awdlTimerFired(OSObject *owner, IOTimerEventSource *)
         if (vif) self->drainAWDLTxPackets(vif, 0, true);
     }
 
-    /* Retire peers from IO80211 when their AWDL advertisements have actually
-     * gone stale. Earlier builds only posted presence, so a transient peer
-     * could remain visible to Finder/sharingd after the radio relationship
-     * had already disappeared. */
+    // Legacy has no postPeerAbsence entry point. Expire our own peer table.
     uint8_t expired[8 * 6] = {};
-    const uint32_t expiredCount = self->_awdlManager->expirePublishedPeers(expired, 8);
-    auto *p2p = OSDynamicCast(IO80211P2PInterface, self->_awdlManager->awdlInterface());
-    if (p2p) {
-        for (uint32_t i = 0; i < expiredCount; ++i) {
-            ether_addr peer = {};
-            memcpy(peer.octet, expired + i * 6, sizeof(peer.octet));
-            (void)p2p->postPeerAbsence(&peer);
-            ++self->_awdlPeerAbsencePosts;
-        }
-        if (expiredCount)
-            self->setProperty("AWDL_PEER_ABSENCE_POSTS", (uint64_t)self->_awdlPeerAbsencePosts, 32);
-    }
+    self->_awdlManager->expirePublishedPeers(expired, 8);
     /* If tick() returned the PHY to the AP channel, release any en0 packet
      * that was deliberately stalled while AWDL owned the radio. */
     if (self->_ieee80211 && !self->_ieee80211->staTxBlockedByAWDL())
