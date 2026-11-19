@@ -1,17 +1,18 @@
-# AirPort-RTW 1.2.1
+# AirPort-RTW 1.3.0
 
 A Wi-Fi driver for supported Realtek PCIe cards on x86_64 Hackintosh systems.
 It works with the normal macOS Wi-Fi menu.
 
-**Latest release: 1.2.1 — Fixes a Wi-Fi hang that could interrupt large downloads.**
+**Latest release 1.3.0 adds Private Wi-Fi Address support and improves Wi-Fi reporting.**
 
-[Download 1.2.1](https://github.com/JoMei9019-real/AirPort-RTW/releases/tag/v1.2.1)
+[Download 1.3.0](https://github.com/JoMei9019-real/AirPort-RTW/releases/tag/v1.3.0)
 · [Installation guide](docs/INSTALLATION.md)
-· [Release notes](RELEASE_1_2_1.md)
+· [Release notes](RELEASE_1_3_0.md)
 
 ## What it does
 
 - Connect to Wi-Fi through macOS, without a separate connection app.
+- Use Private Wi-Fi Address in macOS Wi-Fi settings on supported setups.
 - Use **WPA3-Personal with PMF**, including on compatible WPA2/WPA3 transition
   networks. Hardware pairwise encryption improves WPA3 speed and CPU use.
 - Switch between compatible WPA3 access points while keeping WPA3 security.
@@ -40,7 +41,7 @@ guarantee compatibility with every laptop or EFI configuration.
 ## Install or update
 
 1. Back up your working EFI folder and keep a way to restore it.
-2. Download **AirPortRTW-1.2.1.zip** from the release page and extract it.
+2. Download **AirPortRTW-1.3.0.zip** from the release page and extract it.
    The ZIP contains the kext and `BOOT-ARGS.txt`; guides are available online.
    The “Source code” downloads do not contain a ready-to-use driver.
 3. Follow the [installation guide](docs/INSTALLATION.md) for your macOS version.
@@ -59,7 +60,7 @@ To check which build is loaded, run this in Terminal:
 ioreg -r -c AirPortRTW -l | grep DriverBuild
 ```
 
-For this release, the result should show `1.2.1`.
+For this release, the result should show `1.3.0`.
 
 ## Turn off automatic roaming
 

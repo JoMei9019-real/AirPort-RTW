@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the Bluetooth maintenance and artifact-only build contracts."""
+"""Keep the Bluetooth maintenance and release build contracts."""
 
 from pathlib import Path
 
@@ -19,7 +19,9 @@ assert "rtw88_coex_maintenance_worker" in compat
 assert "rtw88_coex_maintenance_start();" in iface
 stop = iface[iface.index("void RTW88IEEE80211::stop()"):]
 assert stop.index("rtw88_coex_maintenance_stop();") < stop.index("rtw_pci_remove(_pcidev)")
-assert "1.3.0-beta.8" in workflow
+assert "name: AirPortRTW-1.3.0" in workflow
 assert "actions/upload-artifact@v4" in workflow
-assert "publish:" not in workflow
-print("PASS: isolated BT coexistence maintenance, drain before PCI teardown, artifact-only workflow")
+assert "    needs: build" in workflow
+assert "github.ref == 'refs/heads/main'" in workflow
+assert "head_commit.message == 'Release AirPort-RTW 1.3.0'" in workflow
+print("PASS: isolated BT coexistence maintenance, drain before PCI teardown, release job gated on the build and the official main-branch commit")
