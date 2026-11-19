@@ -97,7 +97,7 @@ and Beacon Measurement replies still need testing with more hardware.
 - WPA2-Enterprise is experimental and has not been verified on hardware.
   Enterprise roaming and 802.11r are not implemented.
 
-See the [release notes](../RELEASE_1_2_0.md) for the full release scope and
+See the [1.2.0 release notes](https://github.com/JoMei9019-real/AirPort-RTW/releases/tag/v1.2.0) for the full release scope and
 the [installation guide](INSTALLATION.md) for setup.
 
 All supported driver boot arguments are listed in [BOOT-ARGS.txt](BOOT-ARGS.txt).
