@@ -4063,7 +4063,9 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
     // Raw action frames belong on the optional action tap, never on the
     // Ethernet data input. The local parser above runs in either mode.
     if (validatedPeer && presenceDue) {
-        setProperty("AWDL_PEER_PRESENCE_LAST_MAC", frame + 10, 6);
+        ether_addr peer{};
+        memcpy(peer.octet, frame + 10, sizeof(peer.octet));
+        setProperty("AWDL_PEER_PRESENCE_LAST_MAC", peer.octet, sizeof(peer.octet));
         setProperty("AWDL_PEER_PRESENCE_LAST_CHANNEL", (uint64_t)channel, 32);
         awdl->IO80211VirtualInterface::signalOutputThread();
     }
