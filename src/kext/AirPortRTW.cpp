@@ -27,7 +27,7 @@ static_assert(sizeof(apple80211_channel) == 12);
 static_assert(offsetof(apple80211_channel, channel) == 4);
 static_assert(offsetof(apple80211_channel, flags) == 8);
 
-extern "C" __attribute__((noinline, visibility("default")))
+extern "C" __attribute__((__noinline__, __visibility__("default")))
 void rtw88_airbridge_action_v1(const AirPortRTWAirBridge::ActionRequest *request,
                              AirPortRTWAirBridge::ActionResult *result)
 {
