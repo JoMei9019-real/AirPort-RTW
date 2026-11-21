@@ -1052,6 +1052,11 @@ IOReturn RTW88IEEE80211::setAWDLReceiveMode(bool active)
     return kIOReturnSuccess;
 }
 
+bool RTW88IEEE80211::copyAWDLReceiveFilter(uint32_t &rcr, bool &permissive) const
+{
+    return _powered && rtw88_read_awdl_rx_filter(_hw, &rcr, &permissive);
+}
+
 void RTW88IEEE80211::setAWDLAddress(const uint8_t *mac)
 {
     if (mac) memcpy(_awdlAddress, mac, sizeof(_awdlAddress));

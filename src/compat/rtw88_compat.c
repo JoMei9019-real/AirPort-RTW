@@ -1408,6 +1408,19 @@ bool rtw88_hw_scan_supported(struct ieee80211_hw *hw)
     return rtw_fw_feature_check(&rtwdev->fw, FW_FEATURE_SCAN_OFFLOAD);
 }
 
+/* Sample the live register under the caller's diagnostics/power guard. */
+bool rtw88_read_awdl_rx_filter(struct ieee80211_hw *hw, uint32_t *rcr, bool *permissive)
+{
+    if (!hw || !hw->priv) return false;
+    const u32 value = rtw_read32((struct rtw_dev *)hw->priv, REG_RCR);
+    if (value == (u32)~0U) return false;
+    const u32 accept = BIT_AAP | BIT_AM;
+    const u32 mask = accept | BIT_CBSSID_BCN | BIT_CBSSID_DATA;
+    *rcr = value;
+    *permissive = (value & mask) == accept;
+    return true;
+}
+
 void rtw88_sw_scan_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 {
     if (!hw || !hw->priv || !vif) return;

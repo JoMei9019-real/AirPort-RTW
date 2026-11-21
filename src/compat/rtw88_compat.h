@@ -210,6 +210,7 @@ struct ieee80211_vif;
  * Used by the kext to wait for post-scan MMIO cleanup before connecting. */
 bool rtw88_is_scanning(void);
 bool rtw88_hw_scan_supported(struct ieee80211_hw *hw);
+bool rtw88_read_awdl_rx_filter(struct ieee80211_hw *hw, uint32_t *rcr, bool *permissive);
 void rtw88_sw_scan_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif);
 void rtw88_sw_scan_switch_channel(struct ieee80211_hw *hw);
 void rtw88_awdl_switch_channel(struct ieee80211_hw *hw);

@@ -30,6 +30,7 @@
 #include "RTW88AssocWire.hpp"
 #include "RTW88UserClient.hpp"  /* for struct RTW88StateResult */
 #include "RTW88AWDLManager.hpp"
+#include "AirPortRTWAirBridge.hpp"
 
 
 /* The Ventura kernel SDK exposes APPLE80211_IOC_ROAM_PROFILE (216) but
@@ -346,6 +347,7 @@ private:
     uint64_t                _getDiagLast[5] = {~0ULL, ~0ULL, ~0ULL, ~0ULL, ~0ULL};
     void logGetResult(int request_number, SInt32 ret, const void *data);
     bool _awdlAppleActionRx = false;
+    AirPortRTWAirBridge::ActionCounters _airBridgeActions;
     uint32_t _awdlAppleActionInputs = 0;
     uint32_t _awdlAppleActionDrops = 0;
     uint32_t                _awdlServiceRefreshSignals = 0;

@@ -65,11 +65,14 @@ jobs:
           assert not any(name in unresolved for name in ['_rtw_sae_', '_airport_sae_', '_mbedtls_', 'RTW88WPA3'])
           defined = subprocess.check_output(['nm', binary], text=True)
           assert '_rtw_sae_begin' in defined and '_rtw8814a_hw_spec' in defined
+          assert re.search(r'(?m)^[0-9a-fA-F]+ T _rtw88_airbridge_action_v1$', defined)
           strings = subprocess.check_output(['strings', binary], text=True)
-          assert '2.0.0-beta.22' in strings
+          assert '2.0.0-beta.23' in strings
           assert '__ZN23IO80211VirtualInterface16dequeueTxPacketsEP15TxPacketRequest' in unresolved
           assert 'AWDL_TX_PEER_PACKETS' in strings
           assert 'AWDL_TX_DATA_COMPLETED' in strings
+          for name in ['AirPortRTWAirBridgeABI', 'AWDL_BRIDGE_PEER_MATCHES', 'AWDL_RX_HW_FILTER_VALID']:
+              assert name in strings, name
           for name in ['-rtwnoautoroam', '-rtwsaeswccmp', '-rtwswscan', '-rtwnoawdlhop', 'btm-response-acked', 'ROAM_K_BEACON_ADVERTISED', 'TX_BATCH_DEFERRED_FRAMES', 'AWDL_POWER_SUSPENDED', 'AWDL_RX_APPLE_ACTION_INPUTS', 'AWDL_TX_DEQUEUE_WRAPPED', 'RX_DEFER_MODE', 'STA_LINK_EVENT_TLV_BYTES', 'rtw8814a_fw.bin']:
               assert name in strings, name
           assembly = subprocess.check_output(['xcrun', 'otool', '-tvV', 'build/airport/RTW88WPA3Crypto.o'], text=True)
@@ -78,12 +81,13 @@ jobs:
           assert not any(name in symbols for name in ['__cxx_global_var_init', '_GLOBAL__sub_I', '__cxa_guard'])
           print('PASS: release version, native symbols, driver options and scalar kernel CCMP')
           CHECK
-      - name: Package Beta 22 test artifact and verify contents
+          xcrun dwarfdump --uuid build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW >> "$GITHUB_STEP_SUMMARY"
+      - name: Package Beta 23 test artifact and verify contents
         run: python3 scripts/package-release.py
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-2.0.0-beta.22
+          name: AirPortRTW-2.0.0-beta.23
           path: |
-            build/AirPortRTW-2.0.0-beta.22.zip
-            build/AirPortRTW-2.0.0-beta.22.zip.sha256
+            build/AirPortRTW-2.0.0-beta.23.zip
+            build/AirPortRTW-2.0.0-beta.23.zip.sha256
           if-no-files-found: error

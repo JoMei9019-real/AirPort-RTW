@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 include = Path(__file__).resolve().parents[1] / 'src/kext'
 fixture = r'''
 #include <cassert>
+#include "AirPortRTWAirBridge.hpp"
 #include "RTW88AWDLProtocol.hpp"
 #include "../compat/rtw88_data_header.h"
 
@@ -106,6 +107,20 @@ int main() {
     assert(memcmp(filtered + 16, body + 21, 4) == 0);
     assert(copyAppleActionBody(filtered, body, 24) == 0);
     assert(copyAppleActionBody(filtered, body, 15) == 0);
+
+    using namespace AirPortRTWAirBridge;
+    ActionCounters bridge{};
+    bridge.record(0);
+    bridge.record(kNativePeerMatched);  // No Apple processing or lookup.
+    assert(bridge.observed == 0 && bridge.peersMatched == 0);
+    bridge.record(kNativeObserved);
+    bridge.record(kNativeObserved | kNativeProcessed | kNativePeerMatched);
+    assert(bridge.observed == 2 && bridge.processed == 1);
+    assert(bridge.peerLookups == 0 && bridge.peersMatched == 0);
+    bridge.record(kNativeObserved | kNativeProcessed | kNativePeerLookup);
+    bridge.record(kNativeObserved | kNativeProcessed | kNativePeerLookup | kNativePeerMatched);
+    assert(bridge.observed == 4 && bridge.processed == 3);
+    assert(bridge.peerLookups == 2 && bridge.peersMatched == 1);
 }
 '''
 with TemporaryDirectory() as directory:

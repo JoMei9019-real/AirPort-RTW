@@ -42,7 +42,9 @@ Use the spelling shown below; these switches do not need '=1'.
   Use after a baseline capture with this option off. The variant supplies
   RX channel, 20 MHz and DFS flags, and RSSI. Host-name and
   service-response TLVs stay in the local parser to avoid the legacy Apple
-  decompressor. Test AirDrop visibility and file transfer on your hardware.
+  decompressor. This also enables the action handoff used by the optional
+  AirPortRTW AirBridge integration. Test AirDrop visibility and file transfer
+  on your hardware.
   Default: use the existing action-frame handoff.
 
 Example: to turn off automatic roaming, add only -rtwnoautoroam to your

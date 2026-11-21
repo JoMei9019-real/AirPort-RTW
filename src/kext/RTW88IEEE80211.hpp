@@ -194,6 +194,7 @@ public:
     void      stop();        /* full teardown */
     IOReturn setReceiveMulticast(bool active);
     IOReturn setAWDLReceiveMode(bool active);
+    bool copyAWDLReceiveFilter(uint32_t &rcr, bool &permissive) const;
     IOReturn setAWDLChannel(uint16_t channel);
     bool canTransmitAWDL() const;
     bool staAssociatedForAWDL() const { return _associatedVisible && _state == RTW88_STATE_CONNECTED; }

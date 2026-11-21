@@ -20,7 +20,7 @@ assert 'd->index = telemetry.mcs' in controller
 assert 'd->nss = telemetry.nss' in controller
 assert 'd->rate[0]=rate' in controller
 assert 'hasVHT && b.channel > 14' in controller
-assert '2.0.0-beta.22' in controller
+assert '2.0.0-beta.23' in controller
 assert 'd->index = 0; /* live TX-MCS export is not wired yet */' not in controller
 
 start = controller.index('static uint32_t rtw88CurrentTxRateMbps(')

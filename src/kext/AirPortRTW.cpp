@@ -23,6 +23,18 @@ extern "C" UInt32 rtw88VifBpfTapInput(IO80211VirtualInterface *, mbuf_t,
                                      UInt, void *, size_t)
     __asm__("__ZN23IO80211VirtualInterface11bpfTapInputEP6__mbufjPvm");
 
+static_assert(sizeof(apple80211_channel) == 12);
+static_assert(offsetof(apple80211_channel, channel) == 4);
+static_assert(offsetof(apple80211_channel, flags) == 8);
+
+extern "C" __attribute__((noinline, visibility("default")))
+void rtw88_airbridge_action_v1(const AirPortRTWAirBridge::ActionRequest *request,
+                             AirPortRTWAirBridge::ActionResult *result)
+{
+    result->flags = 0;
+    result->appleResult = rtw88VifBpfTapInput(request->vif, request->packet, 12,
+                                             request->metadata, sizeof(*request->metadata));
+}
 
 extern "C" void rtw88_trigger_interrupt(void);  /* esta si es la unica con extern "C" real, ver RTW88PCIDevice.cpp */  /* struct RTW88StateResult vive aca */
 #include <IOKit/network/IOOutputQueue.h>  /* kIOReturnOutputDropped */
@@ -157,13 +169,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 bool AirPortRTW::start(IOService *provider)
 {
     setProperty("PM_DEFERRED_RX_FIX", "1.0.2-beta.1");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.22");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.23");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "2.0.0-beta.22");
+    setProperty("DriverBuild", "2.0.0-beta.23");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -275,6 +287,7 @@ bool AirPortRTW::start(IOService *provider)
     int awdlAppleRx = 0;
     _awdlAppleActionRx = PE_parse_boot_argn("-rtwawdlapplerx", &awdlAppleRx, sizeof(awdlAppleRx));
     setProperty("AWDL_RX_APPLE_ACTION_ENABLED", _awdlAppleActionRx ? kOSBooleanTrue : kOSBooleanFalse);
+    setProperty(AirPortRTWAirBridge::kABIProperty, (uint64_t)AirPortRTWAirBridge::kABIVersion, 32);
     setProperty("AWDL_HOPS_DISABLED_BY_BOOT_ARG",hopsDisabled?kOSBooleanTrue:kOSBooleanFalse);
     setProperty("ROAM_SWITCH_ENABLED",switchEnabled?kOSBooleanTrue:kOSBooleanFalse);
 
@@ -349,7 +362,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 2.0.0-beta.22 WPA3-Personal\n");
+    IOLog("AirPortRTW: 2.0.0-beta.23 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -371,6 +384,7 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
      * register access before re-checking the transition flag; the PM path
      * sets the flag and then waits for this access to finish. */
     __atomic_store_n(&self->_diagnosticsInHardware, true, __ATOMIC_SEQ_CST);
+    bool awdlFilterSampleValid = false;
     if (!__atomic_load_n(&self->_pmTransition, __ATOMIC_SEQ_CST) &&
         !__atomic_load_n(&self->_dmaStopped, __ATOMIC_SEQ_CST) && self->_ieee80211 &&
         self->_ieee80211->isPowered()) {
@@ -449,6 +463,13 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         self->setProperty("AWDL_RX_80211_DATA_SEEN", (uint64_t)self->_ieee80211->awdlRx80211DataSeen(), 32);
         self->setProperty("AWDL_RX_NO_DS_SEEN", (uint64_t)self->_ieee80211->awdlRxNoDsSeen(), 32);
         self->setProperty("AWDL_RX_BSSID_MATCH", (uint64_t)self->_ieee80211->awdlRxBssidMatch(), 32);
+        uint32_t rcr = 0;
+        bool permissive = false;
+        awdlFilterSampleValid = self->_ieee80211->copyAWDLReceiveFilter(rcr, permissive);
+        if (awdlFilterSampleValid) {
+            self->setProperty("AWDL_RX_HW_RCR_LAST", (uint64_t)rcr, 32);
+            self->setProperty("AWDL_RX_HW_FILTER_PERMISSIVE", permissive ? kOSBooleanTrue : kOSBooleanFalse);
+        }
         self->setProperty("AWDL_RX_QOS_HT_CONTROL_FRAMES", (uint64_t)self->_ieee80211->awdlRxQoSHtControlFrames(), 32);
         self->setProperty("RX_QOS_HT_CONTROL_FRAMES", self->_ieee80211->rxQoSHtControlFrames(), 64);
         self->setProperty("AWDL_RX_REJECT_DS", (uint64_t)self->_ieee80211->awdlRxRejectedDs(), 32);
@@ -467,6 +488,11 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         self->setProperty("AWDL_TX_DATA_COMPLETED", (uint64_t)self->_ieee80211->awdlTxDataCompleted(), 32);
         self->setProperty("AWDL_RX_APPLE_ACTION_INPUTS", (uint64_t)self->_awdlAppleActionInputs, 32);
         self->setProperty("AWDL_RX_APPLE_ACTION_DROPS", (uint64_t)self->_awdlAppleActionDrops, 32);
+        const auto &bridge = self->_airBridgeActions;
+        self->setProperty("AWDL_BRIDGE_ACTIONS_OBSERVED", (uint64_t)bridge.observed, 32);
+        self->setProperty("AWDL_BRIDGE_ACTIONS_PROCESSED", (uint64_t)bridge.processed, 32);
+        self->setProperty("AWDL_BRIDGE_PEER_LOOKUPS", (uint64_t)bridge.peerLookups, 32);
+        self->setProperty("AWDL_BRIDGE_PEER_MATCHES", (uint64_t)bridge.peersMatched, 32);
         self->publishAWDLTxDiagnostics();
 
         self->_diagLastState = state;
@@ -481,6 +507,7 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         rtw88_debug_dump_tx_state_to(toRing);
     }
     __atomic_store_n(&self->_diagnosticsInHardware, false, __ATOMIC_SEQ_CST);
+    self->setProperty("AWDL_RX_HW_FILTER_VALID", awdlFilterSampleValid ? kOSBooleanTrue : kOSBooleanFalse);
     uint64_t bytes = 0;
     uint32_t n = rtw88_copy_log(self->_diagnosticsBuffer, 32768, &bytes);
     self->setProperty("DiagnosticLog", self->_diagnosticsBuffer);
@@ -2737,7 +2764,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.22)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.23)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -4031,32 +4058,32 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
         }
         mbuf_pkthdr_setlen(packet, bodyLen);
 
-        struct AppleActionMetadata {
-            uint8_t source[6];
-            uint8_t reserved1[6];
-            apple80211_channel channel;
-            uint8_t reserved2[20];
-            int32_t rssi;
-            uint8_t reserved3[24];
-        } metadata = {};
-        static_assert(sizeof(AppleActionMetadata) == 72);
-        static_assert(__builtin_offsetof(AppleActionMetadata, rssi) == 0x2c);
+        using namespace AirPortRTWAirBridge;
+        ActionMetadata metadata = {};
         memcpy(metadata.source, frame + 10, sizeof(metadata.source));
-        metadata.channel.version = APPLE80211_VERSION;
-        metadata.channel.channel = channel;
-        metadata.channel.flags = channel <= 14 ? APPLE80211_C_FLAG_2GHZ : APPLE80211_C_FLAG_5GHZ;
-        metadata.channel.flags |= APPLE80211_C_FLAG_20MHZ;
+        metadata.channelVersion = APPLE80211_VERSION;
+        metadata.channel = channel;
+        metadata.channelFlags = channel <= 14 ? APPLE80211_C_FLAG_2GHZ : APPLE80211_C_FLAG_5GHZ;
+        metadata.channelFlags |= APPLE80211_C_FLAG_20MHZ;
         if (channel >= 52 && channel <= 144)
-            metadata.channel.flags |= APPLE80211_C_FLAG_DFS;
+            metadata.channelFlags |= APPLE80211_C_FLAG_DFS;
         metadata.rssi = rssi;
 
-        const UInt32 result = rtw88VifBpfTapInput(awdl, packet, 12, &metadata, sizeof(metadata));
+        uint64_t handoffNs = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time(), &handoffNs);
+        const ActionRequest request = {
+            kABIVersion, sizeof(ActionRequest), awdl, packet, &metadata,
+            handoffNs / 1000, validatedPeer ? uint32_t(kLocalPeerValid) : 0U, 0,
+        };
+        ActionResult result = {};
+        rtw88_airbridge_action_v1(&request, &result);
         freePacket(packet);
+        _airBridgeActions.record(result.flags);
         if (++_awdlAppleActionInputs == 1 || _awdlAppleActionInputs % 128 == 0) {
-            setProperty("AWDL_RX_APPLE_ACTION_LAST_RESULT", (uint64_t)result, 32);
+            setProperty("AWDL_RX_APPLE_ACTION_LAST_RESULT", (uint64_t)result.appleResult, 32);
             IOLog("AirPortRTW: AWDL Apple action input #%u channel=%u flags=0x%x rssi=%d result=0x%x\n",
-                  _awdlAppleActionInputs, (unsigned)channel, (unsigned)metadata.channel.flags,
-                  (int)rssi, (unsigned)result);
+                  _awdlAppleActionInputs, (unsigned)channel, (unsigned)metadata.channelFlags,
+                  (int)rssi, (unsigned)result.appleResult);
         }
         return;
     }
