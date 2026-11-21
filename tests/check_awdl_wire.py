@@ -40,6 +40,30 @@ int main() {
     assert(unwrapLengthPrefixedMSDU(msdu, msduLength));
     assert(msdu == wrapped + 8 && msduLength == 20); // excludes two padding bytes
     assert(dataPayload(msdu, msduLength, type) && type == 0x86dd);
+
+    Clock peerClock{};
+    peerClock.epochUS = 1024;
+    peerClock.periodTU = 16;
+    peerClock.presence = 4;
+    Sequence peerChannels{};
+    peerChannels.count = 2;
+    peerChannels.stride = 4;
+    peerChannels.channel[1] = 44;
+
+    auto beforeChannelCheck = window(peerClock, peerChannels, 8 * 1024);
+    auto afterChannelCheck = window(peerClock, peerChannels, 9 * 1024);
+    assert(!insideGuard(beforeChannelCheck));
+    assert(!useHomeChannelForEmptySlot(beforeChannelCheck, 36, 44));
+    assert(useHomeChannelForEmptySlot(beforeChannelCheck, 44, 44));
+    assert(useHomeChannelForEmptySlot(afterChannelCheck, 44, 44));
+    assert(beforeChannelCheck.channel == afterChannelCheck.channel);
+    assert(insideGuard(afterChannelCheck) && multicastWindow(afterChannelCheck));
+
+    auto explicitChannel = window(peerClock, peerChannels, 80 * 1024);
+    assert(explicitChannel.channel == 44);
+    assert(!useHomeChannelForEmptySlot(explicitChannel, 36, 36));
+    auto invalidWindow = window(peerClock, peerChannels, 0);
+    assert(!useHomeChannelForEmptySlot(invalidWindow, 44, 44));
     assert(!unwrapLengthPrefixedMSDU(msdu, msduLength)); // direct SNAP
 
     // An ordered QoS data frame carries four HT Control bytes after QoS

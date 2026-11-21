@@ -1394,10 +1394,7 @@ bool RTW88AWDLManager::tick()
         _peerScheduleNextAW = schedulePeer->nextAwChannel;
         _peerSequenceHomeMatches = homeMatches;
 
-        if (!window.channel && sta && homeChannel &&
-            isConcreteChannel(schedulePeer->nextAwChannel) &&
-            schedulePeer->nextAwChannel == homeChannel) {
-            window.channel = schedulePeer->nextAwChannel;
+        if (RTW88AWDL::useHomeChannelForEmptySlot(window, homeChannel, schedulePeer->nextAwChannel)) {
             ++_peerNextAWFallbackWindows;
         }
     }
@@ -1454,8 +1451,8 @@ bool RTW88AWDLManager::tick()
         }
     } else {
         /* A zero channel is an intentional unavailable slot in an AWDL
-         * sequence, not a radio failure. Keep the last operation successful
-         * while the ready calculation below naturally refuses to transmit. */
+         * sequence. Return the PHY to the AP if the previous slot was away. */
+        if (sta) _backend->restoreSTAChannelAfterAWDL();
         ++_noChannelWindows;
         _lastChannelResult = kIOReturnSuccess;
     }
@@ -1465,10 +1462,13 @@ bool RTW88AWDLManager::tick()
     // the timestamp/channel decision made before the retune completed.
     now = nowUS();
     auto after = RTW88AWDL::window(operatingClock, operatingSequence, now);
+    if (schedulePeer)
+        RTW88AWDL::useHomeChannelForEmptySlot(after, homeChannel, schedulePeer->nextAwChannel);
     const bool afterCommon = !offChannelWanted ||
         (commonUS > guardUS * 2 && after.elapsedUS >= guardUS &&
          after.elapsedUS + guardUS < commonUS);
-    bool ready = _lastChannelResult == kIOReturnSuccess && after.slot == window.slot &&
+    bool ready = _lastChannelResult == kIOReturnSuccess &&
+        after.slot == window.slot && after.channel == window.channel &&
         RTW88AWDL::insideGuard(after) && afterCommon && _backend->canTransmitAWDL();
     if (!ready && offChannelWanted && _backend->staTxBlockedByAWDL())
         _backend->restoreSTAChannelAfterAWDL();

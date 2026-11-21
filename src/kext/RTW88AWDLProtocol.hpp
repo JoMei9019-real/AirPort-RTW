@@ -472,6 +472,12 @@ inline Window window(const Clock &clock, const Sequence &seq, uint64_t now) {
     w.remainingTU=uint16_t((w.remainingUS+1023)/1024);
     return w;
 }
+inline bool useHomeChannelForEmptySlot(Window &window, uint16_t home, uint8_t nextAW) {
+    if (window.channel || !window.remainingUS || !nextAW || nextAW == 255 || nextAW != home)
+        return false;
+    window.channel = nextAW;
+    return true;
+}
 inline bool insideGuard(const Window &w) {
     return w.channel && w.elapsedUS>=3*1024 && w.remainingUS>3*1024;
 }

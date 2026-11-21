@@ -1,4 +1,4 @@
-AirPort-RTW 2.0.0 Beta 21 - supported boot arguments
+AirPort-RTW 2.0.0 Beta 22 - supported boot arguments
 ==========================================
 
 No AirPort-RTW boot argument is required for normal use.

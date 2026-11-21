@@ -318,6 +318,9 @@ public:
     uint32_t awdlRxRejectedDestination() const { return _awdlRxRejectedDestination; }
     uint32_t awdlRxEthernetDelivered() const { return _awdlRxEthernetDelivered; }
     uint32_t awdlRxMulticastDelivered() const { return _awdlRxMulticastDelivered; }
+    uint32_t awdlTxDataCompleted() const {
+        return __atomic_load_n(&_awdlTxDataCompleted, __ATOMIC_RELAXED);
+    }
 
     const char *scanEngine() const { return _scanEngine; }
     uint32_t scanChannelCount() const { return _lastScanChannelCount; }
@@ -714,4 +717,5 @@ private:
     uint32_t _awdlRxRejectedDestination = 0;
     uint32_t _awdlRxEthernetDelivered = 0;
     uint32_t _awdlRxMulticastDelivered = 0;
+    uint32_t _awdlTxDataCompleted = 0;
 };

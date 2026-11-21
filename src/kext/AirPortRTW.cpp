@@ -157,13 +157,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 bool AirPortRTW::start(IOService *provider)
 {
     setProperty("PM_DEFERRED_RX_FIX", "1.0.2-beta.1");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.21");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.22");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "2.0.0-beta.21");
+    setProperty("DriverBuild", "2.0.0-beta.22");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -349,7 +349,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 2.0.0-beta.21 WPA3-Personal\n");
+    IOLog("AirPortRTW: 2.0.0-beta.22 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -464,6 +464,7 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         self->setProperty("AWDL_RX_REJECT_DESTINATION", (uint64_t)self->_ieee80211->awdlRxRejectedDestination(), 32);
         self->setProperty("AWDL_RX_ETHERNET_DELIVERED", (uint64_t)self->_ieee80211->awdlRxEthernetDelivered(), 32);
         self->setProperty("AWDL_RX_MULTICAST_DELIVERED", (uint64_t)self->_ieee80211->awdlRxMulticastDelivered(), 32);
+        self->setProperty("AWDL_TX_DATA_COMPLETED", (uint64_t)self->_ieee80211->awdlTxDataCompleted(), 32);
         self->setProperty("AWDL_RX_APPLE_ACTION_INPUTS", (uint64_t)self->_awdlAppleActionInputs, 32);
         self->setProperty("AWDL_RX_APPLE_ACTION_DROPS", (uint64_t)self->_awdlAppleActionDrops, 32);
         self->publishAWDLTxDiagnostics();
@@ -2736,7 +2737,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.21)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.22)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));

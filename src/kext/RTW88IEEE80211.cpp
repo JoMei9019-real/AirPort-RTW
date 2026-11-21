@@ -2432,6 +2432,17 @@ void RTW88IEEE80211::reorderTimerFired(OSObject *owner, IOTimerEventSource *)
 void RTW88IEEE80211::txStatus(struct sk_buff *skb)
 {
     struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+    if (skb->len >= sizeof(struct ieee80211_hdr_3addr) + 16) {
+        const auto *hdr = reinterpret_cast<const struct ieee80211_hdr_3addr *>(skb->data);
+        const uint16_t fc = le16_to_cpu(hdr->frame_control);
+        if ((fc & (IEEE80211_FCTL_FTYPE | IEEE80211_FCTL_TODS | IEEE80211_FCTL_FROMDS)) ==
+               IEEE80211_FTYPE_DATA &&
+            !memcmp(hdr->addr3, RTW88AWDL::BSSID, sizeof(hdr->addr3))) {
+            // rtw88 reports these frames when PCI reclaims the descriptor.
+            // For multicast this callback does not carry a peer ACK.
+            __atomic_add_fetch(&_awdlTxDataCompleted, 1U, __ATOMIC_RELAXED);
+        }
+    }
     if (!(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS))
         return;
     observeBtmTx(skb->data,skb->len,(info->flags&IEEE80211_TX_STAT_ACK)!=0);
@@ -6010,10 +6021,10 @@ bool RTW88IEEE80211::txAWDLDataFrame(mbuf_t m)
     info->control.vif = _vif;
     info->control.sta = nullptr;
 
-    struct ieee80211_tx_control ctrl = { .sta = nullptr };
-    _hw->ops->tx(_hw, &ctrl, skb);
+    // rtw88's ops->tx callback cannot report a rejected PCI descriptor.
+    const bool submitted = rtw88_tx_batch_write(_hw, nullptr, skb, true) == 0;
     mbuf_freem(m);
-    return true;
+    return submitted;
 }
 
 /* Detect the AWDL data envelope before applying infrastructure association
