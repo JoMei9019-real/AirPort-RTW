@@ -4,6 +4,7 @@
  * No Apple ABI types: this exact implementation is exercised by host tests.
  */
 #pragma once
+#include "../compat/rtw88_data_header.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -16,6 +17,12 @@ inline unsigned le(const uint8_t*p){return p[0]|unsigned(p[1])<<8;}
 inline void put(uint8_t*p,unsigned v){p[0]=uint8_t(v);p[1]=uint8_t(v>>8);}
 inline uint64_t pn(const uint8_t*p){uint64_t n=0;for(unsigned i=0;i<6;++i)n|=uint64_t(p[i])<<(8*i);return n;}
 inline void putpn(uint8_t*p,uint64_t n){for(unsigned i=0;i<6;++i)p[i]=uint8_t(n>>(8*i));}
+// Three-address, unfragmented CCMP data or management frames supported here.
+inline bool supportedCcmpHeader(unsigned fc, unsigned sequenceControl){
+    return ((fc & 12) == 0 || (fc & 12) == 8) && (fc & 0x0300) != 0x0300 &&
+           !(fc & 0x0400) && !(sequenceControl & 15) &&
+           (!(fc & 0x8000) || rtw88_is_qos_data(fc));
+}
 // IEEE robust action categories, matching Linux ieee80211_is_robust_mgmt_frame.
 inline bool robustAction(unsigned category){
     return category!=4 && category!=7 && category!=11 && category!=15 &&
@@ -137,17 +144,18 @@ public:
         uint8_t out[611];bool sent=send(out,reply(out,m3?4:5,replay),g1);
         if(m3&&sent){authorized=true;stage=5;error=0;}return sent;}
     bool prepareTx(uint8_t*f,size_t n){if(!f||!authorized||n<32||txpn>=0xffffffffffffULL)return false;
-        size_t h=((le(f)&12)!=0&&(f[0]&0x80))?26:24;if(n<h+8)return false;auto*v=f+h;uint64_t number=++txpn;
+        unsigned fc=le(f);if(!supportedCcmpHeader(fc,le(f+22)))return false;
+        size_t h=rtw88_data_header_length(fc);if(n<h+8)return false;auto*v=f+h;uint64_t number=++txpn;
         uint8_t p[6];putpn(p,number);v[0]=p[0];v[1]=p[1];v[2]=0;v[3]=0x20;memcpy(v+4,p+2,4);f[1]|=0x40;return true;}
     bool encrypt(uint8_t*f,size_t n){return n>=40 && prepareTx(f,n) && ccmp(f,n,tk,txpn,true);}
     bool decrypt(uint8_t*f,size_t n,bool hardwareVerified=false){
         if(!f||!authorized||n<40||!(f[1]&0x40)||memcmp(f+10,peer,6))return false;
-        unsigned fc=le(f);if((fc&0x300)==0x300||(fc&0x8400)||(le(f+22)&15))return false;
+        unsigned fc=le(f);if(!supportedCcmpHeader(fc,le(f+22)))return false;
         if(!(f[4]&1)&&memcmp(f+4,own,6))return false;
-        bool mgmt=(f[0]&12)==0;size_t h=!mgmt&&(f[0]&0x80)?26:24;if(n<h+16)return false;auto*v=f+h;
+        bool mgmt=(f[0]&12)==0;size_t h=rtw88_data_header_length(fc);if(n<h+16)return false;auto*v=f+h;
         if(v[2]||(v[3]&0x3f)!=0x20)return false;unsigned id=v[3]>>6,slot=f[4]&1?id:4;
         if(slot==4&&id)return false;if(slot!=4&&!gv[id])return false;
-        unsigned tid=mgmt?17:h==26?f[24]&15:16;uint8_t p[]={v[0],v[1],v[4],v[5],v[6],v[7]};uint64_t number=pn(p);
+        unsigned tid=mgmt?17:rtw88_is_qos_data(fc)?f[24]&15:16;uint8_t p[]={v[0],v[1],v[4],v[5],v[6],v[7]};uint64_t number=pn(p);
         // Only the installed pairwise key is offloaded. GTK/BIP stay in software.
         if(hardwareVerified && slot!=4)return false;
         if(!number||number<=rx[slot][tid]||(!hardwareVerified&&!ccmp(f,n,slot==4?tk:gtk[id],number,false)))return false;rx[slot][tid]=number;return true;}

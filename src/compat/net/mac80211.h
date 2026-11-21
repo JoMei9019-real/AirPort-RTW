@@ -9,6 +9,7 @@
 #ifndef _RTW88_COMPAT_MAC80211_H
 #define _RTW88_COMPAT_MAC80211_H
 
+#include "../rtw88_data_header.h"
 #include "../linux/types.h"
 #include "../linux/skbuff.h"
 #include "../linux/spinlock.h"
@@ -163,14 +164,7 @@ static inline int ieee80211_is_data_qos(__le16 fc)
 static inline u16 ieee80211_get_hdrlen_from_skb(const struct sk_buff *skb)
 {
     const struct ieee80211_hdr *hdr = (const struct ieee80211_hdr *)skb->data;
-    u16 fc = le16_to_cpu(hdr->frame_control);
-    bool has_a4 = (fc & (IEEE80211_FCTL_TODS | IEEE80211_FCTL_FROMDS)) ==
-                  (IEEE80211_FCTL_TODS | IEEE80211_FCTL_FROMDS);
-    bool is_qos = (fc & 0x0080) && ((fc & 0x000c) == IEEE80211_FTYPE_DATA);
-    u16 len = 24;
-    if (has_a4) len += 6;
-    if (is_qos)  len += 2;
-    return len;
+    return rtw88_data_header_length(le16_to_cpu(hdr->frame_control));
 }
 
 /* ------------------------------------------------------------------ */

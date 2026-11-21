@@ -154,7 +154,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.3.0");
+    setProperty("DriverBuild", "1.3.1-beta.1");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -339,7 +339,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 1.3.0 WPA3-Personal\n");
+    IOLog("AirPortRTW: 1.3.1-beta.1 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -350,6 +350,7 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
     if (!self || self->_shutdown || !self->_diagnosticsBuffer) return;
     self->_diagnosticsSamples++;
     if (self->_ieee80211) {
+        self->setProperty("RX_QOS_HT_CONTROL_FRAMES", self->_ieee80211->rxQoSHtControlFrames(), 64);
         self->setProperty("TX_BATCH_DEFERRED_FRAMES", (uint64_t)self->_ieee80211->txBatchFrames(), 32);
         self->setProperty("TX_BATCH_FLUSHES", (uint64_t)self->_ieee80211->txBatchFlushes(), 32);
         self->setProperty("TX_BATCH_PENDING", (uint64_t)self->_ieee80211->txBatchPending(), 32);
@@ -2691,7 +2692,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.3.0)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.3.1-beta.1)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));

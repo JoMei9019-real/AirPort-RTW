@@ -113,6 +113,34 @@ int main(){
     auto expected=hex("88420000020000000001020000000002020000000003000005000100002000000000b2903e707f5ccaefc1059d78444f379c1488720a86d77eac7c54");
     auto plain=hex("aaaa03000000080068656c6c6f2057504133");uint8_t key[16];for(unsigned i=0;i<16;++i)key[i]=i;
     auto f=expected;assert(ccmp(f.data(),f.size(),key,1,false));assert(!memcmp(f.data()+34,plain.data(),plain.size()));assert(ccmp(f.data(),f.size(),key,1,true));assert(f==expected);
+    // HT Control changes the header length but is excluded from CCMP AAD.
+    // The independent QoS known answer therefore has the same payload and tag.
+    auto ordered = expected;
+    ordered[1] |= 0x80;
+    ordered.insert(ordered.begin()+26, {0xba, 0xad, 0xf0, 0x0d});
+    assert(rtw88_qos_offset(le(ordered.data())) == 24);
+    assert(rtw88_data_header_length(le(ordered.data())) == 30);
+    assert(rtw88_qos_offset(0x8388) == 30 && rtw88_data_header_length(0x8388) == 36);
+    assert(rtw88_data_header_length(0x8208) == 24 && !rtw88_has_ht_control(0x8208));
+    for (bool hardware : {false, true}) {
+        Session rx;
+        rx.authorized = true;
+        memcpy(rx.tk, key, sizeof(key));
+        memcpy(rx.own, ordered.data()+4, 6);
+        memcpy(rx.peer, ordered.data()+10, 6);
+        auto data = ordered;
+        assert(!rx.decrypt(data.data(), 45, hardware)); // truncated IV/MIC
+        if (hardware) memcpy(data.data()+38, plain.data(), plain.size());
+        auto retry = data;
+        assert(rx.decrypt(data.data(), data.size(), hardware));
+        assert(!memcmp(data.data()+38, plain.data(), plain.size()));
+        assert(rx.rx[4][5] == 1 && rx.rx[4][16] == 0);
+        assert(!rx.decrypt(retry.data(), retry.size(), hardware));
+        if (!hardware) {
+            assert(rx.encrypt(data.data(), data.size()));
+            assert(data == ordered);
+        }
+    }
     Profile rejected;auto pskOnly=hex("30140100000fac040100000fac040100000fac020000");assert(!profile(pskOnly.data(),pskOnly.size(),rejected));
     scenario(false,false);scenario(true,false);scenario(false,true);scenario(true,true);puts("PASS: production SAE/4-way handshake, PMF integrity/replay and CCMP known answer");
     for(bool h2e:{false,true}){

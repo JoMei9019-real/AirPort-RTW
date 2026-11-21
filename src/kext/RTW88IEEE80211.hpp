@@ -291,6 +291,9 @@ public:
     uint8_t   txNSS() const;
     uint8_t channelWidthMHz() const { return _connChanWidth; }
     bool txAggregationActive() const { return _txBaActive; }
+    uint64_t rxQoSHtControlFrames() const {
+        return __atomic_load_n(&_rxQoSHtControlFrames, __ATOMIC_RELAXED);
+    }
     uint32_t receivedFrameCount() const { return _rxFrameCount; }
     const char *scanEngine() const { return _scanEngine; }
     uint32_t scanChannelCount() const { return _lastScanChannelCount; }
@@ -666,5 +669,6 @@ private:
     uint64_t _rxNoiseSample = 0;
 
     /* Diagnostics: periodic logging of RX activity during scan */
+    uint64_t _rxQoSHtControlFrames = 0;
     uint32_t _rxFrameCount = 0;
 };

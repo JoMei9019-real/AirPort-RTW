@@ -1978,6 +1978,13 @@ void RTW88IEEE80211::processRxData(struct sk_buff *skb)
         return;
     }
 
+    if (skb->len < ieee80211_get_hdrlen_from_skb(skb)) {
+        kfree_skb(skb);
+        return;
+    }
+    if (rtw88_has_ht_control(infraFc))
+        __atomic_add_fetch(&_rxQoSHtControlFrames, 1, __ATOMIC_RELAXED);
+
     /* If this TID has an active downlink BlockAck agreement, run the frame
      * through the per-TID reorder buffer so A-MPDU subframes (and frames
      * retransmitted in a later A-MPDU) reach the stack in order.  Delivering
@@ -1990,10 +1997,9 @@ void RTW88IEEE80211::processRxData(struct sk_buff *skb)
      * unicast reorder window or be dropped as "stale" by it. */
     if (ieee80211_is_data_qos(hdr->frame_control) &&
         !is_multicast_ether_addr(hdr->addr1)) {
-        uint16_t hdrlen = ieee80211_get_hdrlen_from_skb(skb);
-        if (skb->len >= hdrlen &&
-            (skb->data[hdrlen - 2] & 0x60) != 0x20) {   /* ack policy != NoAck */
-            uint8_t tid = (uint8_t)(skb->data[hdrlen - 2] & 0x0f);
+        uint8_t qosControl = skb->data[rtw88_qos_offset(infraFc)];
+        if ((qosControl & 0x60) != 0x20) {   /* ack policy != NoAck */
+            uint8_t tid = (uint8_t)(qosControl & 0x0f);
             if (tid < kRxBaNumTid && _rxBa[tid] && _rxBa[tid]->active) {
                 uint16_t sn = (uint16_t)
                     ((le16_to_cpu(hdr->seq_ctrl) & 0xFFF0) >> 4);
@@ -2049,7 +2055,7 @@ void RTW88IEEE80211::deliverDataFrame(struct sk_buff *skb)
 
     bool amsdu = false;
     if (ieee80211_is_data_qos(hdr->frame_control))
-        amsdu = (skb->data[hdrlen - 2] & 0x80) != 0;  /* QoS-ctl A-MSDU bit */
+        amsdu = (skb->data[rtw88_qos_offset(le16_to_cpu(hdr->frame_control))] & 0x80) != 0;  /* QoS-ctl A-MSDU bit */
 
     if (amsdu && !prot && keyed) {
         uint32_t n = ++_rxUnprotectedDropped;
