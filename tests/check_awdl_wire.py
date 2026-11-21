@@ -9,6 +9,7 @@ include = Path(__file__).resolve().parents[1] / 'src/kext'
 fixture = r'''
 #include <cassert>
 #include "RTW88AWDLProtocol.hpp"
+#include "../compat/rtw88_data_header.h"
 
 int main() {
     using namespace RTW88AWDL;
@@ -40,6 +41,23 @@ int main() {
     assert(msdu == wrapped + 8 && msduLength == 20); // excludes two padding bytes
     assert(dataPayload(msdu, msduLength, type) && type == 0x86dd);
     assert(!unwrapLengthPrefixedMSDU(msdu, msduLength)); // direct SNAP
+
+    // An ordered QoS data frame carries four HT Control bytes after QoS
+    // Control. The same offsets are used by the production AWDL RX parser.
+    uint8_t qosFrame[60] = {0x88, 0x80};
+    memcpy(qosFrame + 26, "HTCT", 4);
+    memcpy(qosFrame + 30, wrapped, sizeof(wrapped));
+    const unsigned fc = qosFrame[0] | (unsigned(qosFrame[1]) << 8);
+    const size_t headerLength = rtw88_data_header_length(fc);
+    assert(rtw88_has_ht_control(fc) && rtw88_qos_offset(fc) == 24 && headerLength == 30);
+    const uint8_t *oldOffset = qosFrame + 26;
+    size_t oldLength = sizeof(qosFrame) - 26;
+    assert(!unwrapLengthPrefixedMSDU(oldOffset, oldLength));
+    msdu = qosFrame + headerLength;
+    msduLength = sizeof(qosFrame) - headerLength;
+    assert(unwrapLengthPrefixedMSDU(msdu, msduLength));
+    assert(dataPayload(msdu, msduLength, type) && type == 0x86dd);
+
     msdu = wrapped;
     msduLength = sizeof(wrapped);
     wrapped[7] = 23;

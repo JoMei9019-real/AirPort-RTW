@@ -294,6 +294,9 @@ public:
     uint8_t   txNSS() const;
     uint8_t channelWidthMHz() const { return _connChanWidth; }
     bool txAggregationActive() const { return _txBaActive; }
+    uint64_t rxQoSHtControlFrames() const {
+        return __atomic_load_n(&_rxQoSHtControlFrames, __ATOMIC_RELAXED);
+    }
     uint32_t receivedFrameCount() const { return _rxFrameCount; }
 
     /* Beta 14: bounded AWDL RX-pipeline telemetry. These counters expose
@@ -301,6 +304,7 @@ public:
     uint32_t awdlRx80211DataSeen() const { return _awdlRx80211DataSeen; }
     uint32_t awdlRxNoDsSeen() const { return _awdlRxNoDsSeen; }
     uint32_t awdlRxBssidMatch() const { return _awdlRxBssidMatch; }
+    uint32_t awdlRxQoSHtControlFrames() const { return _awdlRxQoSHtControlFrames; }
     uint32_t awdlRxRejectedDs() const { return _awdlRxRejectedDs; }
     uint32_t awdlRxRejectedBssid() const { return _awdlRxRejectedBssid; }
     uint32_t awdlRxRejectedProtectedFragment() const { return _awdlRxRejectedProtectedFragment; }
@@ -689,12 +693,14 @@ private:
     uint64_t _rxNoiseSample = 0;
 
     /* Diagnostics: periodic logging of RX activity during scan */
+    uint64_t _rxQoSHtControlFrames = 0;
     uint32_t _rxFrameCount = 0;
 
     /* Beta 14 AWDL RX classifier/decapsulation diagnostics. */
     uint32_t _awdlRx80211DataSeen = 0;
     uint32_t _awdlRxNoDsSeen = 0;
     uint32_t _awdlRxBssidMatch = 0;
+    uint32_t _awdlRxQoSHtControlFrames = 0;
     uint32_t _awdlRxRejectedDs = 0;
     uint32_t _awdlRxRejectedBssid = 0;
     uint32_t _awdlRxRejectedProtectedFragment = 0;

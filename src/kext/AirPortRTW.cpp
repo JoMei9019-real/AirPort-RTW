@@ -157,13 +157,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 bool AirPortRTW::start(IOService *provider)
 {
     setProperty("PM_DEFERRED_RX_FIX", "1.0.2-beta.1");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.20");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.21");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "2.0.0-beta.20");
+    setProperty("DriverBuild", "2.0.0-beta.21");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -349,7 +349,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 2.0.0-beta.20 WPA3-Personal\n");
+    IOLog("AirPortRTW: 2.0.0-beta.21 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -449,6 +449,8 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         self->setProperty("AWDL_RX_80211_DATA_SEEN", (uint64_t)self->_ieee80211->awdlRx80211DataSeen(), 32);
         self->setProperty("AWDL_RX_NO_DS_SEEN", (uint64_t)self->_ieee80211->awdlRxNoDsSeen(), 32);
         self->setProperty("AWDL_RX_BSSID_MATCH", (uint64_t)self->_ieee80211->awdlRxBssidMatch(), 32);
+        self->setProperty("AWDL_RX_QOS_HT_CONTROL_FRAMES", (uint64_t)self->_ieee80211->awdlRxQoSHtControlFrames(), 32);
+        self->setProperty("RX_QOS_HT_CONTROL_FRAMES", self->_ieee80211->rxQoSHtControlFrames(), 64);
         self->setProperty("AWDL_RX_REJECT_DS", (uint64_t)self->_ieee80211->awdlRxRejectedDs(), 32);
         self->setProperty("AWDL_RX_REJECT_BSSID", (uint64_t)self->_ieee80211->awdlRxRejectedBssid(), 32);
         self->setProperty("AWDL_RX_REJECT_PROTECTED_FRAGMENT", (uint64_t)self->_ieee80211->awdlRxRejectedProtectedFragment(), 32);
@@ -2734,7 +2736,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.20)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.21)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
