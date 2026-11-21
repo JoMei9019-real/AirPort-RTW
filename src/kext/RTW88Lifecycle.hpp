@@ -30,7 +30,8 @@ struct BtmOutcome {
 };
 enum TxEvent : unsigned {
     StallPower,StallScan,StallAWDL,StallRing,DropOffline,DropKeys,DropEncap,
-    Submitted,StartCalls,GateAWDLChecks,GateScanChecks,GateRingChecks,GateDepthChecks,QueueResumes,TxEvents
+    Submitted,StartCalls,GateAWDLChecks,GateScanChecks,GateRingChecks,GateDepthChecks,QueueResumes,
+    RingFull,DropDmaMap,DropHci,TxEvents
 };
 struct Queue {
     uint32_t events[TxEvents]={};

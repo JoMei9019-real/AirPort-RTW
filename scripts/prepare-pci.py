@@ -40,7 +40,17 @@ def prepare(source):
 \t}''', 1)
     assert function.index(lock) < function.index('avail_desc(') < function.index('get_tx_buffer_desc(')
     assert function.count('spin_unlock_bh(&rtwpci->irq_lock);') == 3
-    return source[:start] + function + source[end:]
+    # Count only published BE descriptors and actual completion dequeues.
+    publish = '\tset_bit(queue, rtwpci->tx_queued);'
+    function = function.replace(publish, publish + """
+\tif (queue == RTW_TX_QUEUE_BE)
+\t\t__atomic_fetch_add(&rtwpci->pdev->be_posted, 1, __ATOMIC_RELAXED);""")
+    source = source[:start] + function + source[end:]
+    isr = source.index('static void rtw_pci_tx_isr(')
+    dequeue = source.index('\t\ttx_data = rtw_pci_get_tx_data(skb);', isr)
+    return source[:dequeue] + """\t\tif (hw_queue == RTW_TX_QUEUE_BE)
+\t\t\t__atomic_fetch_add(&rtwpci->pdev->be_reclaimed, 1, __ATOMIC_RELAXED);
+""" + source[dequeue:]
 
 
 if __name__ == '__main__':

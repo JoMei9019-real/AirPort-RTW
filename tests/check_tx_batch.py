@@ -27,7 +27,7 @@ methods = ''.join(method(cpp, s) for s in (
     'void RTW88IEEE80211::flushTxBatch()',
     'void RTW88IEEE80211::endTxBatch()'))
 bridge = method(compat, 'int rtw88_tx_batch_write(') + method(compat, 'bool rtw88_tx_batch_flush(')
-tail = cpp[cpp.index('    bool submitted = true;', cpp.index('bool RTW88IEEE80211::txDataFrame(')):]
+tail = cpp[cpp.index('    const bool batchOwner =', cpp.index('int RTW88IEEE80211::submitDataFrame(')):]
 tail = tail[:tail.index('\n}')]
 assert 'RTW88TxBatchScope<RTW88IEEE80211> batch(_ieee80211)' in controller
 assert controller.index('flushTxBatch();', controller.index('SInt32 AirPortRTW::stopDMA')) < controller.index('__atomic_store_n(&_dmaStopped', controller.index('SInt32 AirPortRTW::stopDMA'))
@@ -48,10 +48,7 @@ struct sk_buff { bool freed=false; };
 struct ieee80211_sta {};
 struct rtw_tx_pkt_info { int unused; };
 struct rtw_dev { unsigned long flags[1]={1}; };
-struct ieee80211_tx_control { ieee80211_sta *sta; };
-struct ieee80211_hw;
-struct Ops { void (*tx)(ieee80211_hw*,ieee80211_tx_control*,sk_buff*); };
-struct ieee80211_hw { rtw_dev *priv; Ops *ops; };
+struct ieee80211_hw { rtw_dev *priv; };
 int freed=0,writes=0,kicks=0,pending=0,retCode=0,maxPending=0;
 bool test_bit(int,unsigned long *p){return *p&1;}
 void ieee80211_free_txskb(ieee80211_hw*,sk_buff *s){assert(s&&!s->freed);s->freed=true;++freed;}
@@ -60,24 +57,20 @@ int rtw_hci_tx_write(rtw_dev*,rtw_tx_pkt_info*,sk_buff*){
  ++writes;if(retCode)return retCode;
  ++pending;if(pending>maxPending)maxPending=pending;return 0;}
 void rtw_hci_tx_kick_off(rtw_dev*){++kicks;pending=0;}
-void normalTx(ieee80211_hw*h,ieee80211_tx_control*c,sk_buff*s){
- rtw_tx_pkt_info info{};int r=rtw_hci_tx_write(h->priv,&info,s);
- if(r)ieee80211_free_txskb(h,s);else rtw_hci_tx_kick_off(h->priv);}
-struct Mbuf{};using mbuf_t=Mbuf*;
-void mbuf_freem(mbuf_t){}
 struct RTW88IEEE80211 {
  bool _powered=true,_txBatchEnabled=true,_txBaActive=true;
  ieee80211_hw *_hw;ieee80211_sta *_sta=nullptr;
  uintptr_t _txBatchOwner=0;
  uint32_t _txBatchPending=0,_txBatchFrames=0,_txBatchFlushes=0;
  bool beginTxBatch();void endTxBatch();void flushTxBatch();
- bool submit(sk_buff*,uint16_t,bool=true);
+ int write(sk_buff*,uint16_t,bool);
+ bool submit(sk_buff*s,uint16_t type,bool qos=true){return write(s,type,qos)==0;}
 };
 '''
-submit = 'bool RTW88IEEE80211::submit(sk_buff *skb,uint16_t ethertype,bool qos){\nmbuf_t m=nullptr;ieee80211_tx_control ctrl{_sta};\n' + tail + '\n}\n'
+submit = 'int RTW88IEEE80211::write(sk_buff *skb,uint16_t ethertype,bool qos){\n' + tail + '\n}\n'
 post = r'''
 int main(){
- Ops ops{normalTx};rtw_dev dev;ieee80211_hw hw{&dev,&ops};RTW88IEEE80211 b;b._hw=&hw;
+ rtw_dev dev;ieee80211_hw hw{&dev};RTW88IEEE80211 b;b._hw=&hw;
  // Batches of 1,31,32,33,64: final remainder always kicked; no timer.
  for(int count:{1,31,32,33,64}){
   int before=kicks;maxPending=0;
@@ -107,6 +100,10 @@ int main(){
  // A/B disabled and no BA/QoS use the original immediate-doorbell behavior.
  b._txBatchEnabled=false;assert(!b.beginTxBatch());
  {sk_buff s;int k=kicks;b.submit(&s,0x800);assert(kicks==k+1);}
+ for(int error:{-ENOSPC,-EBUSY}){
+  sk_buff failed;retCode=error;assert(b.write(&failed,0x800,true)==error&&failed.freed);
+ }
+ retCode=0;
  b._txBatchEnabled=true;
  {RTW88TxBatchScope<RTW88IEEE80211> scope(&b);sk_buff s,t;
   b._txBaActive=false;b.submit(&s,0x800);assert(!pending);

@@ -38,10 +38,11 @@ struct rtw_tx_pkt_info{u32 qsel=0,sn=0;};
 struct rtw_chip_info{u32 tx_pkt_desc_sz=48,tx_buf_desc_sz=16;};
 struct Ring{u32 wp=0,rp=0,len=256;};
 struct Queue{u32 count=0;};
-struct rtw_pci_tx_ring{Ring r;Queue queue;rtw_pci_tx_buffer_desc descriptors[256][2]{};};
-struct Pdev{int dev=0;};
+struct rtw_pci_tx_ring{Ring r;Queue queue;bool queue_stopped=false;rtw_pci_tx_buffer_desc descriptors[256][2]{};};
+struct Pdev{int dev=0;uint64_t be_posted=0,be_reclaimed=0;};
 struct rtw_pci{rtw_pci_tx_ring tx_rings[2];Pdev *pdev;std::mutex irq_lock;u32 tx_queued[1]{};};
-struct rtw_dev{void*priv;const rtw_chip_info*chip;};
+struct ieee80211_hw {};
+struct rtw_dev{void*priv;const rtw_chip_info*chip;ieee80211_hw*hw=nullptr;};
 std::mutex schedule;std::condition_variable cv;int selected=0;bool firstCompleted=false,controlled=true,mapFailed=false;thread_local int actor=0;thread_local bool held=false;
 u32 avail_desc(u32 wp,u32 rp,u32 len){return (rp+len-wp-1)%len;}
 void rtw_pci_release_rsvd_page(rtw_pci*,rtw_pci_tx_ring*){}
@@ -69,6 +70,25 @@ void set_bit(int n,u32*p){*p|=1u<<n;}
 # production uses skb->data pointer, represented separately from tx bookkeeping
 pre=pre.replace('rtw_pci_tx_data data{};', 'u8*data=bytes;rtw_pci_tx_data bookkeeping{};').replace('return &s->data;', 'return &s->bookkeeping;')
 
+# Drive the generated completion handler with a programmable hardware read pointer.
+isr_mocks=r'''
+struct ieee80211_tx_info{u32 flags=0;};
+constexpr int RTW_TX_QUEUE_H2C=2,TRX_BD_IDX_MASK=0xfff;
+constexpr int IEEE80211_TX_CTL_REQ_TX_STATUS=1,IEEE80211_TX_CTL_NO_ACK=2;
+constexpr int IEEE80211_TX_STAT_NOACK_TRANSMITTED=4,IEEE80211_TX_STAT_ACK=8;
+u32 rtw_pci_tx_queue_idx_addr[2]={},hwRead=0;
+u32 rtw_read32(rtw_dev*,u32){return hwRead<<16;}
+u32 skb_queue_len(Queue*q){return q->count;}
+sk_buff*skb_dequeue(Queue*q){static sk_buff skb;if(!q->count)return nullptr;--q->count;return &skb;}
+void dma_unmap_single(int*,dma_addr_t,u32,int){}
+void dev_kfree_skb_irq(sk_buff*){} u16 skb_get_queue_mapping(sk_buff*){return 0;}
+void ieee80211_wake_queue(ieee80211_hw*,u16){} void skb_pull(sk_buff*,u32){}
+ieee80211_tx_info*IEEE80211_SKB_CB(sk_buff*){static ieee80211_tx_info info;return &info;}
+void rtw_tx_report_enqueue(rtw_dev*,sk_buff*,u32){} void ieee80211_tx_info_clear_status(ieee80211_tx_info*){}
+void ieee80211_tx_status_irqsafe(ieee80211_hw*,sk_buff*){}
+#define IOLog(...) ((void)0)
+#define rtw_err(...) ((void)0)
+'''
 post=r'''
 int main(){Pdev p;rtw_pci pci;pci.pdev=&p;rtw_chip_info chip;rtw_dev dev{&pci,&chip};sk_buff a,b;rtw_tx_pkt_info ia,ib;int ra=-1,rb=-1;
  std::thread t0([&]{actor=0;ra=rtw_pci_tx_write_data(&dev,&ia,&a,RTW_TX_QUEUE_BE);});
@@ -100,8 +120,17 @@ int main(){Pdev p;rtw_pci pci;pci.pdev=&p;rtw_chip_info chip;rtw_dev dev{&pci,&c
  for(int i=0;i<32;++i)producers[i]=std::thread([&,i]{actor=i+1;sk_buff skb;rtw_tx_pkt_info info;assert(!rtw_pci_tx_write_data(&dev,&info,&skb,RTW_TX_QUEUE_BE));});
  for(auto&t:producers){t.join();}
  assert(r.r.wp==32&&r.queue.count==32);
+ assert(p.be_posted==35); // two initial writes, one wrap and 32 concurrent BE writes
  bool seen[33]{};
  for(int i=0;i<32;++i){u32 owner=r.descriptors[i][0].dma/0x1000-1;assert(owner>=1&&owner<=32&&!seen[owner]);seen[owner]=true;}
+ // Wrap and clamp: only actual BE dequeues count, even if the hardware index advances farther.
+ r.r.rp=255;r.queue.count=2;hwRead=3;
+ rtw_pci_tx_isr(&dev,&pci,RTW_TX_QUEUE_BE);
+ assert(p.be_reclaimed==2&&r.queue.count==0);
+ rtw_pci_tx_isr(&dev,&pci,RTW_TX_QUEUE_BE);
+ bc.r.rp=0;bc.queue.count=1;hwRead=1;rtw_pci_tx_isr(&dev,&pci,RTW_TX_QUEUE_BCN);
+ assert(p.be_reclaimed==2&&bc.queue.count==0);
+ puts("PASS: BE counters cover posting, reclamation, wrap, clamping and other queues");
  puts("PASS: serialized PCI producers, no descriptor holes, full/mapping errors, ring wrap and beacon ownership");
 #endif
 }
@@ -109,7 +138,11 @@ int main(){Pdev p;rtw_pci pci;pci.pdev=&p;rtw_chip_info chip;rtw_dev dev{&pci,&c
 with tempfile.TemporaryDirectory() as d:
     p=Path(d)
     for name,code,flags in [('negative',source,['-DNEGATIVE_CONTROL']),('fixed',patch.prepare(source),[])]:
-        (p/'test.cpp').write_text(pre+function(code)+post)
+        completion = ''
+        if name == 'fixed':
+            start = code.index('static void rtw_pci_tx_isr(')
+            completion = isr_mocks + code[start:code.index('\n}',start)+2]
+        (p/'test.cpp').write_text(pre+function(code)+completion+post)
         subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-pthread','-Wall','-Wextra',*flags,str(p/'test.cpp'),'-o',str(p/name)],check=True)
         subprocess.run([str(p/name)],check=True,timeout=20)
     try:

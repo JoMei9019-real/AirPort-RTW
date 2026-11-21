@@ -1373,13 +1373,13 @@ void rtw88_debug_dump_tx_state_to(int to_ring)
 #define RTW88_TXSTATE_FMT "rtw88: TXSTATE BE hw_wp=%u hw_rp=%u sw_wp=%u sw_rp=%u qlen=%u "\
           "TXDMA_ST=0x%08x PKT_EMPTY=0x%04x BD[rp]:dma0=0x%08x dma1=0x%08x "\
           "sz0=%u sz1=%u psb=0x%04x RX_rp=%u RX_hwwp=%u "\
-          "HISR0=0x%08x HISR3=0x%08x BEDOK_p=%d\n"
+          "HISR0=0x%08x HISR3=0x%08x BEDOK_p=%d BEDOK_en=%d TXPAUSE=0x%02x\n"
 #define RTW88_TXSTATE_ARGS\
           hw_wp, hw_rp, sw_wp, sw_rp, qlen,\
           txdma_st, pkt_empty, bd_dma0, bd_dma1, bd_sz0, bd_sz1, bd_psb,\
           rx_rp, rx_hw_wp,\
           hisr0, hisr3,\
-          (hisr0 & RTW88_DBG_IMR_BEDOK) ? 1 : 0
+          !!(hisr0 & RTW88_DBG_IMR_BEDOK), !!(himr0 & RTW88_DBG_IMR_BEDOK), txpause
     if (to_ring)
         rtw88_candidate_log(RTW88_TXSTATE_FMT, RTW88_TXSTATE_ARGS);
     else

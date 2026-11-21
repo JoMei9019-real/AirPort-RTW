@@ -117,7 +117,7 @@ int main(){
  puts("PASS: production AWDL early gate, retained backlog, asynchronous home/reclaim resume, hysteresis, PM fence and boot retune policy");
 }
 '''
-assert controller.index('setAWDLHopsDisabled(hopsDisabled)')<controller.index('_ieee80211->start()')
+assert controller.index('setAWDLHopsDisabled(true)')<controller.index('_ieee80211->start()')
 control=method(controller,'IOReturn AirPortRTW::setProperties(')
 branch=control[control.index('} else if(request->operation==11'):control.index('} else if(request->operation!=5)')]
 assert branch.index('_diagnosticsInHardware,true')<branch.index('->configureAWDLHops(')<branch.index('_diagnosticsInHardware,false')

@@ -205,6 +205,9 @@ public:
         _scanReturnState==RTW88_STATE_CONNECTED && _manualScanChannelCount && !_manualScanOnHomeChannel; }
     void beginWakeTrace();
     void wakeTrace(const char*);
+    uint32_t txEventCount(RTW88Lifecycle::TxEvent event) const {
+        return __atomic_load_n(&_queueTrace.events[event], __ATOMIC_RELAXED);
+    }
     void recordTxEvent(unsigned slot) { if(slot<RTW88Lifecycle::TxEvents)__atomic_add_fetch(&_queueTrace.events[slot],1U,__ATOMIC_RELAXED); }
     void sampleQueueTrace(uint64_t now,uint64_t drops,uint64_t stalls,unsigned depth) { _queueTrace.sample(now,drops,stalls,depth,unsigned(_state)); }
     void restoreSTAChannelAfterAWDL();
@@ -435,6 +438,7 @@ private:
     bool      txMgmtFrame(const uint8_t *frame, uint32_t len);
     bool      txNullFunc(bool powerSave);
     bool      txProbeRequest();
+    int       submitDataFrame(mbuf_t m);
     bool      txDataFrame(mbuf_t m);
     bool      tryDeliverAWDLDataFrame(struct sk_buff *skb);
     void      deliverAWDLEthernet(const uint8_t *da, const uint8_t *sa,

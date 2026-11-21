@@ -1,8 +1,8 @@
-AirPort-RTW 1.3.0 - supported boot arguments
+AirPort-RTW 1.3.1 Beta 2 - supported boot arguments
 ==========================================
 
 No AirPort-RTW boot argument is required for normal use.
-These are the four driver-specific arguments read by the released kext.
+These are the four driver-specific arguments read by this kext.
 
 How to use them
 ---------------
@@ -32,10 +32,9 @@ Use the spelling shown below; these switches do not need '=1'.
   Default: use the driver's normal scan selection and fallback.
 
 -rtwnoawdlhop
-  Disables AWDL off-channel hopping while the station is connected.
-  Intended for diagnosing traffic interruptions during AWDL activity.
-  It does not disable ordinary Wi-Fi or automatic roaming.
-  Default: the driver's normal AWDL channel-hop policy is allowed.
+  AWDL off-channel hopping is disabled by default from 1.3.1 Beta 2,
+  including during idle discovery. Existing configurations may keep this
+  argument. Same-channel AWDL, ordinary Wi-Fi and roaming remain available.
   AirDrop and full Continuity are not supported by this release.
 
 Example: to turn off automatic roaming, add only -rtwnoautoroam to your

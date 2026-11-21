@@ -39,6 +39,7 @@ pre = r'''
 #include "RTW88WPA3.hpp"
 #include "RTW88Lifecycle.hpp"
 #include <cassert>
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <vector>
@@ -107,7 +108,8 @@ struct RTW88IEEE80211 {
  void handleEAPOL(const uint8_t*,uint32_t);
  void startTxAggregation(){}
  void resetRoamingState(){}
- bool txDataFrame(mbuf_t p){++tx;delete p;return true;}
+ int writeResult=0;
+ int submitDataFrame(mbuf_t){++tx;return writeResult;}
  IOReturn installEnterprisePMKGated(const uint8_t*,uint32_t,const uint8_t*);
  IOReturn cmdInstallExternalKey(bool,uint8_t,uint32_t,const uint8_t*,uint8_t);
  UInt32 outputPacket(mbuf_t); void clearKeys();
@@ -198,6 +200,20 @@ int main(){
  b.m4Submit=true;b.handleEAPOL(m3.data(),m3.size());
  assert(b.externalKeysReady()&&b._state==RTW88_STATE_CONNECTED&&b.delegate.done==1);
  assert(b.outputPacket(packet(0x800))==0);
+ auto retained=packet(0x800);
+ auto &events=b._queueTrace.events;
+ auto submitted=events[RTW88Lifecycle::Submitted];
+ b.writeResult=-ENOSPC;
+ assert(b.outputPacket(retained)==kIOReturnOutputStall&&events[RTW88Lifecycle::RingFull]==1);
+ assert(events[RTW88Lifecycle::Submitted]==submitted);
+ b.writeResult=0;
+ assert(b.outputPacket(retained)==0&&events[RTW88Lifecycle::Submitted]==submitted+1);
+ b.writeResult=-EBUSY;
+ assert(b.outputPacket(packet(0x800))==kIOReturnOutputDropped&&events[RTW88Lifecycle::DropDmaMap]==1);
+ b.writeResult=-ESHUTDOWN;
+ assert(b.outputPacket(packet(0x800))==kIOReturnOutputDropped&&events[RTW88Lifecycle::DropHci]==1);
+ assert(events[RTW88Lifecycle::Submitted]==submitted+1);
+ b.writeResult=0;
  b.deliverEthernet(zero,zero,0x800,identity,sizeof(identity));assert(parent.injected==2);
  memset(b._password,0x5a,sizeof(b._password));b.clearKeys();
  for(auto x:b._pmk)assert(x==0);

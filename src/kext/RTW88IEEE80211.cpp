@@ -1141,7 +1141,7 @@ IOReturn RTW88IEEE80211::setAWDLChannel(uint16_t channel)
         return kIOReturnBusy;
     if (!_powered || !_hw || !_hw->wiphy || channel == 0)
         return kIOReturnNotReady;
-    // Diagnostic boot policy: no AWDL retune, including idle discovery.
+    // The hop policy also applies during idle discovery.
     // Same-channel operation still goes through normal regulatory/state checks.
     if(_awdlHopsDisabled && (!_hw->conf.chandef.chan ||
        _hw->conf.chandef.chan->hw_value!=channel)) {
@@ -1363,10 +1363,23 @@ UInt32 RTW88IEEE80211::outputPacket(mbuf_t m)
         }
     }
 
-    /* txDataFrame() encapsulates the Ethernet frame as an 802.11 data frame
-     * and consumes (frees) the mbuf in all paths. */
-    if (txDataFrame(m)) {recordTxEvent(RTW88Lifecycle::Submitted);return kIOReturnOutputSuccess;}
-    recordTxEvent(RTW88Lifecycle::DropEncap);
+    const int result = submitDataFrame(m);
+    if (result == -ENOSPC) {
+        // The PCI write rejected the skb. Keep the original Ethernet mbuf for retry.
+        recordTxEvent(RTW88Lifecycle::RingFull);
+        return kIOReturnOutputStall;
+    }
+    if (m) mbuf_freem(m);
+    if (result == 0) {
+        recordTxEvent(RTW88Lifecycle::Submitted);
+        return kIOReturnOutputSuccess;
+    }
+    if (result == -EBUSY)
+        recordTxEvent(RTW88Lifecycle::DropDmaMap);
+    else if (result == -EINVAL || result == -ENOMEM)
+        recordTxEvent(RTW88Lifecycle::DropEncap);
+    else
+        recordTxEvent(RTW88Lifecycle::DropHci);
     return kIOReturnOutputDropped;
 }
 
@@ -5533,7 +5546,8 @@ void RTW88IEEE80211::copyRoamDiagnostics(char *out,uint32_t capacity,uint64_t no
         (unsigned long long)_queueTrace.stallTotal,(unsigned long long)_queueTrace.dropDelta,
         (unsigned long long)_queueTrace.stallDelta,_queueTrace.queued,_queueTrace.state);
     static const char *const txNames[]={"stall_power","stall_scan","stall_awdl","stall_ring","drop_offline","drop_keys","drop_encap",
-        "submitted","start_calls","gate_awdl_checks","gate_scan_checks","gate_ring_checks","gate_depth_checks","queue_resumes"};
+        "submitted","start_calls","gate_awdl_checks","gate_scan_checks","gate_ring_checks","gate_depth_checks","queue_resumes",
+        "ring_full","drop_dma_map","drop_hci"};
     static_assert(sizeof(txNames)/sizeof(txNames[0])==RTW88Lifecycle::TxEvents,"TX counter names");
     for(unsigned i=0;i<RTW88Lifecycle::TxEvents;++i)
         ROAM_APPEND("tx_%s=%u\n",txNames[i],__atomic_load_n(&_queueTrace.events[i],__ATOMIC_RELAXED));
@@ -6088,9 +6102,16 @@ void RTW88IEEE80211::deliverAWDLEthernet(const uint8_t *da, const uint8_t *sa,
 
 bool RTW88IEEE80211::txDataFrame(mbuf_t m)
 {
+    const int result = submitDataFrame(m);
+    if (m) mbuf_freem(m);
+    return result == 0;
+}
+
+// Borrows the Ethernet mbuf. The HCI bridge consumes the newly built skb on every path.
+int RTW88IEEE80211::submitDataFrame(mbuf_t m)
+{
     if (!m || !_powered || !_hw || !_hw->ops || !_hw->ops->tx || !_vif || !_sta) {
-        if (m) mbuf_freem(m);
-        return false;
+        return -EINVAL;
     }
 
     /* The mbuf is an Ethernet frame: [DA(6)][SA(6)][ethertype(2)][payload].
@@ -6098,18 +6119,18 @@ bool RTW88IEEE80211::txDataFrame(mbuf_t m)
      * encapsulate: 802.11 data header (24) + LLC/SNAP (8) + IP payload.
      * mac80211 normally does this; we are bypassing mac80211's tx path. */
     size_t total = mbuf_pkthdr_len(m);
-    if (total < 14 || total > 2048) { mbuf_freem(m); return false; }
+    if (total < 14 || total > 2048) return -EINVAL;
     uint32_t paylen = (uint32_t)total - 14;
 
     uint8_t eh[14];
-    if (mbuf_copydata(m, 0, 14, eh) != 0) { mbuf_freem(m); return false; }
+    if (mbuf_copydata(m, 0, 14, eh) != 0) return -EINVAL;
     uint16_t ethertype = (uint16_t)((eh[12] << 8) | eh[13]);
 
     if (_enterprise && ethertype == ETH_P_PAE) {
         uint8_t ehdr[4] = {}, type = 0;
         if (paylen < sizeof(ehdr) || mbuf_copydata(m, 14, sizeof(ehdr), ehdr) != 0 ||
             !RTW88Enterprise::eapol(ehdr, paylen, type) || (type == 3 && !_internalEapolTx)) {
-            mbuf_freem(m); return false;
+            return -EINVAL;
         }
     }
 
@@ -6130,7 +6151,7 @@ bool RTW88IEEE80211::txDataFrame(mbuf_t m)
     const bool hardwareCCMP = _saeMode && protected_frame && saeHardwareCCMP();
     uint32_t framelen = hlen + (protected_frame ? 8 : 0) + 8 + paylen + ((_saeMode && protected_frame && !hardwareCCMP) ? 8 : 0);
     struct sk_buff *skb = alloc_skb(framelen + 128, GFP_ATOMIC);
-    if (!skb) { mbuf_freem(m); return false; }
+    if (!skb) return -ENOMEM;
     skb_reserve(skb, 128);  /* TX descriptor headroom */
 
     /* 802.11 data header (ToDS: station -> AP) */
@@ -6189,17 +6210,16 @@ bool RTW88IEEE80211::txDataFrame(mbuf_t m)
         uint8_t *pay = (uint8_t *)skb_put(skb, paylen);
         if (mbuf_copydata(m, 14, paylen, pay) != 0) {
             kfree_skb(skb);
-            mbuf_freem(m);
-            return false;
+            return -EINVAL;
         }
     }
 
     if(hardwareCCMP) {
-        if(!_sae.prepareTx(skb->data,skb->len)){kfree_skb(skb);mbuf_freem(m);return false;}
+        if(!_sae.prepareTx(skb->data,skb->len)){kfree_skb(skb);return -EINVAL;}
         ++_saeHwTx;
     } else if (_saeMode && protected_frame) {
         memset(skb_put(skb,8),0,8);
-        if (!_sae.encrypt(skb->data,skb->len)) { kfree_skb(skb); mbuf_freem(m); return false; }
+        if (!_sae.encrypt(skb->data,skb->len)) { kfree_skb(skb); return -EINVAL; }
     }
     /* Route to the Best-Effort hardware ring with a BE qsel.  queue_mapping
      * picks the ring (ac_to_hwq[AC_BE] = RTW_TX_QUEUE_BE); priority becomes
@@ -6227,26 +6247,20 @@ bool RTW88IEEE80211::txDataFrame(mbuf_t m)
     if (protected_frame && (!_saeMode || hardwareCCMP))
         info->control.hw_key = _ptkConf;
 
-    struct ieee80211_tx_control ctrl = { .sta = _sta };
-    bool submitted = true;
-    if (__atomic_load_n(&_txBatchOwner, __ATOMIC_ACQUIRE) == rtw88_tx_thread_id()) {
-        /* Only aggregation-ready STA data defers the doorbell. EAPOL always
-         * kicks, including any earlier descriptors prepared in this scope. */
-        const bool defer = _txBaActive && qos && ethertype != ETH_P_PAE &&
-            __atomic_load_n(&_txBatchPending, __ATOMIC_RELAXED) < 31U;
-        submitted = rtw88_tx_batch_write(_hw, _sta, skb, !defer) == 0;
-        if (submitted && defer) {
+    const bool batchOwner = __atomic_load_n(&_txBatchOwner, __ATOMIC_ACQUIRE) == rtw88_tx_thread_id();
+    const bool defer = batchOwner && _txBaActive && qos && ethertype != ETH_P_PAE &&
+        __atomic_load_n(&_txBatchPending, __ATOMIC_RELAXED) < 31U;
+    const int result = rtw88_tx_batch_write(_hw, _sta, skb, !defer);
+    if (batchOwner) {
+        if (result == 0 && defer) {
             __atomic_add_fetch(&_txBatchPending, 1U, __ATOMIC_RELAXED);
             __atomic_add_fetch(&_txBatchFrames, 1U, __ATOMIC_RELAXED);
         } else {
             __atomic_store_n(&_txBatchPending, 0U, __ATOMIC_RELEASE);
             __atomic_add_fetch(&_txBatchFlushes, 1U, __ATOMIC_RELAXED);
         }
-    } else {
-        _hw->ops->tx(_hw, &ctrl, skb);
     }
-    mbuf_freem(m);
-    return submitted;
+    return result;
 }
 
 /* ------------------------------------------------------------------ */

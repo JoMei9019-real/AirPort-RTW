@@ -319,6 +319,7 @@ private:
     bool _diagLastAgg = false;
     bool _diagLastStalled = false;
     bool _diagLastBusy = false;
+    uint32_t _diagLastWriteErrors = 0;
     uint32_t _diagLastGateCount = 0;
     bool _diagRingPrimed = false;
     volatile bool _diagnosticsInHardware = false;

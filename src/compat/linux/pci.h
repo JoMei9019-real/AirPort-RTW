@@ -65,6 +65,10 @@ struct pci_dev {
 
     /* Pointer back to our kext device object */
     void *kext_dev;
+
+    /* BE ring progress for this PCI device, across ring wraparound. */
+    u64 be_posted;
+    u64 be_reclaimed;
 };
 
 /* PCI config space */

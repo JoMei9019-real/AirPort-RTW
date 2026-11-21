@@ -154,7 +154,7 @@ bool AirPortRTW::start(IOService *provider)
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "1.3.1-beta.1");
+    setProperty("DriverBuild", "1.3.1-beta.2");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -261,9 +261,10 @@ bool AirPortRTW::start(IOService *provider)
     _ieee80211->setAutoRoamingEnabled(automatic && automatic->isTrue() && !autoDisabled);
     setProperty("ROAM_AUTO_DISABLED_BY_BOOT_ARG",autoDisabled?kOSBooleanTrue:kOSBooleanFalse);
     int noAWDLHop=0;
-    const bool hopsDisabled=PE_parse_boot_argn("-rtwnoawdlhop",&noAWDLHop,sizeof(noAWDLHop));
-    _ieee80211->setAWDLHopsDisabled(hopsDisabled);
-    setProperty("AWDL_HOPS_DISABLED_BY_BOOT_ARG",hopsDisabled?kOSBooleanTrue:kOSBooleanFalse);
+    const bool noHopBootArg = PE_parse_boot_argn("-rtwnoawdlhop",&noAWDLHop,sizeof(noAWDLHop));
+    // The 1.3.1 line keeps AWDL on the current radio channel by default.
+    _ieee80211->setAWDLHopsDisabled(true);
+    setProperty("AWDL_HOPS_DISABLED_BY_BOOT_ARG",noHopBootArg?kOSBooleanTrue:kOSBooleanFalse);
     setProperty("ROAM_SWITCH_ENABLED",switchEnabled?kOSBooleanTrue:kOSBooleanFalse);
 
     rtw88_force_wifi_only();
@@ -339,7 +340,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 1.3.1-beta.1 WPA3-Personal\n");
+    IOLog("AirPortRTW: 1.3.1-beta.2 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -400,13 +401,23 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
         bool busy = rtw88_be_tx_busy() != 0;
         bool backlog = busy && self->_diagLastBusy;
         self->_diagLastBusy = busy;
+        const auto *backend = self->_ieee80211;
+        const uint32_t ringFull = backend->txEventCount(RTW88Lifecycle::RingFull);
+        const uint32_t dmaDrops = backend->txEventCount(RTW88Lifecycle::DropDmaMap);
+        const uint32_t hciDrops = backend->txEventCount(RTW88Lifecycle::DropHci);
+        const uint32_t writeErrors = ringFull + dmaDrops + hciDrops;
+        const uint64_t posted = __atomic_load_n(&self->_compatPciDev->be_posted, __ATOMIC_RELAXED);
+        const uint64_t reclaimed = __atomic_load_n(&self->_compatPciDev->be_reclaimed, __ATOMIC_RELAXED);
+        self->setProperty("TX_BE_POSTED", posted, 64);
+        self->setProperty("TX_BE_RECLAIMED", reclaimed, 64);
         uint32_t gates = self->_txGateCount;
         bool toRing = !self->_diagRingPrimed || stalled || backlog ||
                       state != self->_diagLastState || visible != self->_diagLastVisible ||
                       agg != self->_diagLastAgg || stalled != self->_diagLastStalled ||
-                      gates != self->_diagLastGateCount ||
+                      gates != self->_diagLastGateCount || writeErrors != self->_diagLastWriteErrors ||
                       self->_diagnosticsSamples - self->_diagLastRingSample >= kDiagHeartbeatSamples;
         self->_diagLastGateCount = gates;
+        self->_diagLastWriteErrors = writeErrors;
         {
             IOOutputQueue *q = self->getOutputQueue();
             IONetworkData *d = q ? q->getStatisticsData() : nullptr;
@@ -422,12 +433,13 @@ void AirPortRTW::diagnosticsTimerFired(OSObject *owner, IOTimerEventSource *time
             const IOOutputQueueStats *qs =
                 (qd && qd->getSize() >= sizeof(IOOutputQueueStats))
                     ? (const IOOutputQueueStats *)qd->getBuffer() : nullptr;
-            IOLog("rtw88: DIAG sample=%llu state=%u visible=%d agg=%d rx_frames=%u be_avail=%u stalled=%d "
-                  "txq=%u gated=%d gates=%u qdrop=%u qstall=%u\n",
-                  self->_diagnosticsSamples, state, visible, agg,
+            IOLog("rtw88: DIAG sample=%llu uptime_ms=%llu state=%u visible=%d agg=%d rx_frames=%u be_avail=%u stalled=%d "
+                  "txq=%u gated=%d gates=%u qdrop=%u qstall=%u be_posted=%llu be_reclaimed=%llu tx_ring_full=%u tx_drop_dma_map=%u tx_drop_hci=%u\n",
+                  self->_diagnosticsSamples, (unsigned long long)(nowNs / 1000000ULL), state, visible, agg,
                   self->_ieee80211->receivedFrameCount(), rtw88_be_tx_avail(), stalled,
                   oq ? oq->getSize() : 0, self->_txGated ? 1 : 0, gates,
-                  qs ? qs->dropCount : 0, qs ? qs->stallCount : 0);
+                  qs ? qs->dropCount : 0, qs ? qs->stallCount : 0,
+                  (unsigned long long)posted, (unsigned long long)reclaimed, ringFull, dmaDrops, hciDrops);
             self->_diagLastRingSample = self->_diagnosticsSamples;
             self->_diagRingPrimed = true;
         } else {
@@ -2692,7 +2704,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 1.3.1-beta.1)", sizeof(label));
+            strlcat(label, " (AirPortRTW 1.3.1-beta.2)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));

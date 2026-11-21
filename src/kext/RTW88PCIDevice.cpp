@@ -594,21 +594,16 @@ UInt32 RTW88PCIDevice::outputPacket(mbuf_t m, void *param)
         freePacket(m);
         return kIOReturnOutputDropped;
     }
-    /*
-     * Backpressure instead of dropping.  When the BE ring is nearly full,
-     * rtw_pci_tx_write_data() would return -ENOSPC and rtw_tx() would FREE the
-     * skb — silently dropping it.  Under a sustained transfer those dropped
-     * frames (TCP ACKs/data) stall the connection.  Returning
-     * kIOReturnOutputStall makes IOGatedOutputQueue hold this exact packet and
-     * stop dispatching; resumeTxIfStalled() (fired from the IRQ bottom-half
-     * after tx_isr frees slots) re-services the queue.  Threshold leaves
-     * headroom so rtw_tx never actually hits -ENOSPC.
-     */
+    // Reserve headroom before encapsulation. A concurrent producer can still
+    // fill the ring before the PCI write, so honor the backend stall below.
     if (rtw88_be_tx_avail() < kRTW88TxStallAvail) {
         _txStalled = true;
         return kIOReturnOutputStall;
     }
-    return _ieee80211->outputPacket(m);
+    const UInt32 result = _ieee80211->outputPacket(m);
+    if (result == kIOReturnOutputStall)
+        _txStalled = true;
+    return result;
 }
 
 void RTW88PCIDevice::resumeTxIfStalled()
