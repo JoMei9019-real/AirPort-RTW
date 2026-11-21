@@ -32,7 +32,9 @@ tail = tail[:tail.index('\n}')]
 assert 'RTW88TxBatchScope<RTW88IEEE80211> batch(_ieee80211)' in controller
 assert controller.index('flushTxBatch();', controller.index('SInt32 AirPortRTW::stopDMA')) < controller.index('__atomic_store_n(&_dmaStopped', controller.index('SInt32 AirPortRTW::stopDMA'))
 assert 'flushTxBatch();' in method(cpp, 'void RTW88IEEE80211::powerOffGated()')
-assert 'rtw88_tx_batch_write' not in method(cpp, 'bool RTW88IEEE80211::txAWDLDataFrame(')
+awdl = method(cpp, 'bool RTW88IEEE80211::txAWDLDataFrame(')
+awdl_tail = awdl[awdl.index('    const bool submitted ='):]
+assert '_txBatch' not in awdl_tail
 pre = r'''
 #include "RTW88TxBatchScope.hpp"
 #include <cassert>
@@ -72,9 +74,11 @@ struct RTW88IEEE80211 {
  uint32_t _txBatchPending=0,_txBatchFrames=0,_txBatchFlushes=0;
  bool beginTxBatch();void endTxBatch();void flushTxBatch();
  bool submit(sk_buff*,uint16_t,bool=true);
+ bool submitAWDL(sk_buff*,mbuf_t);
 };
 '''
 submit = 'bool RTW88IEEE80211::submit(sk_buff *skb,uint16_t ethertype,bool qos){\nmbuf_t m=nullptr;ieee80211_tx_control ctrl{_sta};\n' + tail + '\n}\n'
+submit += 'bool RTW88IEEE80211::submitAWDL(sk_buff *skb,mbuf_t m){\n' + awdl_tail
 post = r'''
 int main(){
  Ops ops{normalTx};rtw_dev dev;ieee80211_hw hw{&dev,&ops};RTW88IEEE80211 b;b._hw=&hw;
@@ -94,6 +98,12 @@ int main(){
  {RTW88TxBatchScope<RTW88IEEE80211> scope(&b);sk_buff a,failed;
   assert(b.submit(&a,0x800));retCode=-ENOSPC;
   assert(!b.submit(&failed,0x800)&&failed.freed&&!a.freed&&pending==0);retCode=0;}
+ // AWDL is immediate even when the STA owns a batch. A rejected AWDL
+ // submission must return failure and release its skb exactly once.
+ {RTW88TxBatchScope<RTW88IEEE80211> scope(&b);sk_buff sta,awdl,failed;
+  assert(b.submit(&sta,0x800)&&pending==1);int before=kicks;
+  assert(b.submitAWDL(&awdl,nullptr)&&!awdl.freed&&kicks==before+1&&pending==0);
+  retCode=-ENOSPC;assert(!b.submitAWDL(&failed,nullptr)&&failed.freed);retCode=0;}
  // Early return/exception unwinding through the same RAII guard.
  auto stalled=[&](){RTW88TxBatchScope<RTW88IEEE80211> scope(&b);sk_buff a;b.submit(&a,0x800);return -1;};
  assert(stalled()==-1&&pending==0&&b._txBatchOwner==0);
