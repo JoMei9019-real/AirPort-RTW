@@ -2,6 +2,7 @@
 // Legacy4C peer layout and method signatures from xnpty/RTLAirLink b75abf4.
 #include <IOKit/IOService.h>
 #include <IOKit/IOWorkLoop.h>
+#include <IOKit/80211/IO80211Controller.h>
 #include <IOKit/80211/IO80211VirtualInterface.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSSymbol.h>
