@@ -41,7 +41,9 @@ jobs:
         run: python3 tests/replay_owly.py .deps/owly/tests/captures
       - name: Build driver and check optional diagnostic source
         run: |
-          make airport
+          make airport airbridge
+          plutil -lint build/out/AirBridge.kext/Contents/Info.plist
+          lipo build/out/AirBridge.kext/Contents/MacOS/AirBridge -verify_arch x86_64
           xcrun clang -Wall -Wextra -Werror -arch x86_64 -mmacosx-version-min=13.0 ctl/roam-test.c -framework IOKit -framework CoreFoundation -o build/out/rtw88-roam
           build/out/rtw88-roam --help
       - name: Verify native bundle and kernel stack
@@ -67,7 +69,7 @@ jobs:
           assert '_rtw_sae_begin' in defined and '_rtw8814a_hw_spec' in defined
           assert re.search(r'(?m)^[0-9a-fA-F]+ T _rtw88_airbridge_action_v1$', defined)
           strings = subprocess.check_output(['strings', binary], text=True)
-          assert '2.0.0-beta.23' in strings
+          assert '2.0.0-beta.24' in strings
           assert '__ZN23IO80211VirtualInterface16dequeueTxPacketsEP15TxPacketRequest' in unresolved
           assert 'AWDL_TX_PEER_PACKETS' in strings
           assert 'AWDL_TX_DATA_COMPLETED' in strings
@@ -82,12 +84,12 @@ jobs:
           print('PASS: release version, native symbols, driver options and scalar kernel CCMP')
           CHECK
           xcrun dwarfdump --uuid build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW >> "$GITHUB_STEP_SUMMARY"
-      - name: Package Beta 23 test artifact and verify contents
+      - name: Package Beta 24 test artifact and verify contents
         run: python3 scripts/package-release.py
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-2.0.0-beta.23
+          name: AirPortRTW-2.0.0-beta.24
           path: |
-            build/AirPortRTW-2.0.0-beta.23.zip
-            build/AirPortRTW-2.0.0-beta.23.zip.sha256
+            build/AirPortRTW-2.0.0-beta.24.zip
+            build/AirPortRTW-2.0.0-beta.24.zip.sha256
           if-no-files-found: error

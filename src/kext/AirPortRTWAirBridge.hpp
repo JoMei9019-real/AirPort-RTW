@@ -26,6 +26,8 @@ static_assert(sizeof(ActionMetadata) == 72);
 static_assert(offsetof(ActionMetadata, channelVersion) == 12);
 static_assert(offsetof(ActionMetadata, rssi) == 44);
 
+constexpr char kCategory[] = "AirPortRTWAirBridge";
+
 enum RequestFlag : uint32_t {
     kLocalPeerValid = 1U << 0,
 };

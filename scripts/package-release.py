@@ -27,7 +27,7 @@ def verify(path):
         assert archive.testzip() is None, 'Damaged release ZIP'
         names = archive.namelist()
         assert len(names) == len(set(names)), 'Duplicate archive entry'
-        assert {name.split('/')[0] for name in names} == {'AirPortRTW.kext', 'BOOT-ARGS.txt'}
+        assert {name.split('/')[0] for name in names} == {'AirPortRTW.kext', 'AirBridge.kext', 'BOOT-ARGS.txt'}
         assert all(not name.startswith('/') and '..' not in name.split('/') for name in names)
         assert not any(name.lower().endswith(('.zip', '.tar', '.gz')) for name in names)
         info = plistlib.loads(archive.read('AirPortRTW.kext/Contents/Info.plist'))
@@ -37,8 +37,15 @@ def verify(path):
         binary = archive.read(binary_name)
         assert struct.unpack_from('<II', binary) == (0xfeedfacf, 0x1000007), 'Expected thin x86_64 Mach-O'
         assert VERSION.encode() + b'\0' in binary
-        assert b'2.0.0-beta.23' in binary
+        assert b'2.0.0-beta.24' in binary
         assert archive.getinfo(binary_name).external_attr >> 16 & 0o111, 'Missing executable mode'
+        bridge_plist = plistlib.loads(archive.read('AirBridge.kext/Contents/Info.plist'))
+        assert bridge_plist['OSBundleLibraries'][info['CFBundleIdentifier']] == VERSION
+        bridge_name = 'AirBridge.kext/Contents/MacOS/' + bridge_plist['CFBundleExecutable']
+        bridge = archive.read(bridge_name)
+        assert struct.unpack_from('<II', bridge) == (0xfeedfacf, 0x1000007)
+        assert b'AirBridgeFamilyVerified' in bridge and b'AirPortRTWAirBridge' in bridge
+        assert archive.getinfo(bridge_name).external_attr >> 16 & 0o111
         for name in NOTICES.values():
             assert archive.read('AirPortRTW.kext/Contents/Resources/Notices/' + name)
         boot_args = archive.read('BOOT-ARGS.txt').decode('utf-8')
@@ -46,7 +53,7 @@ def verify(path):
         parsed = set(re.findall(r'PE_parse_boot_argn\("([^"]+)"', source))
         documented = set(re.findall(r'^(-rtw[a-z0-9]+)$', boot_args, re.M))
         assert parsed == documented, (parsed, documented)
-    print('PASS: release ZIP contains only AirPortRTW.kext and BOOT-ARGS.txt; version, architecture, modes, notices and boot arguments verified')
+    print('PASS: release ZIP contains AirPortRTW.kext, AirBridge.kext and BOOT-ARGS.txt; version, architecture, modes, notices and boot arguments verified')
 
 
 def package(kext, output):
@@ -56,6 +63,12 @@ def package(kext, output):
         stage = Path(temporary)
         bundle = stage / 'AirPortRTW.kext'
         shutil.copytree(kext, bundle, ignore=shutil.ignore_patterns('.DS_Store', '.gitkeep', '__MACOSX'))
+        bridge = stage / 'AirBridge.kext'
+        shutil.copytree(kext.parent / bridge.name, bridge)
+        bridge_notices = bridge / 'Contents/Resources/Notices'
+        bridge_notices.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / 'LICENSE', bridge_notices / 'GPL-2.0.txt')
+        shutil.copyfile(ROOT / 'AirBridge/NOTICE.md', bridge_notices / 'NOTICE.md')
         notices = bundle / 'Contents/Resources/Notices'
         notices.mkdir(parents=True, exist_ok=True)
         for source, name in NOTICES.items():
@@ -69,7 +82,7 @@ def package(kext, output):
                 name = file.relative_to(stage).as_posix()
                 entry = zipfile.ZipInfo(name)
                 entry.create_system = 3
-                mode = 0o755 if name == 'AirPortRTW.kext/Contents/MacOS/AirPortRTW' else 0o644
+                mode = 0o755 if name in ('AirPortRTW.kext/Contents/MacOS/AirPortRTW', 'AirBridge.kext/Contents/MacOS/AirBridge') else 0o644
                 entry.external_attr = (stat.S_IFREG | mode) << 16
                 archive.writestr(entry, file.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
     verify(output)
@@ -81,7 +94,7 @@ def package(kext, output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kext', type=Path, default=ROOT / 'build/out/AirPortRTW.kext')
-    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-2.0.0-beta.23.zip'))
+    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-2.0.0-beta.24.zip'))
     parser.add_argument('--verify', type=Path, help='Verify an existing ZIP without packaging')
     args = parser.parse_args()
     if args.verify:

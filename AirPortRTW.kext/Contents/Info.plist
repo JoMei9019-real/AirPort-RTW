@@ -15,7 +15,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>AirPortRTW for RTL88xx</string>
 	<key>CFBundleGetInfoString</key>
-	<string>AirPortRTW 2.0.0-beta.23 — AWDL test build</string>
+	<string>AirPortRTW 2.0.0-beta.24 — AWDL test build</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>

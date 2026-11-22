@@ -407,3 +407,17 @@ DEPFILES = $(ALL_OBJS:.o=.d) $(AIRPORT_KEXT_OBJS:.o=.d) $(AIRPORT_KMOD_OBJ:.o=.d
 
 # Compiler flags and ABI macros in this file affect every object.
 $(ALL_OBJS) $(AIRPORT_ALL_OBJS): Makefile
+
+.PHONY: airbridge
+airbridge: $(OUT_DIR)/AirBridge.kext/Contents/MacOS/AirBridge
+
+$(BUILD_DIR)/airport/AirBridge.o: AirBridge/AirBridge.cpp src/kext/AirPortRTWAirBridge.hpp | $(BUILD_DIR)/airport
+	$(CXX) $(KEXT_CXXFLAGS) -D__IO80211_TARGET=__MAC_13_0 -D__PRIVATE_SPI__ -c $< -o $@
+
+$(BUILD_DIR)/airport/bridge_kmod.o: $(KEXT_SRC)/kmod_info.c | $(BUILD_DIR)/airport
+	$(CC) $(KEXT_FLAGS) -DRTW88_BRIDGE_KMOD=1 -c $< -o $@
+
+$(OUT_DIR)/AirBridge.kext/Contents/MacOS/AirBridge: $(BUILD_DIR)/airport/AirBridge.o $(BUILD_DIR)/airport/bridge_kmod.o AirBridge/Info.plist
+	mkdir -p $(@D)
+	$(LD) $(AIRPORT_LDFLAGS) -o $@ $(filter %.o,$^)
+	cp AirBridge/Info.plist $(@D)/../Info.plist

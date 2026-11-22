@@ -145,7 +145,9 @@ OSDefineMetaClassAndStructors(AirPortRTW, IO80211Controller)
 
 bool AirPortRTW::init(OSDictionary *props)
 {
-    return super::init(props);
+    if (!super::init(props)) return false;
+    _bridgeCategory = OSSymbol::withCString(AirPortRTWAirBridge::kCategory);
+    return true;
 }
 
 /* Match the reference IO80211 driver's IO80211Controller lifecycle.  IONetworkController::
@@ -169,13 +171,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 bool AirPortRTW::start(IOService *provider)
 {
     setProperty("PM_DEFERRED_RX_FIX", "1.0.2-beta.1");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.23");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.24");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "2.0.0-beta.23");
+    setProperty("DriverBuild", "2.0.0-beta.24");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -362,7 +364,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 2.0.0-beta.23 WPA3-Personal\n");
+    IOLog("AirPortRTW: 2.0.0-beta.24 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -1248,6 +1250,7 @@ void AirPortRTW::stop(IOService *provider)
 void AirPortRTW::free()
 {
     teardown();
+    if (_bridgeCategory) _bridgeCategory->release();
     super::free();
 }
 
@@ -2764,7 +2767,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.23)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.24)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -4041,7 +4044,8 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
     bool presenceDue = false;
     const bool validatedPeer = _awdlManager->observeAction(frame, len, &presenceDue);
 
-    if (_awdlAppleActionRx) {
+    IOService *bridge = _bridgeCategory ? copyClientWithCategory(_bridgeCategory) : nullptr;
+    if (bridge || _awdlAppleActionRx) {
         /* Retain the local scheduler/parser regardless of this experiment.
          * Pass Apple's entry point the action body and radio metadata. Avoid
          * feeding the Legacy service/ARPA decompressor from the radio. */
@@ -4053,6 +4057,7 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
         if (body) IOFree(body, capacity);
         if (!copied) {
             if (packet) freePacket(packet);
+            if (bridge) bridge->release();
             ++_awdlAppleActionDrops;
             return;
         }
@@ -4076,7 +4081,14 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
             handoffNs / 1000, validatedPeer ? uint32_t(kLocalPeerValid) : 0U, 0,
         };
         ActionResult result = {};
-        rtw88_airbridge_action_v1(&request, &result);
+        IOReturn handled = kIOReturnUnsupported;
+        if (bridge) {
+            handled = bridge->callPlatformFunction(_bridgeCategory, false,
+                const_cast<ActionRequest *>(&request), &result, this, nullptr);
+            bridge->release();
+        }
+        if (handled != kIOReturnSuccess)
+            rtw88_airbridge_action_v1(&request, &result);
         freePacket(packet);
         _airBridgeActions.record(result.flags);
         if (++_awdlAppleActionInputs == 1 || _awdlAppleActionInputs % 128 == 0) {

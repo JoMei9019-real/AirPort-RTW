@@ -346,6 +346,7 @@ private:
     /* r7: last logged GET signature per diagnosed selector (change-only log). */
     uint64_t                _getDiagLast[5] = {~0ULL, ~0ULL, ~0ULL, ~0ULL, ~0ULL};
     void logGetResult(int request_number, SInt32 ret, const void *data);
+    const OSSymbol *_bridgeCategory = nullptr;
     bool _awdlAppleActionRx = false;
     AirPortRTWAirBridge::ActionCounters _airBridgeActions;
     uint32_t _awdlAppleActionInputs = 0;
