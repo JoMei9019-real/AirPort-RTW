@@ -3,8 +3,14 @@
 Replace AirPortRTW.kext and add AirBridge.kext to EFI/OC/Kexts. In
 Kernel/Add enable AirPortRTW first and AirBridge second. AirBridge uses
 Contents/MacOS/AirBridge and Contents/Info.plist. Keep the existing Bluetooth
-firmware and BroadTek setup. Reboot. The companion activates the action path
-when it attaches, including with the diagnostic boot argument absent.
+firmware and BroadTek setup. For the first boot leave
+`-rtwairbridgenative`, `-rtwairbridgepeeradd` and the earlier experimental
+`-rtwawdlapplerx` out of boot-args. Keep a bootable copy of the previous EFI.
+Check Wi-Fi, sleep/wake and `AirBridgeMode = passive` first.
+
+For a separate observer test add only `-rtwairbridgenative` and reboot.
+Native peer creation requires a further explicit `-rtwairbridgepeeradd` test
+after the observer has demonstrated stable processing.
 
 AirBridge matches the AirPortRTW controller using its ABI property and handles
 action frames synchronously on its workloop. Native access requires the loaded
@@ -19,7 +25,7 @@ before and after, then try a small file in both directions.
 
 ```sh
 kmutil showloaded | grep -E 'IO80211FamilyLegacy|jomei9019\.(AirBridge|AirPortRTW)'
-ioreg -r -c RTWAirBridge -l | grep AirBridgeFamilyVerified
+ioreg -r -c RTWAirBridge -l | grep -E 'AirBridgeMode|AirBridgeFamilyVerified'
 ioreg -r -c AirPortRTW -l | grep -E '"(DriverBuild|AWDL_BRIDGE_[^"]+|AWDL_RX_APPLE_ACTION_INPUTS|AWDL_DATA_RX|AWDL_AIRDROP_MDNS_RX)"'
 ```
 

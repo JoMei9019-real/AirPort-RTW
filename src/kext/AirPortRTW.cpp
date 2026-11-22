@@ -286,6 +286,11 @@ bool AirPortRTW::start(IOService *provider)
     int noAWDLHop=0;
     const bool hopsDisabled=PE_parse_boot_argn("-rtwnoawdlhop",&noAWDLHop,sizeof(noAWDLHop));
     _ieee80211->setAWDLHopsDisabled(hopsDisabled);
+    int bridgeOption = 0;
+    _airBridgeNativeRequested = PE_parse_boot_argn("-rtwairbridgenative", &bridgeOption, sizeof(bridgeOption));
+    const bool allowPeerAdd = PE_parse_boot_argn("-rtwairbridgepeeradd", &bridgeOption, sizeof(bridgeOption));
+    setProperty("AirBridgeNativeRequested", _airBridgeNativeRequested ? kOSBooleanTrue : kOSBooleanFalse);
+    setProperty("AirBridgePeerAddRequested", _airBridgeNativeRequested && allowPeerAdd ? kOSBooleanTrue : kOSBooleanFalse);
     int awdlAppleRx = 0;
     _awdlAppleActionRx = PE_parse_boot_argn("-rtwawdlapplerx", &awdlAppleRx, sizeof(awdlAppleRx));
     setProperty("AWDL_RX_APPLE_ACTION_ENABLED", _awdlAppleActionRx ? kOSBooleanTrue : kOSBooleanFalse);
@@ -4044,7 +4049,7 @@ void AirPortRTW::injectRxActionFrame(const uint8_t *frame, uint32_t len,
     bool presenceDue = false;
     const bool validatedPeer = _awdlManager->observeAction(frame, len, &presenceDue);
 
-    IOService *bridge = _bridgeCategory ? copyClientWithCategory(_bridgeCategory) : nullptr;
+    IOService *bridge = _airBridgeNativeRequested && _bridgeCategory ? copyClientWithCategory(_bridgeCategory) : nullptr;
     if (bridge || _awdlAppleActionRx) {
         /* Retain the local scheduler/parser regardless of this experiment.
          * Pass Apple's entry point the action body and radio metadata. Avoid

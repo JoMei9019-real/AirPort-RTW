@@ -69,6 +69,7 @@ uint32_t processedFrames(const OSObject *manager)
 class RTWAirBridge : public IOService {
     OSDeclareDefaultStructors(RTWAirBridge)
     bool familyReady = false;
+    bool allowPeerAdd = false;
     uint64_t nextAdmissionUS = 0;
 public:
     bool start(IOService *provider) override;
@@ -79,7 +80,11 @@ OSDefineMetaClassAndStructors(RTWAirBridge, IOService)
 bool RTWAirBridge::start(IOService *provider)
 {
     if (!IOService::start(provider)) return false;
-    familyReady = supportedFamily();
+    const bool enabled = provider->getProperty("AirBridgeNativeRequested") == kOSBooleanTrue;
+    familyReady = enabled && supportedFamily();
+    allowPeerAdd = familyReady && provider->getProperty("AirBridgePeerAddRequested") == kOSBooleanTrue;
+    setProperty("AirBridgeMode", !enabled ? "passive" : !familyReady ? "unsupported-family" :
+                allowPeerAdd ? "peer-admission" : "observe");
     setProperty("AirBridgeFamilyVerified", familyReady ? kOSBooleanTrue : kOSBooleanFalse);
     return true;
 }
@@ -106,9 +111,7 @@ IOReturn RTWAirBridge::callPlatformFunction(const OSSymbol *name, bool wait,
     if (!peer || strcmp(peer->getMetaClass()->getClassName(), "IO80211AWDLPeerManager") ||
         peer->getMetaClass()->getClassSize() != 0xc528) return kIOReturnNotReady;
 
-    lockPeer(peer);
     if (!(readField<uint32_t>(peer, 0x8528) & 2) || !readField<uint32_t>(peer, 0xcd4)) {
-        unlockPeer(peer);
         return kIOReturnNotReady;
     }
     ActionMetadata meta = *req->metadata;
@@ -119,10 +122,11 @@ IOReturn RTWAirBridge::callPlatformFunction(const OSSymbol *name, bool wait,
     out->flags = kNativeObserved;
     if (processedFrames(peer) != before) {
         out->flags |= kNativeProcessed | kNativePeerLookup;
+        lockPeer(peer);
         auto *found = findPeer(peer, meta.source);
         const uint8_t *local = reinterpret_cast<const uint8_t *>(peer) + 0x2801;
         const uint8_t zero[6] = {};
-        if (!found && (req->flags & kLocalPeerValid) && meta.rssi < 0 &&
+        if (allowPeerAdd && !found && (req->flags & kLocalPeerValid) && meta.rssi < 0 &&
             meta.rssi >= readField<int32_t>(peer, 0x6e84) && !(meta.source[0] & 1) &&
             memcmp(meta.source, zero, 6) && !(local[0] & 1) && memcmp(local, zero, 6) &&
             memcmp(meta.source, local, 6) && req->handoffUS >= nextAdmissionUS &&
@@ -132,7 +136,7 @@ IOReturn RTWAirBridge::callPlatformFunction(const OSSymbol *name, bool wait,
             found = findPeer(peer, meta.source);
         }
         if (found && matchesMAC(peer, found, meta.source) == 1) out->flags |= kNativePeerMatched;
+        unlockPeer(peer);
     }
-    unlockPeer(peer);
     return kIOReturnSuccess;
 }

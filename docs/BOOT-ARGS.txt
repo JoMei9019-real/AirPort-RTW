@@ -47,6 +47,14 @@ Use the spelling shown below; these switches do not need '=1'.
   on your hardware.
   Default: use the existing action-frame handoff.
 
+-rtwairbridgenative
+  Enables the optional AirBridge native action observer on a verified Legacy
+  family. Default: AirBridge attaches passively.
+
+-rtwairbridgepeeradd
+  Allows the observer to request native peer admission for validated frames.
+  Requires -rtwairbridgenative. Default: peer admission disabled.
+
 Example: to turn off automatic roaming, add only -rtwnoautoroam to your
 existing boot-args. Avoid enabling all diagnostic switches together: change
 one option at a time so you can tell which one affects the problem.
