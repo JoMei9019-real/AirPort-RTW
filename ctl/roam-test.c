@@ -2,6 +2,7 @@
 #include <IOKit/IOKitLib.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdio.h>
+#include <mach/mach_error.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -185,6 +186,7 @@ static void usage(void) {
          "sudo rtw88-roam --discover          (bounded 2.4/5 GHz scan; DFS passive)\n"
          "sudo rtw88-roam --best              (recommend from fresh scan cache)\n"
          "sudo rtw88-roam --roam-best         (discover + 5 GHz priority + switch if useful)\n"
+         "sudo rtw88-roam --airbridge passive|observe|peer-admission\n"
          "sudo rtw88-roam --refresh\n"
          "sudo rtw88-roam --check BSSID       (preflight only)\n"
          "sudo rtw88-roam --scan BSSID        (one known channel; DFS passive)\n"
@@ -212,6 +214,15 @@ int main(int argc,char **argv) {
     else if(argc>=2&&!strcmp(argv[1],"--watch")) {
         char *end=NULL;unsigned long duration=argc==3?strtoul(argv[2],&end,10):60;
         if(duration>=1&&duration<=3600&&(argc==2||(*argv[2]&&!end[0])))result=watch((unsigned)duration);
+    } else if(argc==3 && !strcmp(argv[1],"--airbridge")) {
+        if (!strcmp(argv[2],"passive") || !strcmp(argv[2],"observe") || !strcmp(argv[2],"peer-admission")) {
+            CFStringRef mode=CFStringCreateWithCString(NULL,argv[2],kCFStringEncodingUTF8);
+            kern_return_t ret=mode ? IORegistryEntrySetCFProperty(service,CFSTR("AirPortRTWAirBridgeSetMode"),mode) : kIOReturnNoMemory;
+            if(mode)CFRelease(mode);
+            if(ret==KERN_SUCCESS)printf("AirBridge: %s\n",argv[2]);
+            else fprintf(stderr,"AirBridge: %s (0x%08x)\n",mach_error_string(ret),(unsigned)ret);
+            result=ret==KERN_SUCCESS?0:1;
+        }
     } else if(argc==3&&!strcmp(argv[1],"--awdl-hops")) {
         const char *name=!strcmp(argv[2],"off")?"awdl-hops-off":!strcmp(argv[2],"on")?"awdl-hops-on":NULL;
         if(name)result=command(name,NULL,1);

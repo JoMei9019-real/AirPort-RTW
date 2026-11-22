@@ -171,13 +171,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 bool AirPortRTW::start(IOService *provider)
 {
     setProperty("PM_DEFERRED_RX_FIX", "1.0.2-beta.1");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.24");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.25");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "2.0.0-beta.24");
+    setProperty("DriverBuild", "2.0.0-beta.25");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -369,7 +369,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 2.0.0-beta.24 WPA3-Personal\n");
+    IOLog("AirPortRTW: 2.0.0-beta.25 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -591,6 +591,30 @@ void AirPortRTW::publishRoamDiagnostics()
 IOReturn AirPortRTW::setProperties(OSObject *properties)
 {
     auto *dict=OSDynamicCast(OSDictionary,properties);
+    if (dict && dict->getObject(AirPortRTWAirBridge::kSetMode)) {
+        if (IOUserClient::clientHasPrivilege(current_task(), kIOClientPrivilegeAdministrator) != kIOReturnSuccess)
+            return kIOReturnNotPrivileged;
+        auto *mode = OSDynamicCast(OSString, dict->getObject(AirPortRTWAirBridge::kSetMode));
+        if (!mode || !(mode->isEqualTo("passive") || mode->isEqualTo("observe") ||
+                       mode->isEqualTo("peer-admission"))) return kIOReturnBadArgument;
+        if (!_workLoop || !_bridgeCategory) return kIOReturnNotReady;
+        return _workLoop->runAction([](OSObject *owner, void *arg, void *, void *, void *) -> IOReturn {
+            auto *self = static_cast<AirPortRTW *>(owner);
+            if (self->_shutdown || self->_pmTransition) return kIOReturnNotReady;
+            auto *bridge = self->copyClientWithCategory(self->_bridgeCategory);
+            if (!bridge) return kIOReturnNotAttached;
+            IOReturn ret = bridge->callPlatformFunction(AirPortRTWAirBridge::kSetMode,
+                                                      false, arg, nullptr, self, nullptr);
+            bridge->release();
+            if (ret == kIOReturnSuccess) {
+                auto *requested = static_cast<OSString *>(arg);
+                self->_airBridgeNativeRequested = !requested->isEqualTo("passive");
+                self->setProperty("AirBridgeNativeRequested", self->_airBridgeNativeRequested ? kOSBooleanTrue : kOSBooleanFalse);
+                self->setProperty("AirBridgePeerAddRequested", requested->isEqualTo("peer-admission") ? kOSBooleanTrue : kOSBooleanFalse);
+            }
+            return ret;
+        }, this, mode);
+    }
     if (dict && dict->getObject("WPA3Connect")) {
         if(IOUserClient::clientHasPrivilege(current_task(),kIOClientPrivilegeAdministrator)!=kIOReturnSuccess)
             return kIOReturnNotPrivileged;
@@ -2772,7 +2796,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.24)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.25)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));

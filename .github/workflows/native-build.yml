@@ -69,7 +69,7 @@ jobs:
           assert '_rtw_sae_begin' in defined and '_rtw8814a_hw_spec' in defined
           assert re.search(r'(?m)^[0-9a-fA-F]+ T _rtw88_airbridge_action_v1$', defined)
           strings = subprocess.check_output(['strings', binary], text=True)
-          assert '2.0.0-beta.24' in strings
+          assert '2.0.0-beta.25' in strings
           assert '__ZN23IO80211VirtualInterface16dequeueTxPacketsEP15TxPacketRequest' in unresolved
           assert 'AWDL_TX_PEER_PACKETS' in strings
           assert 'AWDL_TX_DATA_COMPLETED' in strings
@@ -84,12 +84,12 @@ jobs:
           print('PASS: release version, native symbols, driver options and scalar kernel CCMP')
           CHECK
           xcrun dwarfdump --uuid build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW >> "$GITHUB_STEP_SUMMARY"
-      - name: Package Beta 24 test artifact and verify contents
+      - name: Package Beta 25 test artifact and verify contents
         run: python3 scripts/package-release.py
       - uses: actions/upload-artifact@v4
         with:
-          name: AirPortRTW-2.0.0-beta.24
+          name: AirPortRTW-2.0.0-beta.25
           path: |
-            build/AirPortRTW-2.0.0-beta.24.zip
-            build/AirPortRTW-2.0.0-beta.24.zip.sha256
+            build/AirPortRTW-2.0.0-beta.25.zip
+            build/AirPortRTW-2.0.0-beta.25.zip.sha256
           if-no-files-found: error

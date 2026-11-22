@@ -70,6 +70,7 @@ class RTWAirBridge : public IOService {
     OSDeclareDefaultStructors(RTWAirBridge)
     bool familyReady = false;
     bool allowPeerAdd = false;
+    IOReturn configure(bool enabled, bool admit);
     uint64_t nextAdmissionUS = 0;
 public:
     bool start(IOService *provider) override;
@@ -81,17 +82,34 @@ bool RTWAirBridge::start(IOService *provider)
 {
     if (!IOService::start(provider)) return false;
     const bool enabled = provider->getProperty("AirBridgeNativeRequested") == kOSBooleanTrue;
+    configure(enabled, provider->getProperty("AirBridgePeerAddRequested") == kOSBooleanTrue);
+    return true;
+}
+
+IOReturn RTWAirBridge::configure(bool enabled, bool admit)
+{
     familyReady = enabled && supportedFamily();
-    allowPeerAdd = familyReady && provider->getProperty("AirBridgePeerAddRequested") == kOSBooleanTrue;
+    allowPeerAdd = familyReady && admit;
     setProperty("AirBridgeMode", !enabled ? "passive" : !familyReady ? "unsupported-family" :
                 allowPeerAdd ? "peer-admission" : "observe");
     setProperty("AirBridgeFamilyVerified", familyReady ? kOSBooleanTrue : kOSBooleanFalse);
-    return true;
+    return enabled && !familyReady ? kIOReturnUnsupported : kIOReturnSuccess;
 }
 
 IOReturn RTWAirBridge::callPlatformFunction(const OSSymbol *name, bool wait,
     void *arg1, void *arg2, void *controller, void *arg4)
 {
+    if (name && name->isEqualTo(kSetMode)) {
+        IOService *owner = getProvider();
+        if (!owner || owner != controller || isInactive() || !owner->getWorkLoop() ||
+            !owner->getWorkLoop()->inGate()) return kIOReturnNotReady;
+        const auto *mode = OSDynamicCast(OSString, static_cast<OSObject *>(arg1));
+        if (!mode) return kIOReturnBadArgument;
+        if (mode->isEqualTo("passive")) return configure(false, false);
+        if (mode->isEqualTo("observe")) return configure(true, false);
+        if (mode->isEqualTo("peer-admission")) return configure(true, true);
+        return kIOReturnBadArgument;
+    }
     if (!name || !name->isEqualTo(kCategory))
         return IOService::callPlatformFunction(name, wait, arg1, arg2, controller, arg4);
     const auto *req = static_cast<const ActionRequest *>(arg1);

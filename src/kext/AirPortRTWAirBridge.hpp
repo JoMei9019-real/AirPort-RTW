@@ -28,6 +28,8 @@ static_assert(offsetof(ActionMetadata, rssi) == 44);
 
 constexpr char kCategory[] = "AirPortRTWAirBridge";
 
+constexpr char kSetMode[] = "AirPortRTWAirBridgeSetMode";
+
 enum RequestFlag : uint32_t {
     kLocalPeerValid = 1U << 0,
 };

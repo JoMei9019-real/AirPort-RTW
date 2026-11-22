@@ -27,9 +27,11 @@ def verify(path):
         assert archive.testzip() is None, 'Damaged release ZIP'
         names = archive.namelist()
         assert len(names) == len(set(names)), 'Duplicate archive entry'
-        assert {name.split('/')[0] for name in names} == {'AirPortRTW.kext', 'AirBridge.kext', 'BOOT-ARGS.txt'}
+        assert {name.split('/')[0] for name in names} == {'AirPortRTW.kext', 'AirBridge.kext', 'BOOT-ARGS.txt', 'rtw88-roam'}
         assert all(not name.startswith('/') and '..' not in name.split('/') for name in names)
         assert not any(name.lower().endswith(('.zip', '.tar', '.gz')) for name in names)
+        assert archive.getinfo('rtw88-roam').external_attr >> 16 & 0o111
+        assert b'--airbridge' in archive.read('rtw88-roam')
         info = plistlib.loads(archive.read('AirPortRTW.kext/Contents/Info.plist'))
         assert info['CFBundleVersion'] == info['CFBundleShortVersionString'] == VERSION
         assert 'beta' in info['CFBundleGetInfoString'].lower()
@@ -37,7 +39,7 @@ def verify(path):
         binary = archive.read(binary_name)
         assert struct.unpack_from('<II', binary) == (0xfeedfacf, 0x1000007), 'Expected thin x86_64 Mach-O'
         assert VERSION.encode() + b'\0' in binary
-        assert b'2.0.0-beta.24' in binary
+        assert b'2.0.0-beta.25' in binary
         assert archive.getinfo(binary_name).external_attr >> 16 & 0o111, 'Missing executable mode'
         bridge_plist = plistlib.loads(archive.read('AirBridge.kext/Contents/Info.plist'))
         assert bridge_plist['OSBundleLibraries'][info['CFBundleIdentifier']] == VERSION
@@ -63,6 +65,7 @@ def package(kext, output):
         stage = Path(temporary)
         bundle = stage / 'AirPortRTW.kext'
         shutil.copytree(kext, bundle, ignore=shutil.ignore_patterns('.DS_Store', '.gitkeep', '__MACOSX'))
+        shutil.copyfile(kext.parent / 'rtw88-roam', stage / 'rtw88-roam')
         bridge = stage / 'AirBridge.kext'
         shutil.copytree(kext.parent / bridge.name, bridge)
         bridge_notices = bridge / 'Contents/Resources/Notices'
@@ -82,7 +85,7 @@ def package(kext, output):
                 name = file.relative_to(stage).as_posix()
                 entry = zipfile.ZipInfo(name)
                 entry.create_system = 3
-                mode = 0o755 if name in ('AirPortRTW.kext/Contents/MacOS/AirPortRTW', 'AirBridge.kext/Contents/MacOS/AirBridge') else 0o644
+                mode = 0o755 if name in ('rtw88-roam', 'AirPortRTW.kext/Contents/MacOS/AirPortRTW', 'AirBridge.kext/Contents/MacOS/AirBridge') else 0o644
                 entry.external_attr = (stat.S_IFREG | mode) << 16
                 archive.writestr(entry, file.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
     verify(output)
@@ -94,7 +97,7 @@ def package(kext, output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kext', type=Path, default=ROOT / 'build/out/AirPortRTW.kext')
-    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-2.0.0-beta.24.zip'))
+    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-2.0.0-beta.25.zip'))
     parser.add_argument('--verify', type=Path, help='Verify an existing ZIP without packaging')
     args = parser.parse_args()
     if args.verify:

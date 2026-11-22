@@ -47,6 +47,12 @@ Use the spelling shown below; these switches do not need '=1'.
   on your hardware.
   Default: use the existing action-frame handoff.
 
+With Beta 25 the included tool can switch modes until reboot:
+  sudo ./rtw88-roam --airbridge observe
+  sudo ./rtw88-roam --airbridge peer-admission
+  sudo ./rtw88-roam --airbridge passive
+The boot defaults below are optional.
+
 -rtwairbridgenative
   Enables the optional AirBridge native action observer on a verified Legacy
   family. Default: AirBridge attaches passively.
