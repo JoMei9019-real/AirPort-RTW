@@ -39,14 +39,16 @@ def verify(path):
         binary = archive.read(binary_name)
         assert struct.unpack_from('<II', binary) == (0xfeedfacf, 0x1000007), 'Expected thin x86_64 Mach-O'
         assert VERSION.encode() + b'\0' in binary
-        assert b'2.0.0-beta.25' in binary
+        assert b'2.0.0-beta.26' in binary and b'AWDL_SYNC_REQUESTED' in binary
         assert archive.getinfo(binary_name).external_attr >> 16 & 0o111, 'Missing executable mode'
         bridge_plist = plistlib.loads(archive.read('AirBridge.kext/Contents/Info.plist'))
         assert bridge_plist['OSBundleLibraries'][info['CFBundleIdentifier']] == VERSION
+        assert bridge_plist['CFBundleVersion'] == '0.1.2'
         bridge_name = 'AirBridge.kext/Contents/MacOS/' + bridge_plist['CFBundleExecutable']
         bridge = archive.read(bridge_name)
         assert struct.unpack_from('<II', bridge) == (0xfeedfacf, 0x1000007)
         assert b'AirBridgeFamilyVerified' in bridge and b'AirPortRTWAirBridge' in bridge
+        assert b'AirBridgeActionStage' in bridge and b'peer-sync-inactive' in bridge
         assert archive.getinfo(bridge_name).external_attr >> 16 & 0o111
         for name in NOTICES.values():
             assert archive.read('AirPortRTW.kext/Contents/Resources/Notices/' + name)
@@ -97,7 +99,7 @@ def package(kext, output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kext', type=Path, default=ROOT / 'build/out/AirPortRTW.kext')
-    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-2.0.0-beta.25.zip'))
+    parser.add_argument('--output', type=Path, default=ROOT / ('build/AirPortRTW-2.0.0-beta.26.zip'))
     parser.add_argument('--verify', type=Path, help='Verify an existing ZIP without packaging')
     args = parser.parse_args()
     if args.verify:

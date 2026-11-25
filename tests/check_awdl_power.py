@@ -5,7 +5,7 @@ root = pathlib.Path(__file__).resolve().parents[1]
 s = (root/'src/kext/RTW88AWDLManager.cpp').read_text()
 def method(name):
     import re
-    match = re.search(r'(?:void|bool) RTW88AWDLManager::'+name+r'\([^\n]*\)\n\{', s)
+    match = re.search(r'(?:void|bool|IOReturn) RTW88AWDLManager::'+name+r'\([^\n]*\)\n\{', s)
     start = match.start(); pos = s.index('{', match.start()); depth = 1; end = pos+1
     while depth:
         if s[end] == '{': depth += 1
@@ -19,6 +19,19 @@ pre = r'''
 #include <mutex>
 #include <thread>
 #include <iostream>
+using UInt = unsigned;
+using IOReturn = int;
+enum { kIOReturnSuccess, kIOReturnNotReady, kIOReturnNoMemory };
+enum { APPLE80211_VIF_AWDL, APPLE80211_VIF_P2P_DEVICE, APPLE80211_VIF_P2P_GO };
+constexpr char kPendingAppleSync[] = "AirPortRTWPendingSyncRequest";
+static const bool enabledValue=true, disabledValue=false;
+static auto kOSBooleanTrue=&enabledValue, kOSBooleanFalse=&disabledValue;
+struct IO80211VirtualInterface {
+ const bool *pending=nullptr;
+ const bool *getProperty(const char *) { return pending; }
+ bool setProperty(const char *, const bool *value) { pending=value; return true; }
+ void removeProperty(const char *) { pending=nullptr; }
+};
 struct Packet { unsigned length; uint8_t dst; };
 using mbuf_t = Packet *;
 unsigned freed = 0;
@@ -38,7 +51,16 @@ struct RTW88AWDLManager {
  std::recursive_mutex gate; std::recursive_mutex *_workLoop=&gate; void *_owner=nullptr;
  Backend backend; Backend *_backend=&backend; Timer timer; Timer *_timer=&timer;
  bool _timerAttached=true, _syncEnabled=true, _powerSuspended=false;
- void *_awdlInterface=this, *_airTemplate=this;
+ IO80211VirtualInterface vif, *_awdlInterface=&vif, *_p2pInterface=nullptr;
+ void *_airTemplate=this;
+ bool _appleSyncRequested=false;
+ unsigned _appleControlMask=0;
+ static constexpr unsigned kAppleCtlVIF=1;
+ uint64_t _vifEnabledUS=0, _lastAppleControlUS=0;
+ bool appleSyncRequested(IO80211VirtualInterface *vif=nullptr);
+ IOReturn setSyncEnabled(IO80211VirtualInterface *vif, bool enabled);
+ void setVirtualInterface(UInt role, IO80211VirtualInterface *vif);
+ void clearVirtualInterface(IO80211VirtualInterface *vif);
  unsigned _powerSuspends=0, _powerResumes=0, _lastMIFEAW=0; bool _lastMIFEAWValid=false;
  uint64_t _nextActionUS=0,_nextPSFUS=0,_nextSocialSweepUS=0,_fallbackDeadlineUS=0;
  struct Pending { mbuf_t packet=nullptr; uint64_t queuedUS=0; } _pending[128];
@@ -48,13 +70,39 @@ struct RTW88AWDLManager {
  bool powerSuspended() const { return __atomic_load_n(&_powerSuspended,__ATOMIC_ACQUIRE); }
  static uint64_t nowUS() { return 1000; }
  void publishStats() {}
- void flushActions() { assert(powerSuspended() && !timer.armed); ++actionFlushes; }
+ void flushActions() { assert(!timer.armed); ++actionFlushes; }
  void scheduleDiscovery(); void suspendForPowerTransition(); void resumeAfterPowerTransition();
  void arm(uint32_t); bool enqueueData(mbuf_t); void flushData();
 };
 '''
 post = r'''
+void testAppleSyncRequests() {
+ RTW88AWDLManager m;
+ IO80211VirtualInterface other;
+ assert(m._syncEnabled && !m.appleSyncRequested());
+ assert(m.setSyncEnabled(&m.vif,true)==kIOReturnSuccess);
+ assert(m.appleSyncRequested() && m.appleSyncRequested(&m.vif));
+ m.setVirtualInterface(APPLE80211_VIF_AWDL,&m.vif);
+ assert(m.appleSyncRequested() && !m.appleSyncRequested(&other));
+ assert(m.setSyncEnabled(&other,false)==kIOReturnNotReady && m.appleSyncRequested());
+ assert(m.setSyncEnabled(&m.vif,false)==kIOReturnSuccess);
+ assert(!m._syncEnabled && !m.appleSyncRequested() && !m.timer.armed);
+ m.clearVirtualInterface(&m.vif);
+ assert(m.setSyncEnabled(&other,true)==kIOReturnSuccess && m.appleSyncRequested(&other));
+ assert(!m.appleSyncRequested() && !m.appleSyncRequested(&m.vif));
+ m.setVirtualInterface(APPLE80211_VIF_AWDL,&other);
+ assert(m.appleSyncRequested() && m._syncEnabled && !other.pending);
+ m.clearVirtualInterface(&other);
+ m.setVirtualInterface(APPLE80211_VIF_AWDL,&other);
+ assert(!m.appleSyncRequested() && m._syncEnabled);
+ m.clearVirtualInterface(&other);
+ assert(m.setSyncEnabled(&m.vif,false)==kIOReturnSuccess);
+ m.setVirtualInterface(APPLE80211_VIF_AWDL,&m.vif);
+ assert(!m._syncEnabled && !m.appleSyncRequested());
+ std::cout << "PASS: bootstrap, early SET 117, enable/disable and VIF replacement\n";
+}
 int main() {
+ testAppleSyncRequests();
  RTW88AWDLManager m;
  assert(m.enqueueData(new Packet{100,1}));
  assert(m._queueCount==1 && m.timer.armed);
@@ -82,7 +130,7 @@ int main() {
  std::cout << "PASS: suspend cancels timers/flushes ownership, blocks late re-arm/enqueue, idempotent stop, powered-only resume, discovery/suspend race\n";
 }
 '''
-methods=''.join(method(n) for n in ['scheduleDiscovery','suspendForPowerTransition','resumeAfterPowerTransition','arm','flushData','enqueueData'])
+methods=''.join(method(n) for n in ['appleSyncRequested','setSyncEnabled','setVirtualInterface','clearVirtualInterface','scheduleDiscovery','suspendForPowerTransition','resumeAfterPowerTransition','arm','flushData','enqueueData'])
 with tempfile.TemporaryDirectory() as d:
     p=pathlib.Path(d); (p/'test.cpp').write_text(pre+methods+post)
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-pthread','-fsanitize=address,undefined','-fno-omit-frame-pointer','-g',str(p/'test.cpp'),'-o',str(p/'test')],check=True)

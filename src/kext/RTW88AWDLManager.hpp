@@ -54,7 +54,8 @@ public:
     IO80211VirtualInterface *p2pInterface() const { return _p2pInterface; }
 
     bool syncEnabled() const { return _syncEnabled; }
-    void setSyncEnabled(bool enabled);
+    bool appleSyncRequested(IO80211VirtualInterface *interface = nullptr);
+    IOReturn setSyncEnabled(IO80211VirtualInterface *interface, bool enabled);
     void noteAppleControl(uint32_t bit);
     uint32_t appleControlMask() const { return _appleControlMask; }
     void setLocalAddress(const uint8_t *mac);
@@ -254,5 +255,6 @@ private:
     uint32_t _synchronizationFramePeriod = 0;
     bool _syncParamsValid = false;
     bool _syncEnabled = true;
+    bool _appleSyncRequested = false;
     bool _p2pEnabled = false;
 };

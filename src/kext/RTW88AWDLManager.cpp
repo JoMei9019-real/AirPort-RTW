@@ -9,6 +9,7 @@
 #include <mach/mach_time.h>
 
 namespace {
+constexpr char kPendingAppleSync[] = "AirPortRTWPendingSyncRequest";
 constexpr uint64_t kAWDLPeerLifetimeUS = 5000000ULL;
 constexpr uint64_t kAirDropReceiverIntentLifetimeUS = 60000000ULL;
 template <typename R> struct AWDLResult {
@@ -55,6 +56,7 @@ bool RTW88AWDLManager::init(RTW88IEEE80211 *backend, IOWorkLoop *workLoop,
     if (_workLoop->addEventSource(_timer) != kIOReturnSuccess) return false;
     _timerAttached = true;
     _syncEnabled = true;
+    _appleSyncRequested = false;
     _p2pEnabled = false;
     _electionMetric = 0;
     _electionId = 0;
@@ -189,6 +191,7 @@ void RTW88AWDLManager::reset()
     _backend = nullptr;
     _workLoop = nullptr;
     _syncEnabled = true;
+    _appleSyncRequested = false;
     _p2pEnabled = false;
     _electionMetric = 0;
     _electionId = 0;
@@ -220,6 +223,13 @@ void RTW88AWDLManager::setVirtualInterface(UInt role, IO80211VirtualInterface *i
 {
     return awdlGated<void>(_workLoop, _owner, [&]() -> void {
     if (role == APPLE80211_VIF_AWDL) {
+        if (_awdlInterface != interface && interface) {
+            // SET 117 can arrive synchronously while IO80211 attaches this VIF.
+            auto *pending = interface->getProperty(kPendingAppleSync);
+            _appleSyncRequested = pending == kOSBooleanTrue;
+            _syncEnabled = pending != kOSBooleanFalse;
+            if (pending) interface->removeProperty(kPendingAppleSync);
+        }
         _awdlInterface = interface;
         const uint64_t now = nowUS();
         _vifEnabledUS = now;
@@ -240,7 +250,8 @@ void RTW88AWDLManager::setVirtualInterface(UInt role, IO80211VirtualInterface *i
 void RTW88AWDLManager::clearVirtualInterface(IO80211VirtualInterface *interface)
 {
     return awdlGated<void>(_workLoop, _owner, [&]() -> void {
-    if (_awdlInterface == interface) {
+    if (interface && _awdlInterface == interface) {
+        _appleSyncRequested = false;
         if (_backend) _backend->restoreSTAChannelAfterAWDL();
         _awdlInterface = nullptr;
         if (_timer) _timer->cancelTimeout();
@@ -535,23 +546,41 @@ void RTW88AWDLManager::arm(uint32_t milliseconds)
         _timer->setTimeoutMS(milliseconds);
 }
 
-void RTW88AWDLManager::setSyncEnabled(bool enabled)
+bool RTW88AWDLManager::appleSyncRequested(IO80211VirtualInterface *interface)
 {
-    return awdlGated<void>(_workLoop, _owner, [&]() -> void {
-    _syncEnabled = enabled;
-    publishStats();
-    if (!enabled) {
-        if (_backend) _backend->restoreSTAChannelAfterAWDL();
-        if (_timer) _timer->cancelTimeout();
-        flushData();
-        flushActions();
-    } else {
-        const uint64_t now = nowUS();
-        if (!_airTemplate) _fallbackDeadlineUS = now + 1500000ULL;
-        _nextActionUS = _nextPSFUS = 0;
-        _lastMIFEAW = 0; _lastMIFEAWValid = false;
-        arm(_airTemplate ? 1 : 25);
-    }
+    return awdlGated<bool>(_workLoop, _owner, [&]() -> bool {
+        if (_awdlInterface)
+            return (!interface || interface == _awdlInterface) && _appleSyncRequested;
+        return interface && interface->getProperty(kPendingAppleSync) == kOSBooleanTrue;
+    });
+}
+
+IOReturn RTW88AWDLManager::setSyncEnabled(IO80211VirtualInterface *interface, bool enabled)
+{
+    return awdlGated<IOReturn>(_workLoop, _owner, [&]() -> IOReturn {
+        if (!interface || (_awdlInterface && _awdlInterface != interface))
+            return kIOReturnNotReady;
+        if (!_awdlInterface) {
+            // Keep early requests on their issuing VIF until a successful bind.
+            return interface->setProperty(kPendingAppleSync, enabled ? kOSBooleanTrue : kOSBooleanFalse)
+                ? kIOReturnSuccess : kIOReturnNoMemory;
+        }
+        _appleSyncRequested = enabled;
+        _syncEnabled = enabled;
+        publishStats();
+        if (!enabled) {
+            if (_backend) _backend->restoreSTAChannelAfterAWDL();
+            if (_timer) _timer->cancelTimeout();
+            flushData();
+            flushActions();
+        } else {
+            const uint64_t now = nowUS();
+            if (!_airTemplate) _fallbackDeadlineUS = now + 1500000ULL;
+            _nextActionUS = _nextPSFUS = 0;
+            _lastMIFEAW = 0; _lastMIFEAWValid = false;
+            arm(_airTemplate ? 1 : 25);
+        }
+        return kIOReturnSuccess;
     });
 }
 
@@ -1082,6 +1111,7 @@ void RTW88AWDLManager::publishStats()
         !_airTemplate ? "waiting-io80211" :
         !_nativeSchedule ? "io80211-template" :
         (_appleControlMask & ~kAppleCtlVIF) ? "hybrid-bootstrap" : "driver-bootstrap";
+    _owner->setProperty("AWDL_SYNC_REQUESTED", _appleSyncRequested ? kOSBooleanTrue : kOSBooleanFalse);
     _owner->setProperty("AWDL_SCHEDULER_STATE", plane);
     _owner->setProperty("AWDL_CONTROL_PLANE", plane);
     _owner->setProperty("AWDL_SCHEDULER_VERSION", "2.0.0-beta.16-tx-handoff");

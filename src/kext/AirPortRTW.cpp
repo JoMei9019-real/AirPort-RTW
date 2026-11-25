@@ -171,13 +171,13 @@ IOWorkLoop *AirPortRTW::getWorkLoop() const
 bool AirPortRTW::start(IOService *provider)
 {
     setProperty("PM_DEFERRED_RX_FIX", "1.0.2-beta.1");
-    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.25");
+    setProperty("AWDL_BETA_BUILD", "2.0.0-beta.26");
     setProperty("STA_R10_TXQ_GATE", kOSBooleanTrue);
     setProperty("STA_R11_TXQ_STALL_GATE", kOSBooleanTrue);
     setProperty("STA_V19_DARWIN_ENOTSUP_FIX", kOSBooleanTrue);
     setProperty("STA_V20_POWERSAVE_PREFLIGHT_FIX", kOSBooleanTrue);
     IOLog("AirPortRTW: start\n");
-    setProperty("DriverBuild", "2.0.0-beta.25");
+    setProperty("DriverBuild", "2.0.0-beta.26");
     setProperty("RX_DEFER_MODE", "controller-workloop");
     _pciDev = OSDynamicCast(IOPCIDevice, provider);
     if (!_pciDev) {
@@ -369,7 +369,7 @@ bool AirPortRTW::start(IOService *provider)
     if(_btmTimer && _workLoop->addEventSource(_btmTimer)!=kIOReturnSuccess) {
         _btmTimer->release();_btmTimer=nullptr;
     }
-    IOLog("AirPortRTW: 2.0.0-beta.25 WPA3-Personal\n");
+    IOLog("AirPortRTW: 2.0.0-beta.26 WPA3-Personal\n");
     IOLog("AirPortRTW: device started successfully\n");
     return true;
 }
@@ -2796,7 +2796,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         if (request_number == APPLE80211_IOC_DRIVER_VERSION) {
             char label[sizeof(d->string)] = {};
             strlcpy(label, chip, sizeof(label));
-            strlcat(label, " (AirPortRTW 2.0.0-beta.25)", sizeof(label));
+            strlcat(label, " (AirPortRTW 2.0.0-beta.26)", sizeof(label));
             d->string_len = (uint16_t)strlcpy(d->string, label, sizeof(d->string));
         } else {
             d->string_len = (uint16_t)strlcpy(d->string, chip, sizeof(d->string));
@@ -2830,7 +2830,7 @@ __attribute__((__noinline__)) SInt32 AirPortRTW::handleNativeRequest(
         auto *d = static_cast<apple80211_awdl_sync_enabled *>(data);
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
-        d->enabled = _awdlManager->syncEnabled() ? 1 : 0;
+        d->enabled = _awdlManager->appleSyncRequested() ? 1 : 0;
         setProperty("AWDL_SYNC_GET_PRIMARY_ENABLED", (uint64_t)d->enabled, 32);
         return kIOReturnSuccess;
     }

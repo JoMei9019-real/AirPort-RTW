@@ -1,6 +1,6 @@
 /* Modified by X1REN41L on 2026-10-02 for AirPortRTW 1.0.0; see the repository NOTICE.md. */
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
- * AirPortRTW 2.0.0-beta.25 — Ventura IO80211 AWDL/P2P TX handoff.
+ * AirPortRTW 2.0.0-beta.26 — Ventura IO80211 AWDL/P2P TX handoff.
  *
  * This file deliberately implements only payload ABIs present in the pinned
  * kernel SDK. Verified Ventura payload ABIs are handled explicitly. Unknown AWDL/P2P
@@ -509,15 +509,16 @@ SInt32 AirPortRTW::handleAWDLVirtualRequest(UInt request_type, int request_numbe
 
     case APPLE80211_IOC_AWDL_SYNC_ENABLED: {
         if (!data) return kIOReturnBadArgument;
+        if (role != APPLE80211_VIF_AWDL) return kIOReturnUnsupported;
+        if (!_awdlManager) return kIOReturnNotReady;
         auto *d = (apple80211_awdl_sync_enabled *)data;
         if (set) {
-            if (!_awdlManager) return kIOReturnNotReady;
-            _awdlManager->setSyncEnabled(d->enabled != 0);
-            IOLog("AirPortRTW: AWDL sync enabled=%d\n", _awdlManager->syncEnabled());
+            if (d->enabled > 1) return kIOReturnBadArgument;
+            return _awdlManager->setSyncEnabled(interface, d->enabled != 0);
         } else {
             bzero(d, sizeof(*d));
             d->version = APPLE80211_VERSION;
-            d->enabled = (_awdlManager && _awdlManager->syncEnabled()) ? 1 : 0;
+            d->enabled = _awdlManager->appleSyncRequested(interface) ? 1 : 0;
             setProperty("AWDL_SYNC_GET_VIF_ENABLED", (uint64_t)d->enabled, 32);
         }
         return kIOReturnSuccess;
