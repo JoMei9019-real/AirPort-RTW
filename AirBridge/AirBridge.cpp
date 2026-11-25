@@ -71,6 +71,8 @@ class RTWAirBridge : public IOService {
     bool familyReady = false;
     bool allowPeerAdd = false;
     IOReturn configure(bool enabled, bool admit);
+    uint32_t actionCalls = 0;
+    IOReturn reportAction(uint32_t call, const char *stage, IOReturn status);
     uint64_t nextAdmissionUS = 0;
 public:
     bool start(IOService *provider) override;
@@ -81,6 +83,8 @@ OSDefineMetaClassAndStructors(RTWAirBridge, IOService)
 bool RTWAirBridge::start(IOService *provider)
 {
     if (!IOService::start(provider)) return false;
+    setProperty("AirBridgeActionStage", "awaiting-action");
+    setProperty("AirBridgeActionSample", static_cast<uint64_t>(0), 32);
     const bool enabled = provider->getProperty("AirBridgeNativeRequested") == kOSBooleanTrue;
     configure(enabled, provider->getProperty("AirBridgePeerAddRequested") == kOSBooleanTrue);
     return true;
@@ -94,6 +98,16 @@ IOReturn RTWAirBridge::configure(bool enabled, bool admit)
                 allowPeerAdd ? "peer-admission" : "observe");
     setProperty("AirBridgeFamilyVerified", familyReady ? kOSBooleanTrue : kOSBooleanFalse);
     return enabled && !familyReady ? kIOReturnUnsupported : kIOReturnSuccess;
+}
+
+// Publish the first call and a bounded sample on busy radios.
+IOReturn RTWAirBridge::reportAction(uint32_t call, const char *stage, IOReturn status)
+{
+    if (call == 1 || (call % 32) == 0) {
+        setProperty("AirBridgeActionStage", stage);
+        setProperty("AirBridgeActionSample", static_cast<uint64_t>(call), 32);
+    }
+    return status;
 }
 
 IOReturn RTWAirBridge::callPlatformFunction(const OSSymbol *name, bool wait,
@@ -112,26 +126,35 @@ IOReturn RTWAirBridge::callPlatformFunction(const OSSymbol *name, bool wait,
     }
     if (!name || !name->isEqualTo(kCategory))
         return IOService::callPlatformFunction(name, wait, arg1, arg2, controller, arg4);
+    const uint32_t call = __atomic_add_fetch(&actionCalls, 1U, __ATOMIC_RELAXED);
     const auto *req = static_cast<const ActionRequest *>(arg1);
     auto *out = static_cast<ActionResult *>(arg2);
     IOService *owner = getProvider();
-    if (!familyReady || isInactive() || !owner || owner != controller ||
-        !req || !out || req->abiVersion != kABIVersion || req->size != sizeof(*req) ||
-        !req->vif || !req->packet || !req->metadata || !owner->getWorkLoop() ||
-        !owner->getWorkLoop()->inGate()) return kIOReturnNotReady;
+    if (!familyReady || isInactive() || !owner || owner != controller)
+        return reportAction(call, "controller-unavailable", kIOReturnNotReady);
+    if (!req || !out || req->abiVersion != kABIVersion || req->size != sizeof(*req) ||
+        !req->vif || !req->packet || !req->metadata)
+        return reportAction(call, "request-invalid", kIOReturnNotReady);
+    if (!owner->getWorkLoop() || !owner->getWorkLoop()->inGate())
+        return reportAction(call, "outside-workloop", kIOReturnNotReady);
     const auto *vifMeta = req->vif->getMetaClass();
     if (strcmp(vifMeta->getClassName(), "IO80211P2PInterface") ||
-        vifMeta->getClassSize() < 0xb0 + sizeof(void *) || vifController(req->vif) != owner)
-        return kIOReturnUnsupported;
+        vifMeta->getClassSize() < 0xb0 + sizeof(void *))
+        return reportAction(call, "vif-layout", kIOReturnUnsupported);
+    if (vifController(req->vif) != owner)
+        return reportAction(call, "vif-controller", kIOReturnUnsupported);
     const auto *abi = OSDynamicCast(OSNumber, req->vif->getProperty(kABIProperty));
-    if (!abi || abi->unsigned32BitValue() != kABIVersion) return kIOReturnUnsupported;
+    if (!abi || abi->unsigned32BitValue() != kABIVersion)
+        return reportAction(call, "vif-abi", kIOReturnUnsupported);
     auto *peer = readField<OSObject *>(req->vif, 0xb0);
-    if (!peer || strcmp(peer->getMetaClass()->getClassName(), "IO80211AWDLPeerManager") ||
-        peer->getMetaClass()->getClassSize() != 0xc528) return kIOReturnNotReady;
-
-    if (!(readField<uint32_t>(peer, 0x8528) & 2) || !readField<uint32_t>(peer, 0xcd4)) {
-        return kIOReturnNotReady;
-    }
+    if (!peer) return reportAction(call, "peer-manager-missing", kIOReturnNotReady);
+    if (strcmp(peer->getMetaClass()->getClassName(), "IO80211AWDLPeerManager") ||
+        peer->getMetaClass()->getClassSize() != 0xc528)
+        return reportAction(call, "peer-manager-layout", kIOReturnNotReady);
+    if (!(readField<uint32_t>(peer, 0x8528) & 2))
+        return reportAction(call, "peer-sync-inactive", kIOReturnNotReady);
+    if (!readField<uint32_t>(peer, 0xcd4))
+        return reportAction(call, "peer-sync-state-zero", kIOReturnNotReady);
     ActionMetadata meta = *req->metadata;
     const uint32_t stamp = OSSwapHostToBigInt32(static_cast<uint32_t>(req->handoffUS));
     memcpy(meta.reserved3, &stamp, sizeof(stamp));
@@ -156,5 +179,5 @@ IOReturn RTWAirBridge::callPlatformFunction(const OSSymbol *name, bool wait,
         if (found && matchesMAC(peer, found, meta.source) == 1) out->flags |= kNativePeerMatched;
         unlockPeer(peer);
     }
-    return kIOReturnSuccess;
+    return reportAction(call, "parser-called", kIOReturnSuccess);
 }
