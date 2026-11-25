@@ -11,12 +11,14 @@ fi
 rm -rf MacKernelSDK
 cp -R .deps/rtl88wifi-reference/driver/RTL88WiFi/MacKernelSDK ./MacKernelSDK
 
-if [ ! -d rtw88-stable/.git ]; then
-  git clone https://github.com/thegwchr/rtw88-stable.git rtw88-stable
-fi
-
-# Use the reviewed PCIe-capable RTL8814A core.
+# Fetch only the reviewed PCIe-capable RTL8814A revision.
 RTW88_REV=d029a677c49266fad86750714eb5612becd134d3
+if [ ! -d rtw88-stable/.git ]; then
+  git init -q rtw88-stable
+fi
+if ! git -C rtw88-stable cat-file -e "$RTW88_REV^{commit}" 2>/dev/null; then
+  git -C rtw88-stable fetch --depth=1 https://github.com/vansh101hz-blip/stabler88w.git "$RTW88_REV"
+fi
 git -C rtw88-stable checkout --detach "$RTW88_REV"
 
 mkdir -p firmware
