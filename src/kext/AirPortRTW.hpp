@@ -271,6 +271,13 @@ private:
     bool ensureAWDLVirtualInterface();
 
     apple80211_scan_result _scanResult = {};
+    /* SCAN_RESULT and CURRENT_NETWORK sit at the end of a deep IO80211/ioctl
+     * call chain.  Keep the large BSS copies in the driver object instead of
+     * the kernel stack: a 2 KB frame here exhausted the 16 KB stack on
+     * Ventura and produced a double fault in handleSCAN_RESULT. */
+    RTW88BSS _scanBSS = {};
+    RTW88BSS _scanCurrentBSS = {};
+    RTW88BSS _currentBSS = {};
     uint32_t _scanCursor = 0;
     uint32_t _authLower = APPLE80211_AUTHTYPE_OPEN;
     uint32_t _authUpper = APPLE80211_AUTHTYPE_NONE;

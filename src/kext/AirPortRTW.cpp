@@ -3554,14 +3554,18 @@ IOReturn AirPortRTW::handleSCAN_RESULT(struct apple80211_scan_result **out)
     if (_scanInProgress && version_major < 23)
         return kIOReturnBusy;
 
-    RTW88BSS b = {};
+    /* Keep this off the stack: SCAN_RESULT is called through a deep IO80211
+     * path, and a full RTW88BSS local exhausted the kernel stack on Ventura. */
+    RTW88BSS &b = _scanBSS;
+    bzero(&b, sizeof(b));
     IOReturn ret = _ieee80211->copyScanBSS(_scanCursor, &b);
     /* Sonoma: CoreWiFi lists a BSS with an empty or all-zero SSID as a
      * separate "Hidden Network..." row. Hidden-network joining through that
      * row is not supported here (no directed probe), so skip such entries,
      * except the BSS we are currently associated with. */
     if (version_major >= 23) {
-        RTW88BSS cur = {};
+        RTW88BSS &cur = _scanCurrentBSS;
+        bzero(&cur, sizeof(cur));
         bool haveCur = _ieee80211->copyCurrentBSS(&cur) == kIOReturnSuccess;
         while (ret == kIOReturnSuccess && bssIsNameless(b) &&
                !(haveCur && memcmp(cur.bssid, b.bssid, 6) == 0)) {
@@ -3619,7 +3623,8 @@ IOReturn AirPortRTW::handleCURRENT_NETWORK(struct apple80211_scan_result *out)
     static_assert(sizeof(apple80211_scan_result) == 1164, "Ventura CURRENT_NETWORK ABI changed");
     if (!out) return kIOReturnBadArgument;
 
-    RTW88BSS current = {};
+    RTW88BSS &current = _currentBSS;
+    bzero(&current, sizeof(current));
     IOReturn ret = _ieee80211->copyCurrentBSS(&current);
     if (ret != kIOReturnSuccess) {
         /* CoreWiFi/locationd asks selector 103 aggressively.  Do not turn a
