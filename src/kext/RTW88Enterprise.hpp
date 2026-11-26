@@ -73,6 +73,31 @@ inline bool eapol(const uint8_t *p, size_t n, uint8_t &type) {
 inline bool dataAllowed(bool enterprise, bool authorized, uint16_t etherType) {
     return !enterprise || authorized || etherType == 0x888e;
 }
+// RX owns exchange creation and completion. Firmware TX status can arrive on
+// another workloop, including after a reconnect to the same BSSID.
+class M4Delivery {
+    uint64_t generation = 0;
+    uint64_t status = 0;  // zero = idle, even = waiting, odd = acknowledged
+public:
+    void reset() { __atomic_store_n(&status, uint64_t(0), __ATOMIC_RELEASE); }
+    uint64_t ticket() {
+        uint64_t current = __atomic_load_n(&status, __ATOMIC_ACQUIRE);
+        if (current) return current & ~uint64_t(1);
+        generation += 2;
+        __atomic_store_n(&status, generation, __ATOMIC_RELEASE);
+        return generation;
+    }
+    bool acknowledge(uint64_t ticket, bool acked) {
+        if (!ticket || !acked) return false;
+        return __atomic_compare_exchange_n(&status, &ticket, ticket | 1, false,
+                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+    bool consume() {
+        uint64_t current = __atomic_load_n(&status, __ATOMIC_ACQUIRE);
+        return (current & 1) && __atomic_compare_exchange_n(&status, &current, uint64_t(0),
+                                                            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+};
 enum class Auth { Invalid, Open, Personal, Enterprise };
 inline Auth auth(uint32_t lower, uint32_t upper, uint32_t keylen,
                  const uint8_t *ie, size_t capacity) {

@@ -595,7 +595,7 @@ bool RTW88IEEE80211::init(RTW88RxDelegate *delegate, struct pci_dev *pci)
     _rxBaLock = IOLockAlloc();
     if (!_rxBaLock) return false;
     IOWorkLoop *rxwl = _parent ? _parent->getRxWorkLoop() : nullptr;
-    if (!rxwl) return false;
+    if (!rxwl || !initEnterpriseM4Timer(rxwl)) return false;
     _reorderTimer = IOTimerEventSource::timerEventSource(this,
         &RTW88IEEE80211::reorderTimerFired);
     if (!_reorderTimer) return false;
@@ -648,7 +648,7 @@ bool RTW88IEEE80211::init(RTW88PCIDevice *dev, struct pci_dev *pci)
     _rxBaLock = IOLockAlloc();
     if (!_rxBaLock) return false;
     IOWorkLoop *rxwl = _parent ? _parent->getRxWorkLoop() : nullptr;
-    if (!rxwl) return false;
+    if (!rxwl || !initEnterpriseM4Timer(rxwl)) return false;
     _reorderTimer = IOTimerEventSource::timerEventSource(this,
         &RTW88IEEE80211::reorderTimerFired);
     if (!_reorderTimer) return false;
@@ -656,6 +656,15 @@ bool RTW88IEEE80211::init(RTW88PCIDevice *dev, struct pci_dev *pci)
 
     IOLog("rtw88: RTW88IEEE80211 initialized\n");
     return true;
+}
+
+bool RTW88IEEE80211::initEnterpriseM4Timer(IOWorkLoop *rxwl)
+{
+    _enterpriseM4Timer = IOTimerEventSource::timerEventSource(this,
+        [](OSObject *owner, IOTimerEventSource *) {
+            static_cast<RTW88IEEE80211 *>(owner)->finishEnterpriseM4();
+        });
+    return _enterpriseM4Timer && rxwl->addEventSource(_enterpriseM4Timer) == kIOReturnSuccess;
 }
 
 void RTW88IEEE80211::free()
@@ -667,6 +676,13 @@ void RTW88IEEE80211::free()
     /* The compat layer keeps a raw callback context.  Clear it before this
      * object can disappear so a late RX/TX completion cannot call freed memory. */
     rtw88_set_hw_callbacks(nullptr, nullptr);
+    if (_enterpriseM4Timer) {
+        _enterpriseM4Timer->cancelTimeout();
+        if (IOWorkLoop *wl = _enterpriseM4Timer->getWorkLoop())
+            wl->removeEventSource(_enterpriseM4Timer);
+        _enterpriseM4Timer->release();
+        _enterpriseM4Timer = nullptr;
+    }
     _roamSwitch.clear();
     clearKeys();
     releaseSta();
@@ -699,6 +715,7 @@ void RTW88IEEE80211::free()
 
 void RTW88IEEE80211::clearKeys()
 {
+    _enterpriseM4.reset();
     clearWPA3();
     resetRoamingState();
     if (_powered && _hw && _hw->ops && _hw->ops->set_key) {
@@ -2435,6 +2452,10 @@ void RTW88IEEE80211::txStatus(struct sk_buff *skb)
     struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
     if (!(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS))
         return;
+    // The firmware report callback holds the report queue lock. Publish the
+    // receipt here and finish the handshake on the RX workloop after unlock.
+    if (_enterpriseM4.acknowledge(skb->enterprise_m4_ticket, info->flags & IEEE80211_TX_STAT_ACK))
+        _enterpriseM4Timer->setTimeoutMS(0);
     observeBtmTx(skb->data,skb->len,(info->flags&IEEE80211_TX_STAT_ACK)!=0);
     if(skb->len>=32 && skb->data[0]==0xd0 && skb->data[24]==5 && skb->data[25]==1 &&
        !memcmp(skb->data+4,_targetBSS.bssid,6)) {
@@ -4308,6 +4329,7 @@ void RTW88IEEE80211::handleEAPOL(const uint8_t *data, uint32_t len)
             IOLog("rtw88: stale M1 dropped\n");
             return;
         }
+        if (_enterprise) _enterpriseM4.reset();
         bool fresh = !_snonceValid || memcmp(_anonce, data + 17, 32) != 0;
         if (fresh) read_random(_snonce, 32);
         memcpy(_anonce, data + 17, 32);
@@ -4382,6 +4404,7 @@ void RTW88IEEE80211::handleEAPOL(const uint8_t *data, uint32_t len)
         }
         memcpy(_replayCtr, data + 9, 8);
 
+        if (_enterprise && !duplicate) _enterpriseAuthorized = false;
         if (!installKey(&_ptkConf, true, 0, WLAN_CIPHER_SUITE_CCMP,
                         _ptk + 32, 16)) {
             roamTrace("ptk-install-failed");
@@ -4397,30 +4420,53 @@ void RTW88IEEE80211::handleEAPOL(const uint8_t *data, uint32_t len)
         roamTrace("data-keys-installed");
 
         if (_enterprise && !_gtkConf) return;
+        uint64_t m4Ticket = 0;
+        if (_enterprise && (!duplicate || !_enterpriseAuthorized)) {
+            if (memcmp(_installedM3ReplayCtr, _replayCtr, 8)) _enterpriseM4.reset();
+            m4Ticket = _enterpriseM4.ticket();
+        }
         memcpy(_installedM3ReplayCtr, _replayCtr, 8);
         _m3KeysInstalled = true;
         _handshakePending = false;
-        if (!sendEAPOLKey(4, _replayCtr, false, false, true)) {
+        if (!sendEAPOLKey(4, _replayCtr, false, false, true, m4Ticket)) {
             roamTrace("eapol-m4-tx-failed");
             IOLog("rtw88: M4 submission failed; awaiting M3 retry\n");
             return;
         }
         IOLog("rtw88: M4 submitted duplicate=%d; AP acceptance unverified\n", duplicate);
         roamTrace("eapol-m4-submitted-ap-unverified",unsigned(duplicate));
-        _enterpriseAuthorized = _enterprise;
+        // The M1 deadline bounds retries, failed submissions and lost reports.
+        // A duplicate on an already-open port only needs another M4.
+        if (_enterprise) return;
         _associatedVisible = true;
         _state = RTW88_STATE_CONNECTED;
         _timer->cancelTimeout();
         if (_parent)
             _parent->setLinkStatus(kIONetworkLinkActive | kIONetworkLinkValid);
-        if (_enterprise && _delegate) _delegate->rtw88Event(kRTW88EventHandshakeDone, nullptr);
         if (!duplicate) startTxAggregation();   /* keys are installed — negotiate uplink A-MPDU */
         IOLog("rtw88: WPA2 connected! gtk_len=%u gtk_idx=%u\n", gtk_len, gtk_idx);
     }
 }
 
+void RTW88IEEE80211::finishEnterpriseM4()
+{
+    if (!_enterpriseM4.consume() || !_enterprise || !_powered || !_sta ||
+        authenticationCancelled() || _state != RTW88_STATE_HANDSHAKING ||
+        _handshakePending || !_m3KeysInstalled || !_ptkConf || !_gtkConf)
+        return;
+
+    // A MAC ACK confirms delivery of M4. The AP sends no fifth EAPOL message.
+    _enterpriseAuthorized = true;
+    _state = RTW88_STATE_CONNECTED;
+    _timer->cancelTimeout();
+    roamTrace("enterprise-m4-acked");
+    if (_parent) _parent->setLinkStatus(kIONetworkLinkActive | kIONetworkLinkValid);
+    if (_delegate) _delegate->rtw88Event(kRTW88EventHandshakeDone, nullptr);
+    startTxAggregation();
+}
+
 bool RTW88IEEE80211::sendEAPOLKey(int step, const uint8_t *replay_counter,
-                                    bool install, bool ack, bool mic)
+                                    bool install, bool ack, bool mic, uint64_t m4Ticket)
 {
     uint8_t frame[512] = {};
     uint8_t *eth = frame;
@@ -4485,7 +4531,7 @@ bool RTW88IEEE80211::sendEAPOLKey(int step, const uint8_t *replay_counter,
      * TK as ordinary supplicants do. Pairwise M2/M4 keep the proven path. */
     _eapolTxProtect = (step == 5);
     _internalEapolTx = true;
-    bool submitted = txDataFrame(m);
+    bool submitted = txDataFrame(m, m4Ticket);
     _internalEapolTx = false;
     _eapolTxProtect = false;
     IOLog("rtw88: EAPOL %s%d submission=%d len=%u\n", step == 5 ? "G" : "M",
@@ -6100,15 +6146,15 @@ void RTW88IEEE80211::deliverAWDLEthernet(const uint8_t *da, const uint8_t *sa,
     _parent->injectRxAWDLFrame(m);
 }
 
-bool RTW88IEEE80211::txDataFrame(mbuf_t m)
+bool RTW88IEEE80211::txDataFrame(mbuf_t m, uint64_t m4Ticket)
 {
-    const int result = submitDataFrame(m);
+    const int result = submitDataFrame(m, m4Ticket);
     if (m) mbuf_freem(m);
     return result == 0;
 }
 
 // Borrows the Ethernet mbuf. The HCI bridge consumes the newly built skb on every path.
-int RTW88IEEE80211::submitDataFrame(mbuf_t m)
+int RTW88IEEE80211::submitDataFrame(mbuf_t m, uint64_t m4Ticket)
 {
     if (!m || !_powered || !_hw || !_hw->ops || !_hw->ops->tx || !_vif || !_sta) {
         return -EINVAL;
@@ -6228,6 +6274,7 @@ int RTW88IEEE80211::submitDataFrame(mbuf_t m)
     skb_set_queue_mapping(skb, IEEE80211_AC_BE);
     skb->priority = 0;
     skb->protocol = cpu_to_be16(ethertype);
+    skb->enterprise_m4_ticket = m4Ticket;
 
     struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
     memset(info, 0, sizeof(*info));

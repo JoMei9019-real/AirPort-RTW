@@ -25,6 +25,7 @@ methods = ''.join(method(s) for s in (
     'IOReturn RTW88IEEE80211::cmdInstallExternalKey(',
     'UInt32 RTW88IEEE80211::outputPacket(',
     'void RTW88IEEE80211::deliverEthernet(',
+    'void RTW88IEEE80211::finishEnterpriseM4()',
     'void RTW88IEEE80211::handleEAPOL('))
 # Exercise production routing decisions as well as the reusable policy.
 assert 'if (_pmkProvided) handleEAPOL(llc + 8' in source
@@ -89,6 +90,8 @@ struct RTW88IEEE80211 {
  bool _externalSupplicant=true,_wpa2=true,_externalPTKInstalled=false,_externalGTKInstalled=false;
  bool _pmkProvided=false,_internalEapolTx=false,_rxCcmpIvSkipLogged=false,_snonceValid=false;
  bool _m3KeysInstalled=false,_handshakePending=false,cancelled=false,_manualScanOnHomeChannel=false;
+ RTW88Enterprise::M4Delivery _enterpriseM4; uint64_t ticket=0;
+ void finishEnterpriseM4();
  bool m4Submit=true;Timer timer;Timer *_timer=&timer;Delegate delegate;Delegate *_delegate=&delegate;
  uint8_t _macAddr[6]={};
  State _state=RTW88_STATE_CONNECTED,_scanReturnState=RTW88_STATE_IDLE;
@@ -104,7 +107,11 @@ struct RTW88IEEE80211 {
  bool installKey(ieee80211_key_conf **p,bool,uint8_t idx,uint32_t,const uint8_t*k,uint8_t n){
   if(!*p)*p=(ieee80211_key_conf*)calloc(1,sizeof(**p));
   assert(n<=32);memcpy((*p)->key,k,n);(*p)->keylen=n;(*p)->keyidx=idx;return true;}
- bool sendEAPOLKey(int step,const uint8_t*,bool,bool,bool){return step!=4 || m4Submit;}
+ bool sendEAPOLKey(int step,const uint8_t*,bool,bool,bool,uint64_t token=0){
+  if(step!=4)return true;
+  ticket=m4Submit?token:0;
+  return m4Submit;
+ }
  void handleEAPOL(const uint8_t*,uint32_t);
  void startTxAggregation(){}
  void resetRoamingState(){}
@@ -198,6 +205,18 @@ int main(){
  b.handleEAPOL(m3.data(),m3.size());assert(!b.externalKeysReady()); // M4 not submitted
  assert(parent.injected==1&&b.delegate.done==0);
  b.m4Submit=true;b.handleEAPOL(m3.data(),m3.size());
+ assert(b.ticket && !b.externalKeysReady() && !b.delegate.done);
+ assert(!b._enterpriseM4.acknowledge(b.ticket,false));
+ b.finishEnterpriseM4();  // A missing or negative report keeps the port closed.
+ b.deliverEthernet(zero,zero,0x800,identity,sizeof(identity));assert(parent.injected==1);
+ assert(!b.externalKeysReady() && b.outputPacket(packet(0x800))==kIOReturnOutputDropped);
+ uint64_t old=b.ticket;
+ b.handleEAPOL(m3.data(),m3.size());assert(b.ticket==old);
+ ++m3[16];b.handleEAPOL(m3.data(),m3.size());assert(b.ticket!=old);
+ assert(!b._enterpriseM4.acknowledge(old,true));
+ assert(b._enterpriseM4.acknowledge(b.ticket,true));b.finishEnterpriseM4();
+ b.finishEnterpriseM4();
+ b.handleEAPOL(m3.data(),m3.size());assert(!b.ticket); // Already completed.
  assert(b.externalKeysReady()&&b._state==RTW88_STATE_CONNECTED&&b.delegate.done==1);
  assert(b.outputPacket(packet(0x800))==0);
  auto retained=packet(0x800);
@@ -215,17 +234,26 @@ int main(){
  assert(events[RTW88Lifecycle::Submitted]==submitted+1);
  b.writeResult=0;
  b.deliverEthernet(zero,zero,0x800,identity,sizeof(identity));assert(parent.injected==2);
+ // Rekey followed by disconnect with an ACK already queued for delivery.
+ m1[16]=4;m3[16]=5;
+ b.handleEAPOL(m1.data(),m1.size());b.handleEAPOL(m3.data(),m3.size());
+ assert(b.ticket&&!b.externalKeysReady()&&!b._enterpriseM4.acknowledge(old,true));
+ assert(b._enterpriseM4.acknowledge(b.ticket,true));
  memset(b._password,0x5a,sizeof(b._password));b.clearKeys();
+ b.finishEnterpriseM4();assert(!b.externalKeysReady()&&b.delegate.done==1);
+ assert(!b._enterpriseM4.acknowledge(b.ticket,true));
  for(auto x:b._pmk)assert(x==0);
  for(auto x:b._password)assert(x==0);
  assert(!b._enterprise&&!b._enterpriseAuthorized&&!b._pmkProvided&&!b._ptkConf&&!b._gtkConf);
  assert(b.installEnterprisePMKGated(pmk,32,zero)==kIOReturnNotReady);
  // Existing Personal/open data behavior and external callback order preserved.
- b._externalSupplicant=false;assert(b.outputPacket(packet(0x800))==0);
- b._externalSupplicant=true;
- assert(b.cmdInstallExternalKey(false,1,Ccmp,pmk,16)==0);assert(!b.externalKeysReady());
- assert(b.cmdInstallExternalKey(true,0,Ccmp,pmk,16)==0);assert(b.externalKeysReady());
- b.clearKeys();
+ RTW88IEEE80211 external;
+ external._hw=&hw;external._parent=&parent;external._enterprise=false;
+ external._externalSupplicant=false;assert(external.outputPacket(packet(0x800))==0);
+ external._externalSupplicant=true;
+ assert(external.cmdInstallExternalKey(false,1,Ccmp,pmk,16)==0);assert(!external.externalKeysReady());
+ assert(external.cmdInstallExternalKey(true,0,Ccmp,pmk,16)==0);assert(external.externalKeysReady());
+ external.clearKeys();
  // Internal WPA2-Personal must stay invisible through M1, invalid M3 and
  // failed M4. Only a successfully submitted M4 may publish the new link.
  RTW88IEEE80211 personal;personal._enterprise=false;personal._externalSupplicant=false;

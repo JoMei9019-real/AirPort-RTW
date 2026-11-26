@@ -27,6 +27,8 @@ struct sk_buff {
     u16       queue_mapping;  /* AC index — selects the hw TX ring (ac_to_hwq) */
     u32       ip_summed;
 
+    u64       enterprise_m4_ticket; /* zero except on a tracked EAPOL M4 */
+
     /* Control block — 80 bytes; mac80211.h asserts TX metadata fits. */
     char      cb[80] __attribute__((aligned(8)));
 

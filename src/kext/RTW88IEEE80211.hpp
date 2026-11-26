@@ -20,6 +20,7 @@
 #include <kern/thread_call.h>
 #include "RTW88Roaming.hpp"
 #include "RTW88WPA3.hpp"
+#include "RTW88Enterprise.hpp"
 #include "RTW88RRM.hpp"
 #include "RTW88Lifecycle.hpp"
 #include "RTW88RoamSwitch.hpp"
@@ -409,7 +410,7 @@ private:
     void      handleEAPOL(const uint8_t *data, uint32_t len);
     bool      deriveKeys(const uint8_t *anonce, const uint8_t *snonce);
     bool      sendEAPOLKey(int step, const uint8_t *replay_counter,
-                            bool install, bool ack, bool mic);
+                            bool install, bool ack, bool mic, uint64_t m4Ticket = 0);
 
     /* A-MPDU BlockAck (aggregation) negotiation */
     bool      htAllowed() const;   /* HT/VHT/A-MPDU usable on this link? */
@@ -438,8 +439,8 @@ private:
     bool      txMgmtFrame(const uint8_t *frame, uint32_t len);
     bool      txNullFunc(bool powerSave);
     bool      txProbeRequest();
-    int       submitDataFrame(mbuf_t m);
-    bool      txDataFrame(mbuf_t m);
+    int       submitDataFrame(mbuf_t m, uint64_t m4Ticket = 0);
+    bool      txDataFrame(mbuf_t m, uint64_t m4Ticket = 0);
     bool      tryDeliverAWDLDataFrame(struct sk_buff *skb);
     void      deliverAWDLEthernet(const uint8_t *da, const uint8_t *sa,
                                   uint16_t ethertype,
@@ -499,6 +500,10 @@ private:
     uint32_t            _txBatchPending = 0;
     uint32_t            _txBatchFrames = 0;
     uint32_t            _txBatchFlushes = 0;
+    RTW88Enterprise::M4Delivery _enterpriseM4;
+    IOTimerEventSource *_enterpriseM4Timer = nullptr;
+    bool initEnterpriseM4Timer(IOWorkLoop *rxwl);
+    void finishEnterpriseM4();
     bool                _enterpriseAuthorized = false;
     bool                _internalEapolTx = false;
     bool                _externalPTKInstalled = false;
